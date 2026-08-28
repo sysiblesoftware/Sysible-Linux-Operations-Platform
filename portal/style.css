@@ -1,0 +1,56 @@
+/* Sysible Operations Platform — portal. Matches the suite: brand green on an
+   engineering-dark ground, with a light theme toggle. */
+:root {
+  --bg: #0d1117; --panel: #131923; --panel2: #1a212d; --line: #26303f;
+  --text: #e6edf5; --muted: #93a1b5; --faint: #6f7d92;
+  --accent: #43a047; --accent2: #5580ee; --green: #4caf5a; --red: #e5534b; --amber: #e0a83b;
+  --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 30px rgba(0,0,0,.30);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+:root[data-theme="light"] {
+  --bg: #eef1f6; --panel: #ffffff; --panel2: #f3f5f9; --line: #dbe1ea;
+  --text: #1b2431; --muted: #5b6675; --faint: #8794a4;
+  --accent: #2f8a37; --accent2: #2f6fe0; --green: #2f9e4a; --red: #d23a30;
+  --shadow: 0 1px 2px rgba(20,30,50,.08), 0 10px 30px rgba(20,30,50,.10);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  -webkit-font-smoothing: antialiased; min-height: 100%; }
+.bg { position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(70% 55% at 15% -10%, rgba(67,160,71,0.12), transparent 60%),
+    radial-gradient(70% 60% at 100% 110%, rgba(85,128,238,0.09), transparent 55%); }
+
+.head { display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 28px; max-width: 1040px; margin: 0 auto; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.mark { border-radius: 8px; display: block; }
+.brand-text { font-size: 18px; letter-spacing: .2px; }
+.brand-text b { color: var(--accent); font-weight: 700; }
+.theme-btn { background: transparent; border: 1px solid var(--line); color: var(--muted);
+  width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 15px; }
+.theme-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.wrap { max-width: 1040px; margin: 0 auto; padding: 12px 28px 48px; }
+.lede { color: var(--muted); font-size: 15px; line-height: 1.55; max-width: 60ch; margin: 8px 0 28px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.card { display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: inherit;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px;
+  box-shadow: var(--shadow); transition: transform .12s ease, border-color .12s ease; }
+.card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.card-top { display: flex; align-items: center; justify-content: space-between; }
+.ico { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
+  border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); color: var(--accent); }
+.card h2 { margin: 6px 0 0; font-size: 17px; }
+.card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; flex: 1; }
+.go { color: var(--accent); font-weight: 600; font-size: 13.5px; margin-top: 6px; }
+
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 22%, transparent); }
+.dot.up { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 24%, transparent); }
+.dot.down { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 24%, transparent); }
+.dot.unknown { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 24%, transparent); }
+
+.foot { margin-top: 34px; color: var(--faint); font-size: 12px; letter-spacing: .04em; }

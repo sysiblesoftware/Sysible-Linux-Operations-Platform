@@ -1,0 +1,40 @@
+# Sysible Linux Operations Platform (SLOP) — the gateway/portal.
+#
+# This brings up ONLY the front door (reverse proxy + portal). The three apps —
+# Controller, SLEP, Connect — run as their own container stacks (install them with
+# `install-sysible`, or manage with `sysible_ctl`), and the gateway proxies to them
+# on the host ports they already publish (8800 / 8810 / 8700).
+#
+#   1. Bring up the apps:   install-sysible all      (or sysible_ctl <app> up)
+#   2. Bring up the door:   docker compose up -d --build   (from this repo)
+#   3. Point DNS/hosts for $SLOP_DOMAIN + controller./slep./connect. at this host.
+#   4. Open  https://$SLOP_DOMAIN/
+#
+# See .env.example for the (few) knobs, and docs/ARCHITECTURE.md for the design.
+services:
+  gateway:
+    image: caddy:2-alpine
+    container_name: sysible-slop-gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"     # HTTP → redirected to HTTPS by Caddy
+      - "443:443"   # the single front door
+    environment:
+      SLOP_DOMAIN: ${SLOP_DOMAIN:-slop.lan}
+      # Where the apps actually listen (host:port). Defaults assume they publish on
+      # this host; override if they run elsewhere or on a shared docker network.
+      SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
+      SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}
+      SLOP_CONNECT_UPSTREAM: ${SLOP_CONNECT_UPSTREAM:-host.docker.internal:8700}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./portal:/srv/portal:ro
+      - slop-caddy-data:/data      # issued certs + the internal CA (persist across restarts)
+      - slop-caddy-config:/config
+    extra_hosts:
+      # Lets the container reach apps published on the host (Linux needs this).
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  slop-caddy-data:
+  slop-caddy-config:

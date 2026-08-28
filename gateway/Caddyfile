@@ -1,0 +1,109 @@
+# Sysible Linux Operations Platform (SLOP) — gateway.
+#
+# One front door for the three Sysible apps. The apex domain serves the SLOP
+# portal (a branded landing/nav page); each app gets a subdomain that reverse-
+# proxies to the app running UNCHANGED on its own host port. The apps keep their
+# own logins for now; SLOP adds a single URL, a single TLS story, and a place to
+# hang single-sign-on later (see the commented forward_auth below and docs/SSO.md).
+#
+#   Portal        https://{$SLOP_DOMAIN}/
+#   Controller    https://controller.{$SLOP_DOMAIN}/
+#   SLEP          https://slep.{$SLOP_DOMAIN}/
+#   Connect       https://connect.{$SLOP_DOMAIN}/
+#
+# Point DNS (or /etc/hosts) for {$SLOP_DOMAIN} and those three subdomains at this
+# host. TLS is Caddy's internal CA by default (self-signed, like the apps today) —
+# trust gateway/root.crt on clients, or switch to real certs (see docs/ARCHITECTURE.md).
+
+{
+	# Quieten the admin API to loopback; log to stdout for `docker logs`.
+	admin off
+	log {
+		output stdout
+		format console
+	}
+	# Default to Caddy's internal CA. Set SLOP_TLS=acme + a public SLOP_DOMAIN and
+	# SLOP_ACME_EMAIL to have Caddy fetch real Let's Encrypt certs instead.
+}
+
+# ---- Portal (apex) --------------------------------------------------------
+{$SLOP_DOMAIN:slop.lan}, localhost {
+	tls internal
+	encode gzip
+
+	# The portal's live health checks call these same-origin paths; the gateway
+	# proxies each to the corresponding app's health endpoint so the browser never
+	# has to reach the app hosts directly (and CORS is a non-issue).
+	handle /healthz/controller {
+		rewrite * /api/health
+		reverse_proxy https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
+			transport http { tls_insecure_skip_verify }
+		}
+	}
+	handle /healthz/slep {
+		rewrite * /api/health
+		reverse_proxy https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810} {
+			transport http { tls_insecure_skip_verify }
+		}
+	}
+	handle /healthz/connect {
+		rewrite * /healthz
+		reverse_proxy https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700} {
+			transport http { tls_insecure_skip_verify }
+		}
+	}
+
+	# Everything else → the static portal.
+	handle {
+		root * /srv/portal
+		file_server
+	}
+}
+
+# ---- Controller -----------------------------------------------------------
+controller.{$SLOP_DOMAIN:slop.lan} {
+	tls internal
+	# import sso   # ← enable once the Controller exposes the auth-check (docs/SSO.md)
+	reverse_proxy https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
+		transport http { tls_insecure_skip_verify }
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# ---- SLEP -----------------------------------------------------------------
+slep.{$SLOP_DOMAIN:slop.lan} {
+	tls internal
+	# import sso
+	reverse_proxy https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810} {
+		transport http { tls_insecure_skip_verify }
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# ---- Connect (has a terminal websocket; Caddy upgrades it automatically) ---
+connect.{$SLOP_DOMAIN:slop.lan} {
+	tls internal
+	# import sso
+	reverse_proxy https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700} {
+		transport http { tls_insecure_skip_verify }
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# ---- SSO foundation (Controller as IdP) — see docs/SSO.md ------------------
+# Uncomment `import sso` in the app sites above once the Controller serves a
+# lightweight auth-check endpoint. forward_auth asks the Controller "is this
+# request signed in?" before proxying; a 2xx lets it through, anything else
+# redirects to the portal/Controller login. The apps must then accept the
+# forwarded identity header (phase 2) for true single sign-on.
+(sso) {
+	forward_auth https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
+		uri /api/auth/verify
+		transport http { tls_insecure_skip_verify }
+		copy_headers X-Sysible-User X-Sysible-Role
+		@bad status 401 403
+		handle_response @bad {
+			redirect * https://{$SLOP_DOMAIN:slop.lan}/login?next={scheme}://{host}{uri} 302
+		}
+	}
+}
