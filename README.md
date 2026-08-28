@@ -38,6 +38,8 @@ sudo install-sysible all              # or: sysible_ctl <app> up
 # 2. Bring up the SLOP front door (this repo):
 cp .env.example .env                  # set SLOP_DOMAIN + upstreams if needed
 docker compose up -d --build
+#    …or drive it with the same CLI as the apps:
+#    SYSIBLE_SLOP_DIR="$PWD" sysible_ctl slop up    (then: sysible_ctl slop status|logs|update|stop)
 
 # 3. Resolve the domain + subdomains to this host (DNS, or every client's hosts):
 #    192.168.8.10  slop.lan controller.slop.lan slep.slop.lan connect.slop.lan
