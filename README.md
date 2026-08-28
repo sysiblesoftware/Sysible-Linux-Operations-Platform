@@ -31,15 +31,17 @@ separate consoles on three ports, you run the apps and put SLOP in front.
 
 ## Quick start
 
-```sh
-# 1. Bring up the apps (Controller, SLEP, Connect) as containers:
-sudo install-sysible all              # or: sysible_ctl <app> up
+One command from this repo stands up the **whole stack** — Controller, SLEP and
+Connect as containers, with the SLOP gateway in front of them:
 
-# 2. Bring up the SLOP front door (this repo):
-cp .env.example .env                  # set SLOP_DOMAIN + upstreams if needed
-docker compose up -d --build
-#    …or drive it with the same CLI as the apps:
-#    SYSIBLE_SLOP_DIR="$PWD" sysible_ctl slop up    (then: sysible_ctl slop status|logs|update|stop)
+```sh
+# 1. Optional: set your domain + upstreams (defaults: slop.lan, apps on this host)
+cp .env.example .env
+
+# 2. Install everything (needs git + Docker; installs sysible_ctl to manage it all):
+sudo ./install.sh                 # the whole stack (apps + gateway)
+#   sudo ./install.sh apps        # only Controller + SLEP + Connect
+#   sudo ./install.sh gateway     # only the gateway (apps already running)
 
 # 3. Resolve the domain + subdomains to this host (DNS, or every client's hosts):
 #    192.168.8.10  slop.lan controller.slop.lan slep.slop.lan connect.slop.lan
@@ -47,6 +49,12 @@ docker compose up -d --build
 # 4. Open the portal:
 open https://slop.lan/
 ```
+
+`install.sh` clones each app from its own official repo, builds it, and manages
+everything through the unified `sysible_ctl` (`sysible_ctl status | update all |
+logs …`). Already have the apps running and only want the front door? Use
+`sudo ./install.sh gateway` — or `docker compose up -d --build` for just this
+gateway container.
 
 TLS is Caddy's **internal CA** by default (self-signed, like the apps today) — your
 browser warns once; trust the CA or proceed. For public certs, see
@@ -56,6 +64,7 @@ browser warns once; trust the CA or proceed. For public certs, see
 
 | Path | What |
 |---|---|
+| `install.sh` | One-command installer: the three apps + this gateway (`sudo ./install.sh`). |
 | `docker-compose.yml` | The gateway (Caddy) + portal. |
 | `gateway/Caddyfile` | Reverse-proxy: portal at the apex, `controller./slep./connect.` subdomains to the apps, TLS, health proxying, and the SSO `forward_auth` seam. |
 | `portal/` | The branded landing page (app cards + live health + light/dark). |
