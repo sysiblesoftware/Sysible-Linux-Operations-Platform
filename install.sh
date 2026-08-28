@@ -60,7 +60,7 @@ mkdir -p "$SRC_DIR"
 # The Controller checkout ships the unified sysible_ctl — clone it regardless (we
 # need the CLI to drive every product, including this gateway) and put it on PATH.
 CTL_DIR="$SRC_DIR/$(dirname_for "$CTL_REPO")"
-clone_one "$CTL_REPO"
+clone_one "$CTL_REPO" || die "could not clone the Controller repo (check network/DNS) — nothing was installed."
 if [ -x "$CTL_DIR/deploy/sysible_ctl" ]; then
   ln -sf "$CTL_DIR/deploy/sysible_ctl" /usr/local/bin/sysible_ctl
   say "Installed sysible_ctl -> /usr/local/bin/sysible_ctl"
@@ -68,20 +68,36 @@ else
   die "the Controller checkout has no deploy/sysible_ctl (older main?) — update and retry."
 fi
 
-# ---- the three apps ------------------------------------------------------
+# Everything below runs in containers, so the Docker daemon MUST be up. Start it
+# and wait briefly, with a clear error (not a silent abort) if it never comes up.
+if ! docker info >/dev/null 2>&1; then
+  say "== starting the Docker daemon =="
+  systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
+  _i=0; while [ "$_i" -lt 10 ] && ! docker info >/dev/null 2>&1; do sleep 2; _i=$((_i+1)); done
+fi
+docker info >/dev/null 2>&1 || die "the Docker daemon is not running and could not be started (try: sudo systemctl start docker). Nothing can run in containers until it is up."
+
+# ---- the three apps (best-effort: one failing never stops the rest) ------
+FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then
   # controller (already cloned above) + slep + connect.
   for entry in "controller|$CTL_REPO|SYSIBLE_CONTROLLER_DIR" \
                "slep|$SLEP_REPO|SYSIBLE_SLEP_DIR" \
                "connect|$CONNECT_REPO|SYSIBLE_CONNECT_DIR"; do
     p="${entry%%|*}"; rest="${entry#*|}"; repo="${rest%%|*}"; var="${rest##*|}"
-    [ "$p" = "controller" ] || clone_one "$repo"
-    _dir="$SRC_DIR/$(dirname_for "$repo")"
     say
     say "============================================================"
-    say " Bringing up: $p"
+    say " $p — cloning the code, then building + starting its container(s)"
     say "============================================================"
-    env "$var=$_dir" sysible_ctl "$p" up
+    if [ "$p" != "controller" ] && ! clone_one "$repo"; then
+      FAILED="$FAILED $p(clone)"; say "  WARNING: could not clone $p — skipping it."; continue
+    fi
+    _dir="$SRC_DIR/$(dirname_for "$repo")"
+    if env "$var=$_dir" sysible_ctl "$p" up; then
+      say "  $p is up."
+    else
+      FAILED="$FAILED $p"; say "  WARNING: $p did not come up — continuing (scroll up for the error)."
+    fi
   done
 fi
 
@@ -89,14 +105,23 @@ fi
 if [ "$WANT_GW" -eq 1 ]; then
   say
   say "============================================================"
-  say " Bringing up: SLOP gateway (this repo: $HERE)"
+  say " SLOP gateway — the single front door (this repo: $HERE)"
   say "============================================================"
-  env SYSIBLE_SLOP_DIR="$HERE" sysible_ctl slop up
+  if env SYSIBLE_SLOP_DIR="$HERE" sysible_ctl slop up; then
+    say "  SLOP gateway is up."
+  else
+    FAILED="$FAILED slop-gateway"; say "  WARNING: the SLOP gateway did not come up (scroll up for the error)."
+  fi
 fi
 
 say
-say "Done."
-if [ "$WANT_GW" -eq 1 ]; then
+if [ -n "$FAILED" ]; then
+  say "Finished WITH PROBLEMS — these did not come up:$FAILED"
+  say "Inspect with 'sysible_ctl status'; the errors above are usually network, DNS, or a Docker build."
+else
+  say "All done — the code is cloned under $SRC_DIR and everything is running in containers."
+fi
+if [ "$WANT_GW" -eq 1 ] && [ -z "$FAILED" ]; then
   say "One front door is up: https://slop.lan/  (point slop.lan + the"
   say "controller./slep./connect. subdomains at this host — DNS or /etc/hosts;"
   say "set SLOP_DOMAIN + upstreams in this repo's .env to change the defaults)."
