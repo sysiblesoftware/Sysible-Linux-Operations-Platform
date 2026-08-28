@@ -64,8 +64,9 @@ issues, the portal calls **same-origin** paths (`/healthz/controller`, `/slep`,
 ## Roadmap
 
 1. **Now** — gateway + portal + health + one TLS front door (this scaffold).
-2. **SSO** — gateway `forward_auth` → Controller auth-check, then apps accept the
-   forwarded identity. See [SSO.md](SSO.md).
+2. **SSO** — gateway `forward_auth` → Controller auth-check (the Controller's
+   `/api/auth/verify` probe is shipped in CE and EE; enable `import sso` to gate),
+   then apps accept the forwarded identity. See [SSO.md](SSO.md).
 3. **`sysible_ctl slop`** — manage the gateway with the same CLI as the apps.
 4. **EE SLOP** — same gateway/portal in front of the Enterprise builds, with real
    single sign-on via the Controller's SSO/MFA.

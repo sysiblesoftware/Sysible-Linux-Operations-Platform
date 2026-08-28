@@ -63,7 +63,7 @@
 # ---- Controller -----------------------------------------------------------
 controller.{$SLOP_DOMAIN:slop.lan} {
 	tls internal
-	# import sso   # ← enable once the Controller exposes the auth-check (docs/SSO.md)
+	# import sso   # ← Controller now serves /api/auth/verify; uncomment to gate (docs/SSO.md)
 	reverse_proxy https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
 		transport http { tls_insecure_skip_verify }
 		header_up X-Forwarded-Proto https
@@ -91,11 +91,12 @@ connect.{$SLOP_DOMAIN:slop.lan} {
 }
 
 # ---- SSO foundation (Controller as IdP) — see docs/SSO.md ------------------
-# Uncomment `import sso` in the app sites above once the Controller serves a
-# lightweight auth-check endpoint. forward_auth asks the Controller "is this
-# request signed in?" before proxying; a 2xx lets it through, anything else
-# redirects to the portal/Controller login. The apps must then accept the
-# forwarded identity header (phase 2) for true single sign-on.
+# The Controller now serves the lightweight auth-check endpoint
+# (GET /api/auth/verify, in both CE and EE) — uncomment `import sso` in the app
+# sites above to turn gating on. forward_auth asks the Controller "is this request
+# signed in?" before proxying; a 2xx lets it through, anything else redirects to
+# the portal/Controller login. The apps must then accept the forwarded identity
+# header (phase 3) for true single sign-on.
 (sso) {
 	forward_auth https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
 		uri /api/auth/verify

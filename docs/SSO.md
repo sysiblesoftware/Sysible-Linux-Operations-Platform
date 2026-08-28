@@ -27,15 +27,22 @@ forward_auth <controller> {
 }
 ```
 
-**What the Controller must add:** a lightweight `GET /api/auth/verify` that reads
-the caller's Controller session cookie (or admin token) and returns:
+**Controller endpoint — shipped.** The Controller's web console now serves the
+lightweight `GET /api/auth/verify` probe (in **both CE and EE**). It reads the
+caller's Controller session cookie and returns:
 
 - `200` with headers `X-Sysible-User: <name>`, `X-Sysible-Role: <role>` when signed in;
 - `401` otherwise.
 
-It performs no action and mutates nothing — it's a pure auth probe, cheap enough to
-run on every request. Cookies scope to `.$SLOP_DOMAIN` so the one Controller
+It performs no action and mutates nothing — a pure auth probe, cheap enough to run
+on every request, with `Cache-Control: no-store`. Being a safe `GET` it clears the
+console's CSRF backstop. Cookies scope to `.$SLOP_DOMAIN` so the one Controller
 session is visible to the gateway on every subdomain.
+
+**To turn gating on:** run a Controller build that includes the endpoint (CE ≥ the
+`/api/auth/verify` commit, or the EE equivalent), then uncomment `import sso` in the
+three app sites in `gateway/Caddyfile` and reload the gateway. Until an app also
+trusts the forwarded header (Phase 3) it still shows its own login once reached.
 
 At the end of Phase 2 the gateway blocks unauthenticated access to all three apps
 behind a single Controller login — even though each app still shows its own login
