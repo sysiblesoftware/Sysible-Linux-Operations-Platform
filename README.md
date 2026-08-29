@@ -34,6 +34,29 @@ separate consoles on three ports, you run the apps and put SLOP in front.
   reverse-proxies to them, and each keeps its own native login for direct,
   non-gateway access (SSO trust is on only behind the gateway).
 
+## Requirements
+
+SLOP runs everything in containers, so the host needs very little:
+
+**Host (to run SLOP):**
+- **Docker Engine** with the **Compose v2** plugin (`docker compose …`) — runs the
+  gateway, the IdP, and (via the installer) the three apps.
+- **git** — `install.sh` clones each app from its own official repo.
+- **root / sudo** — to bind ports 80/443 and drive Docker.
+- **Ports 80 and 443** free on the host (the single front door).
+- **Outbound network** the first time only — to clone the app repos and pull the
+  base images (`caddy:2-alpine`, `python:3.12-slim`, and each app's build deps).
+- **DNS or `/etc/hosts`** entries for `slop.lan` and the `controller.`/`slep.`/
+  `connect.` subdomains pointing at this host.
+
+That's it — no Python, Node, or database on the host. Each piece pins its own deps:
+
+- **IdP** (`idp/`) — Python, in `idp/requirements.txt` (FastAPI + uvicorn +
+  python-multipart; everything else is stdlib). Installed **inside** its container.
+- **Gateway** — the stock `caddy:2-alpine` image; config is `gateway/Caddyfile`.
+- **The three apps** — each brings its own dependencies in its own repo; the SLOP
+  installer just clones and builds them.
+
 ## Quick start
 
 One command from this repo stands up the **whole stack** — Controller, SLEP and
@@ -69,13 +92,14 @@ browser warns once; trust the CA or proceed. For public certs, see
 
 | Path | What |
 |---|---|
-| `install.sh` | One-command installer: the three apps + this gateway (`sudo ./install.sh`). |
-| `docker-compose.yml` | The gateway (Caddy) + portal. |
-| `gateway/Caddyfile` | Reverse-proxy: portal at the apex, `controller./slep./connect.` subdomains to the apps, TLS, health proxying, and the SSO `forward_auth` seam. |
-| `portal/` | The branded landing page (app cards + live health + light/dark). |
-| `.env.example` | `SLOP_DOMAIN` and the three upstream `host:port`s. |
+| `install.sh` | One-command installer: the three apps + this gateway + IdP (`sudo ./install.sh`). Generates the SSO shared secret into `.env`. |
+| `docker-compose.yml` | The front door: the gateway (Caddy) + the IdP service. |
+| `idp/` | The identity provider — the user store, login, `/account`, and `/admin` (accounts + password resets). Python deps in `idp/requirements.txt`; tests in `idp/tests/`. |
+| `gateway/Caddyfile` | Reverse-proxy: portal at the apex, `controller./slep./connect.` subdomains to the apps, TLS, health proxying, and the SSO `forward_auth` + shared-secret enforcement. |
+| `portal/` | The branded landing page (app cards + live health + signed-in user chip + light/dark). |
+| `.env.example` | `SLOP_DOMAIN`, `SYSIBLE_SSO_SHARED_SECRET`, the first-run admin, and the three upstream `host:port`s. |
 | `docs/ARCHITECTURE.md` | Design, routing, TLS options. |
-| `docs/SSO.md` | The Controller-as-IdP single-sign-on plan (phased). |
+| `docs/SSO.md` | The shipped single-sign-on architecture (SLOP as the identity provider). |
 
 ## Editions
 
