@@ -1,0 +1,56 @@
+#!/bin/sh
+# SLOP convenience shim for `sysible_ctl`.
+#
+# The unified `sysible_ctl` CLI lives in the Controller checkout and is placed on
+# your PATH by SLOP's install.sh. But the CLI's own help says
+#   First time: sudo ./deploy/sysible_ctl install
+# which is relative to the Controller repo — run from THIS (SLOP) repo that path
+# wouldn't exist. This shim makes the natural first-time command work here too:
+#
+#   sudo ./deploy/sysible_ctl install     # = sudo ./install.sh  (the whole stack)
+#   sudo ./deploy/sysible_ctl apps        # only the three apps
+#   sudo ./deploy/sysible_ctl gateway     # only the gateway + IdP
+#
+# After install, use the real `sysible_ctl` on your PATH to manage everything
+# (sysible_ctl status | update all | logs …). Any management verb given here is
+# forwarded to that real CLI once it's installed.
+set -eu
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+INSTALL="$HERE/install.sh"
+
+# The real, installed CLI (installed by install.sh), if present — and never this
+# very shim (avoid a self-exec loop if this repo's deploy/ is on PATH).
+REAL=""
+for c in $(command -v -a sysible_ctl 2>/dev/null || true); do
+  case "$c" in
+    "$HERE"/deploy/sysible_ctl) : ;;   # skip ourselves
+    *) REAL="$c"; break ;;
+  esac
+done
+
+case "${1:-install}" in
+  install | "" | all)
+    # First-time bootstrap of the whole stack (installs Docker/git if missing,
+    # the apps, the gateway + IdP, and the real sysible_ctl on your PATH).
+    shift 2>/dev/null || true
+    exec "$INSTALL" all
+    ;;
+  apps)
+    exec "$INSTALL" apps
+    ;;
+  gateway | gw)
+    exec "$INSTALL" gateway
+    ;;
+  *)
+    # A management verb (status/up/update/logs/…). Forward to the real CLI if it's
+    # been installed; otherwise point the user at the first-time bootstrap.
+    if [ -n "$REAL" ]; then
+      exec "$REAL" "$@"
+    fi
+    echo "sysible_ctl is not installed yet. Bootstrap SLOP first:" >&2
+    echo "    sudo ./install.sh        (or: sudo ./deploy/sysible_ctl install)" >&2
+    echo "Then use 'sysible_ctl $*' from anywhere." >&2
+    exit 127
+    ;;
+esac

@@ -72,9 +72,10 @@ Connect as containers, with the SLOP gateway in front of them:
 cp .env.example .env
 
 # 2. Install everything (installs Docker + git if missing, plus sysible_ctl):
-sudo ./install.sh                 # the whole stack (apps + gateway)
+sudo ./install.sh                 # the whole stack (apps + gateway + IdP)
 #   sudo ./install.sh apps        # only Controller + SLEP + Connect
-#   sudo ./install.sh gateway     # only the gateway (apps already running)
+#   sudo ./install.sh gateway     # only the gateway + IdP (apps already running)
+#   sudo ./deploy/sysible_ctl install   # same thing, if you reach for sysible_ctl
 
 # 3. Resolve the domain + subdomains to this host (DNS, or every client's hosts):
 #    192.168.8.10  slop.lan controller.slop.lan slep.slop.lan connect.slop.lan
