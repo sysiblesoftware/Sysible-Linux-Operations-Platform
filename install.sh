@@ -77,14 +77,39 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker info >/dev/null 2>&1 || die "the Docker daemon is not running and could not be started (try: sudo systemctl start docker). Nothing can run in containers until it is up."
 
+# ---- unified SSO shared secret (one per install; persisted in this repo's .env) ----
+# The gateway stamps this secret on requests it proxies; each app trusts the
+# gateway-asserted identity ONLY when the secret matches. Generate it once and
+# reuse it, so the same value reaches the gateway AND all three apps.
+ENV_FILE="$HERE/.env"
+_upsert_env() {  # _upsert_env KEY VALUE — set KEY=VALUE in $ENV_FILE (replace or append)
+  touch "$ENV_FILE"
+  if grep -q "^$1=" "$ENV_FILE" 2>/dev/null; then
+    sed -i.bak "s|^$1=.*|$1=$2|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  else
+    printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
+  fi
+}
+_secret_from_env() { [ -f "$ENV_FILE" ] && sed -n 's/^SYSIBLE_SSO_SHARED_SECRET=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1; }
+SSO_SECRET="${SYSIBLE_SSO_SHARED_SECRET:-$(_secret_from_env)}"
+if [ -z "$SSO_SECRET" ]; then
+  SSO_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  _upsert_env SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
+  say "Generated a unified-SSO shared secret into $ENV_FILE"
+fi
+export SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET"
+
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then
-  # controller (already cloned above) + slep + connect.
-  for entry in "controller|$CTL_REPO|SYSIBLE_CONTROLLER_DIR" \
-               "slep|$SLEP_REPO|SYSIBLE_SLEP_DIR" \
-               "connect|$CONNECT_REPO|SYSIBLE_CONNECT_DIR"; do
-    p="${entry%%|*}"; rest="${entry#*|}"; repo="${rest%%|*}"; var="${rest##*|}"
+  # controller (already cloned above) + slep + connect. The 4th field is each
+  # app's "trust the SLOP gateway identity" flag — set to 1 here so the app trusts
+  # the gateway-asserted identity (guarded by the shared secret above).
+  for entry in "controller|$CTL_REPO|SYSIBLE_CONTROLLER_DIR|SYSIBLE_WEBGUI_TRUST_SSO" \
+               "slep|$SLEP_REPO|SYSIBLE_SLEP_DIR|SLEP_TRUST_GATEWAY_AUTH" \
+               "connect|$CONNECT_REPO|SYSIBLE_CONNECT_DIR|SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH"; do
+    p="${entry%%|*}"; r1="${entry#*|}"; repo="${r1%%|*}"; r2="${r1#*|}"
+    var="${r2%%|*}"; trust="${r2#*|}"
     say
     say "============================================================"
     say " $p — cloning the code, then building + starting its container(s)"
@@ -93,7 +118,8 @@ if [ "$WANT_APPS" -eq 1 ]; then
       FAILED="$FAILED $p(clone)"; say "  WARNING: could not clone $p — skipping it."; continue
     fi
     _dir="$SRC_DIR/$(dirname_for "$repo")"
-    if env "$var=$_dir" sysible_ctl "$p" up; then
+    # Pass the app dir, turn its SSO trust flag on, and hand it the shared secret.
+    if env "$var=$_dir" "$trust=1" SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET" sysible_ctl "$p" up; then
       say "  $p is up."
     else
       FAILED="$FAILED $p"; say "  WARNING: $p did not come up — continuing (scroll up for the error)."

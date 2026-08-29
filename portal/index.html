@@ -21,7 +21,15 @@
       </svg>
       <div class="brand-text">Sysible <b>Operations Platform</b></div>
     </div>
-    <button id="theme" class="theme-btn" title="Toggle light / dark" aria-label="Toggle theme">☀</button>
+    <div class="head-right">
+      <div class="userbox" id="userbox" hidden>
+        <span class="who" id="who" title="Signed in"></span>
+        <a class="ulink" href="/account">Account</a>
+        <a class="ulink" id="adminlink" href="/admin" hidden>Accounts</a>
+        <form class="logout" method="post" action="/logout"><button type="submit" class="ulink">Sign out</button></form>
+      </div>
+      <button id="theme" class="theme-btn" title="Toggle light / dark" aria-label="Toggle theme">☀</button>
+    </div>
   </header>
 
   <main class="wrap">

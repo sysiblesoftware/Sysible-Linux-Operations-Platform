@@ -24,10 +24,15 @@ separate consoles on three ports, you run the apps and put SLOP in front.
   **live health dot** for each, so you see at a glance what's up.
 - **One TLS front door** — Caddy terminates HTTPS for the apex and all three app
   subdomains (internal CA by default, or bring real certs).
-- **Apps unchanged** — each still runs as its own container on its own port; SLOP
-  reverse-proxies to them. You can still hit an app directly if you want.
-- **An SSO seam** — the gateway has a `forward_auth` hook staged for
-  **Controller-as-IdP** single sign-on (see [docs/SSO.md](docs/SSO.md)).
+- **Real unified single sign-on** — SLOP ships its own identity provider: you sign
+  in **once** at the portal and reach all three apps with no second login. SLOP
+  owns the accounts, roles, and **password resets for all three** (self-service at
+  `/account`, superuser management at `/admin`). The gateway proves your identity
+  to each app with a shared secret, so a client can't forge it (see
+  [docs/SSO.md](docs/SSO.md)).
+- **Apps still run as themselves** — each is its own container on its own port; SLOP
+  reverse-proxies to them, and each keeps its own native login for direct,
+  non-gateway access (SSO trust is on only behind the gateway).
 
 ## Quick start
 

@@ -1,72 +1,86 @@
-# Single sign-on — Controller as IdP
+# Single sign-on — SLOP is the identity provider (CE)
 
-Goal: sign in **once** and reach all three apps. The Controller already owns
-identity (admin accounts, roles, session cookies, admin tokens, and — in EE —
-SSO/MFA/SCIM), so it's the natural identity provider. SLOP's gateway is the
-enforcement point.
+Goal: sign in **once** and reach all three apps, with one set of accounts and one
+place to manage passwords. In CE, **SLOP itself owns identity** — it ships a small
+identity provider (IdP) with its own user store, the login page, and the account /
+password-reset UI for every app. The gateway is the enforcement point; the three
+apps trust the identity SLOP asserts and no longer show their own login.
 
-This lands in phases so each step is shippable on its own.
+This is implemented and shipped in CE. (EE swaps the IdP for enterprise SSO — see
+the EE note at the end.)
 
-## Phase 1 — portal + separate logins (shipped)
-
-The portal links to each app; each app keeps its own login. No shared session yet.
-Useful immediately: one URL, one TLS front door, live health. Nothing in the apps
-changes.
-
-## Phase 2 — gateway gating (`forward_auth`)
-
-The gateway asks the Controller "is this request signed in?" before proxying to an
-app. In `gateway/Caddyfile` the `(sso)` snippet is staged; enable it by
-uncommenting `import sso` in the `controller./slep./connect.` sites.
+## The pieces
 
 ```
-forward_auth <controller> {
-    uri /api/auth/verify
-    copy_headers X-Sysible-User X-Sysible-Role
-    # 401/403 → redirect to the portal/Controller login
-}
+  browser ──► Caddy gateway ──► app (Controller / SLEP / Connect)
+                 │  forward_auth
+                 ▼
+             SLOP IdP  (idp/ service)  ── the one user store + login + resets
 ```
 
-**Controller endpoint — shipped.** The Controller's web console now serves the
-lightweight `GET /api/auth/verify` probe (in **both CE and EE**). It reads the
-caller's Controller session cookie and returns:
+- **IdP** (`idp/`, a small FastAPI service): the user store (SQLite), `POST /login`,
+  self-service `/account` (change your password), and superuser `/admin` (create /
+  delete users, reset anyone's password, set roles). It issues a session cookie
+  `sysible_sso` scoped to the **parent** domain (`.slop.lan`), so one login is
+  visible to the apex **and** every app subdomain — that shared cookie is what
+  makes it single sign-on rather than three logins.
+- **Gateway** (`gateway/Caddyfile`): on every proxied request it asks the IdP
+  "is this browser signed in?" (`forward_auth` → `GET /auth/verify`). A 2xx lets
+  it through; a 401/403 redirects the browser to `/login?next=…`.
 
-- `200` with headers `X-Sysible-User: <name>`, `X-Sysible-Role: <role>` when signed in;
-- `401` otherwise.
+## The trust boundary (why a client can't forge identity)
 
-It performs no action and mutates nothing — a pure auth probe, cheap enough to run
-on every request, with `Cache-Control: no-store`. Being a safe `GET` it clears the
-console's CSRF backstop. Cookies scope to `.$SLOP_DOMAIN` so the one Controller
-session is visible to the gateway on every subdomain.
+On a successful `/auth/verify`, the gateway does three things before proxying to
+the app:
 
-**To turn gating on:** run a Controller build that includes the endpoint (CE ≥ the
-`/api/auth/verify` commit, or the EE equivalent), then uncomment `import sso` in the
-three app sites in `gateway/Caddyfile` and reload the gateway. Until an app also
-trusts the forwarded header (Phase 3) it still shows its own login once reached.
+1. **Strips** any client-supplied `X-Sysible-User` / `X-Sysible-Role` /
+   `X-Sysible-Auth` — a browser must never be able to assert its own identity.
+2. **Injects** the real identity from the IdP: `X-Sysible-User`, `X-Sysible-Role`
+   (one of `superuser` / `operator` / `auditor`).
+3. **Stamps** a shared secret `X-Sysible-Auth: $SYSIBLE_SSO_SHARED_SECRET`, proving
+   the request came through the gateway.
 
-At the end of Phase 2 the gateway blocks unauthenticated access to all three apps
-behind a single Controller login — even though each app still shows its own login
-screen once it's reached.
+Each app honors the asserted identity **only** when its trust flag is on **and**
+`X-Sysible-Auth` matches its configured `SYSIBLE_SSO_SHARED_SECRET`. A client
+hitting an app directly can't know the secret, so it can't spoof the headers; if
+the secret is unset the apps **fail closed** (ignore the headers). `install.sh`
+generates one strong secret and wires it into the gateway and all three apps.
 
-## Phase 3 — apps trust the forwarded identity (true SSO)
+## Per-app trust mode (all default OFF → standalone apps are unchanged)
 
-For a genuine single sign-on (no second login at the app), each app accepts the
-gateway-forwarded identity instead of its own login **when reached through the
-gateway**:
+| App | Trust flag | Role mapping | Notes |
+|-----|-----------|--------------|-------|
+| Controller | `SYSIBLE_WEBGUI_TRUST_SSO=1` | superuser→superuser, operator→sysadmin, auditor→auditor | The BFF provisions a backend account+token for the asserted user via the root-only API key (`POST /admin/sso-provision`); SLOP is authoritative for the account's role. |
+| SLEP | `SLEP_TRUST_GATEWAY_AUTH=1` | superuser→superuser, operator→operator, auditor→viewer | Honored in `_session_or_401` + the read-only middleware; the BFF strips client `X-Sysible-*`. |
+| Connect | `SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH=1` | (no roles) any authenticated user is a full user | Applied on HTTP **and** the terminal websocket handshake. |
 
-- Trust `X-Sysible-User` / `X-Sysible-Role` **only** from the gateway (bind the app
-  to loopback / the gateway's network, or share a signed header secret so a client
-  can't spoof it).
-- Map the Controller role to the app's own authorization (e.g. auditor → read-only).
-- Keep the app's native login working for **direct** (non-gateway) access, so an
-  app is still usable standalone.
+All three also read `SYSIBLE_SSO_SHARED_SECRET`. Turn a flag off (the default) and
+the app keeps its own native login for direct, non-gateway use.
 
-Connect already has a run-as/attribution model tied to the Controller admin token,
-so it's the closest to this today; SLEP and the Controller console need a
-"trusted-header auth" mode added.
+## Accounts & password resets
+
+Because the apps trust SLOP, there is effectively **one credential**. Manage it in
+the portal:
+
+- **Your password:** `https://$SLOP_DOMAIN/account`.
+- **Everyone's accounts + resets (superuser):** `https://$SLOP_DOMAIN/admin` — add
+  or remove users, set roles, and reset any user's password (which forces a change
+  at their next login and drops their live sessions immediately).
+
+First run creates an initial `admin` superuser; set `SLOP_ADMIN_PASSWORD` or read
+the one-time generated password from the IdP logs (`docker logs sysible-slop-idp`).
+
+## CE limitations (hardened in EE)
+
+- SLEP's per-org RBAC still keys off org membership: a gateway `superuser` bypasses
+  org checks, but an `operator`/`auditor` who isn't a member of an org will hit the
+  normal per-org checks for org-scoped features.
+- The shared secret is a symmetric bearer between the gateway and the apps (not a
+  signed, per-request assertion), and the gateway↔app hop is plain reverse-proxy.
 
 ## EE note
 
-EE SLOP reuses this exact seam. The difference is the IdP: the EE Controller does
-OIDC/SAML SSO + MFA, so `/api/auth/verify` is backed by the enterprise session, and
-Phase 3's role mapping carries SSO group claims through to each app.
+EE SLOP keeps this exact gateway seam but replaces the CE IdP with enterprise
+identity: OIDC/SAML federation + MFA, signed per-request assertions carrying group
+claims, fine-grained per-app RBAC, and mTLS on the gateway↔app hop. The apps' trust
+mode is the same hook; only the assertion's issuer and strength change.

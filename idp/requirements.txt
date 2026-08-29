@@ -1,0 +1,5 @@
+# SLOP IdP — deliberately tiny. Everything else (sqlite3, hashlib.scrypt, hmac,
+# secrets) is Python stdlib, so the identity provider stays easy to audit.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20

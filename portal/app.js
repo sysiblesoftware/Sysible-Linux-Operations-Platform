@@ -34,6 +34,25 @@
   pollAll();
   setInterval(pollAll, 15000);
 
+  // Who's signed in — the portal sits behind SLOP single sign-on, so show the
+  // current user with links to manage their password (/account) and, for a
+  // superuser, everyone's accounts (/admin). Best-effort: if /auth/me isn't
+  // reachable the chip just stays hidden.
+  fetch("/auth/me", { cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (me) {
+      if (!me || !me.authenticated) return;
+      var who = document.getElementById("who");
+      if (who) who.textContent = me.user + (me.role ? " · " + me.role : "");
+      if (me.role === "superuser") {
+        var a = document.getElementById("adminlink");
+        if (a) a.hidden = false;
+      }
+      var box = document.getElementById("userbox");
+      if (box) box.hidden = false;
+    })
+    .catch(function () { /* not signed in / IdP unreachable — leave chip hidden */ });
+
   // Theme toggle, persisted; default follows the OS until the user chooses.
   var KEY = "slop-theme";
   var root = document.documentElement;

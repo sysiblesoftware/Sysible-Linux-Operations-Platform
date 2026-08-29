@@ -54,3 +54,12 @@ body { background: var(--bg); color: var(--text); font-family: var(--font);
 .dot.unknown { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 24%, transparent); }
 
 .foot { margin-top: 34px; color: var(--faint); font-size: 12px; letter-spacing: .04em; }
+
+/* Signed-in user chip (SLOP single sign-on) */
+.head-right { display: flex; align-items: center; gap: 14px; }
+.userbox { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.userbox .who { color: var(--muted); }
+.userbox .logout { margin: 0; display: inline; }
+.ulink { background: transparent; border: 0; padding: 0; cursor: pointer;
+  color: var(--accent2); text-decoration: none; font-size: 13px; font-family: var(--font); }
+.ulink:hover { text-decoration: underline; }
