@@ -310,8 +310,15 @@ def _clear_fails(ip: str, username: str) -> None:
 
 
 def _cookie_domain() -> str | None:
-    if _COOKIE_DOMAIN_ENV is not None:
-        return _COOKIE_DOMAIN_ENV or None
+    # Only a NON-EMPTY override wins. docker-compose passes this through as
+    # ${SLOP_COOKIE_DOMAIN:-}, so inside the container the var is present but an
+    # EMPTY string when the operator didn't set it — that must mean "derive from
+    # SLOP_DOMAIN", NOT "host-only". Treating "" as an explicit override was a bug:
+    # it scoped sysible_sso host-only to the apex, so the cookie never rode to
+    # controller./slep./connect.<apex> and every app subdomain bounced the browser
+    # in a forward_auth redirect loop (verify 401 -> /login -> back -> …).
+    if _COOKIE_DOMAIN_ENV:
+        return _COOKIE_DOMAIN_ENV
     # A bare hostname with no dot (localhost, an IP) can't carry a domain-scoped
     # cookie — fall back to a host-only cookie the browser will still accept.
     if "." not in SLOP_DOMAIN:
@@ -601,8 +608,14 @@ def _login_form(next_url: str, msg: str = "", csrf: str = "") -> str:
 def login_get(request: Request, next: str = "/"):
     nxt = _safe_next(next)
     tok = _csrf_token(request)
-    if _current(request):  # already signed in → straight through
-        resp: Response = RedirectResponse(nxt, status_code=302)
+    sess = _current(request)
+    if sess:  # already signed in
+        # A pending forced change must land on /account, never on an app: the app's
+        # /auth/verify keeps 401'ing while must_change is set, so redirecting to it
+        # would bounce the browser app -> /login -> app forever.
+        u = _get_user(sess["username"])
+        dest = "/account?first=1" if (u and u["must_change"]) else nxt
+        resp: Response = RedirectResponse(dest, status_code=302)
     else:
         resp = HTMLResponse(_login_form(nxt, csrf=tok))
     _set_csrf_cookie(resp, tok)  # seed the double-submit token either way
@@ -730,7 +743,11 @@ def account_password(
     # response so the acting browser stays signed in while all others are killed.
     _drop_user_sessions(user["username"])
     new_token = _new_session(user["username"], user["role"])
-    resp = _csrf_html(_account_page(sess, False, "Password changed.", kind="ok", csrf=tok), tok)
+    # must_change is now cleared, so send them INTO the platform (the portal
+    # launcher) rather than leaving them staring at the change-password form — this
+    # is the "you're in" moment right after the forced first-login change. 303 so
+    # the browser re-issues it as a GET.
+    resp: Response = RedirectResponse("/", status_code=303)
     _set_session_cookie(resp, new_token)
     return resp
 

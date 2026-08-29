@@ -107,9 +107,11 @@ def test_admin_create_reset_and_forced_change(client):
         # must_change is enforced at the gateway probe: no app access until changed
         assert d.get("/auth/verify").status_code == 401
         # after changing it, the probe passes and reflects the role
-        d.post("/account/password",
-               data={"current": temp, "new1": "opsynewpass123", "new2": "opsynewpass123",
-                     "csrf": _tok(d)}, headers=HDR)
+        c = d.post("/account/password",
+                   data={"current": temp, "new1": "opsynewpass123", "new2": "opsynewpass123",
+                         "csrf": _tok(d)}, headers=HDR, follow_redirects=False)
+        # a successful change clears must_change and sends the user into the platform
+        assert c.status_code == 303 and c.headers["location"] == "/"
         v = d.get("/auth/verify")
         assert v.status_code == 204
         assert v.headers["X-Sysible-Role"] == "operator"
@@ -121,8 +123,9 @@ def test_self_service_password_change(cl):
     _login(cl, "admin", ADMIN_PW)
     r = cl.post("/account/password",
                 data={"current": ADMIN_PW, "new1": "brandnewpass99", "new2": "brandnewpass99",
-                      "csrf": _tok(cl)}, headers=HDR)
-    assert "Password changed" in r.text
+                      "csrf": _tok(cl)}, headers=HDR, follow_redirects=False)
+    # a successful change drops the form and redirects into the platform (portal)
+    assert r.status_code == 303 and r.headers["location"] == "/"
     cl.post("/logout", headers=HDR, follow_redirects=False)
     assert _login(cl, "admin", "brandnewpass99").status_code == 302
 
@@ -246,8 +249,8 @@ def test_password_change_revokes_other_sessions(client):
         # the real user rotates their password in the first browser
         r = cl.post("/account/password",
                     data={"current": ADMIN_PW, "new1": "rotated-pw-123", "new2": "rotated-pw-123",
-                          "csrf": _tok(cl)}, headers=HDR)
-        assert "Password changed" in r.text
+                          "csrf": _tok(cl)}, headers=HDR, follow_redirects=False)
+        assert r.status_code == 303
         # acting browser stays signed in (fresh cookie minted on the response)...
         assert cl.get("/auth/verify").status_code == 204
         # ...but the other/stolen session is revoked immediately
@@ -284,3 +287,44 @@ def test_login_runs_scrypt_even_for_unknown_user(client):
     assert r.status_code == 401
     # scrypt ran against the module-level dummy hash for the nonexistent user
     assert m._DUMMY_HASH in seen
+
+
+def test_cookie_scoped_to_parent_domain(tmp_path):
+    """Regression for the app-subdomain redirect loop.
+
+    docker-compose passes SLOP_COOKIE_DOMAIN through as ${SLOP_COOKIE_DOMAIN:-},
+    so inside the container the var is PRESENT but an EMPTY string when the
+    operator didn't set it. That empty value must be read as 'derive from
+    SLOP_DOMAIN' -> Domain=.slop.lan, so the one session cookie rides to the apex
+    AND controller./slep./connect.slop.lan. Treating "" as an explicit host-only
+    override scoped the cookie to the apex only, so /auth/verify never saw it on a
+    subdomain and every app looped app -> /login -> app."""
+    from starlette.testclient import TestClient
+
+    def _reload(cookie_domain, slop_domain="slop.lan"):
+        os.environ.update(
+            SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
+            SLOP_ADMIN_USER="admin", SLOP_ADMIN_PASSWORD=ADMIN_PW,
+            SLOP_ADMIN_FORCE_CHANGE="0", SLOP_ALLOW_INSECURE_COOKIE="1",
+            SLOP_DOMAIN=slop_domain, SLOP_COOKIE_DOMAIN=cookie_domain,
+        )
+        import app as m
+        return importlib.reload(m)
+
+    try:
+        # The exact value compose injects when unset: empty -> parent-domain cookie.
+        m = _reload("")
+        assert m._cookie_domain() == ".slop.lan"
+        with TestClient(m.app, base_url="http://slop.lan") as c:
+            r = c.post("/login", data={"username": "admin", "password": ADMIN_PW,
+                                       "csrf": _tok(c)}, headers=HDR, follow_redirects=False)
+            assert r.status_code == 302
+            sso = next(v for k, v in r.headers.multi_items()
+                       if k.lower() == "set-cookie" and v.startswith("sysible_sso="))
+            assert "domain=.slop.lan" in sso.lower()
+        # A non-empty value is still honoured as an explicit override.
+        assert _reload(".custom.example")._cookie_domain() == ".custom.example"
+        # A dotless apex (localhost / bare IP) can't carry a domain scope -> host-only.
+        assert _reload("", slop_domain="localhost")._cookie_domain() is None
+    finally:
+        os.environ.pop("SLOP_COOKIE_DOMAIN", None)
