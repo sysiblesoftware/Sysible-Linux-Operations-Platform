@@ -16,8 +16,10 @@
 #   sudo ./install.sh gateway      # ONLY the gateway (apps already running)
 #   sudo ./install.sh apps         # ONLY the three apps (no gateway)
 #
-# Requirements: git, Docker Engine + the compose plugin. Nothing is re-hosted —
-# every app is cloned from its own official repo and built from source.
+# Requirements: git and Docker Engine + the compose plugin — this installer sets
+# up both automatically if they're missing (Docker via its official script, with
+# a distro-package fallback). Nothing is re-hosted — every app is cloned from its
+# own official repo and built from source.
 set -eu
 
 CTL_REPO="https://github.com/sysiblesoftware/sysible-controller"
@@ -42,8 +44,60 @@ case "${1:-all}" in
 esac
 
 [ "$(id -u)" -eq 0 ] || exec sudo -- "$0" "$@"
-command -v git >/dev/null 2>&1 || die "git is required."
-command -v docker >/dev/null 2>&1 || die "docker is required (Docker Engine + the compose plugin)."
+
+# Best-effort package install across the common distro package managers. Returns
+# non-zero if it can't find a supported one (callers decide how to handle that).
+_pm_install() {  # _pm_install <pkg>...
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y "$@"
+  elif command -v yum >/dev/null 2>&1; then yum install -y "$@"
+  elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install "$@"
+  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm "$@"
+  elif command -v apk >/dev/null 2>&1; then apk add "$@"
+  else return 1
+  fi
+}
+
+# git is needed to clone the apps — install it if it's missing.
+if ! command -v git >/dev/null 2>&1; then
+  say "== git not found — installing it =="
+  _pm_install git || true
+  command -v git >/dev/null 2>&1 || die "git is required and could not be installed automatically. Install git and re-run."
+fi
+
+# Docker Engine + the compose plugin run everything. If Docker is absent, install
+# it (we're already root here). Prefer Docker's official convenience script, which
+# sets up the engine + compose plugin on all common distros; fall back to distro
+# packages. If it still can't be installed, stop with a clear pointer.
+if ! command -v docker >/dev/null 2>&1; then
+  say "== Docker not found — installing Docker Engine + the compose plugin =="
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com | sh || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://get.docker.com | sh || true
+  else
+    _pm_install curl >/dev/null 2>&1 && { curl -fsSL https://get.docker.com | sh || true; }
+  fi
+  # Fall back to distro packages if the convenience script didn't land docker.
+  if ! command -v docker >/dev/null 2>&1; then
+    _pm_install docker.io docker-compose-plugin 2>/dev/null \
+      || _pm_install docker docker-compose 2>/dev/null || true
+  fi
+  command -v docker >/dev/null 2>&1 || die "Docker could not be installed automatically. Install Docker Engine + the compose plugin (https://docs.docker.com/engine/install/) and re-run."
+  # Enable + start the daemon so the rest of the install can use it immediately.
+  systemctl enable --now docker 2>/dev/null || service docker start 2>/dev/null || true
+  say "  Docker installed: $(docker --version 2>/dev/null || echo present)"
+fi
+
+# Make sure the Compose v2 plugin is present (the apps + gateway are compose stacks).
+if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+  say "== installing the Docker Compose plugin =="
+  _pm_install docker-compose-plugin 2>/dev/null || _pm_install docker-compose 2>/dev/null || true
+  docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1 \
+    || die "the Docker Compose plugin is required and could not be installed automatically. Install it (https://docs.docker.com/compose/install/) and re-run."
+fi
 
 dirname_for() { basename "$1"; }
 clone_one() {  # clone_one <repo-url>

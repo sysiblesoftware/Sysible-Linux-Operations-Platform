@@ -36,13 +36,18 @@ separate consoles on three ports, you run the apps and put SLOP in front.
 
 ## Requirements
 
-SLOP runs everything in containers, so the host needs very little:
+SLOP runs everything in containers, so the host needs very little — and
+`install.sh` bootstraps the two tools it depends on if they're missing:
 
 **Host (to run SLOP):**
-- **Docker Engine** with the **Compose v2** plugin (`docker compose …`) — runs the
-  gateway, the IdP, and (via the installer) the three apps.
-- **git** — `install.sh` clones each app from its own official repo.
-- **root / sudo** — to bind ports 80/443 and drive Docker.
+- **Docker Engine** + the **Compose v2** plugin — runs the gateway, the IdP, and
+  (via the installer) the three apps. **`install.sh` installs Docker for you** if
+  it's absent (Docker's official convenience script, with a distro-package
+  fallback), then enables and starts the daemon.
+- **git** — `install.sh` clones each app from its own official repo, and installs
+  git too if it's missing.
+- **root / sudo** — to install Docker, bind ports 80/443, and drive the daemon
+  (the installer re-execs itself with `sudo` if you don't start as root).
 - **Ports 80 and 443** free on the host (the single front door).
 - **Outbound network** the first time only — to clone the app repos and pull the
   base images (`caddy:2-alpine`, `python:3.12-slim`, and each app's build deps).
@@ -66,7 +71,7 @@ Connect as containers, with the SLOP gateway in front of them:
 # 1. Optional: set your domain + upstreams (defaults: slop.lan, apps on this host)
 cp .env.example .env
 
-# 2. Install everything (needs git + Docker; installs sysible_ctl to manage it all):
+# 2. Install everything (installs Docker + git if missing, plus sysible_ctl):
 sudo ./install.sh                 # the whole stack (apps + gateway)
 #   sudo ./install.sh apps        # only Controller + SLEP + Connect
 #   sudo ./install.sh gateway     # only the gateway (apps already running)
