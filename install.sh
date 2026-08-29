@@ -68,22 +68,33 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # Docker Engine + the compose plugin run everything. If Docker is absent, install
-# it (we're already root here). Prefer Docker's official convenience script, which
-# sets up the engine + compose plugin on all common distros; fall back to distro
-# packages. If it still can't be installed, stop with a clear pointer.
+# it (we're already root here). IMPORTANT ORDERING: prefer the apt/distro path
+# FIRST. Sysible ISOs already configure the official Docker repo (via
+# sysible-release, keyring /usr/share/keyrings/docker.gpg), and Debian ships
+# docker.io — so a plain apt install works. The get.docker.com convenience script
+# is only a LAST resort, because it adds its OWN docker source with a different
+# Signed-By keyring, which collides with the pre-configured one and breaks apt
+# with "Conflicting values set for option Signed-By".
 if ! command -v docker >/dev/null 2>&1; then
   say "== Docker not found — installing Docker Engine + the compose plugin =="
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com | sh || true
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- https://get.docker.com | sh || true
-  else
-    _pm_install curl >/dev/null 2>&1 && { curl -fsSL https://get.docker.com | sh || true; }
+  # Heal a prior get.docker.com run: if it left a docker.list next to a
+  # pre-configured docker source (docker.sources), remove the stray so apt can
+  # read its lists again (the two disagree on the keyring).
+  if [ -f /etc/apt/sources.list.d/docker.list ] && [ -f /etc/apt/sources.list.d/docker.sources ]; then
+    say "  removing a conflicting docker.list left by a previous run"
+    rm -f /etc/apt/sources.list.d/docker.list
   fi
-  # Fall back to distro packages if the convenience script didn't land docker.
+  # 1) The official engine from an already-configured repo (Sysible ISO / manual).
+  _pm_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null \
+    || _pm_install docker.io docker-compose-v2 2>/dev/null \
+    || _pm_install docker.io docker-compose 2>/dev/null || true
+  # 2) Only if apt couldn't provide docker at all, the vendor convenience script.
   if ! command -v docker >/dev/null 2>&1; then
-    _pm_install docker.io docker-compose-plugin 2>/dev/null \
-      || _pm_install docker docker-compose 2>/dev/null || true
+    say "  no docker package available via apt — using the vendor install script"
+    if command -v curl >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh || true
+    elif command -v wget >/dev/null 2>&1; then wget -qO- https://get.docker.com | sh || true
+    else _pm_install curl >/dev/null 2>&1 && { curl -fsSL https://get.docker.com | sh || true; }
+    fi
   fi
   command -v docker >/dev/null 2>&1 || die "Docker could not be installed automatically. Install Docker Engine + the compose plugin (https://docs.docker.com/engine/install/) and re-run."
   # Enable + start the daemon so the rest of the install can use it immediately.
