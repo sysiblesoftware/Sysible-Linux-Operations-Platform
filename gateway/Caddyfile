@@ -70,9 +70,24 @@
 		# 4) Hand off to the app (unchanged, on its own port).
 		reverse_proxy {args[0]} {
 			transport http {
+				# CE ships self-signed app certs, so the gateway can't verify the
+				# upstream cert. RESIDUAL RISK: an attacker able to interpose on the
+				# gateway->app hop (win a bind race on the app port, spoof
+				# host.docker.internal) can stand up a rogue TLS listener and capture
+				# X-Sysible-Auth, then forge any identity directly at the app port.
+				# EE fix: put the gateway + apps on a private network and verify the
+				# upstream (tls_trusted_ca_cert_file + tls_server_name / mTLS), or
+				# remove the untrusted network path. Do NOT drop this in CE — the
+				# self-signed apps would fail the handshake and the gateway would break.
 				tls_insecure_skip_verify
 			}
 			header_up X-Forwarded-Proto https
+			# Strip ONLY the IdP session cookie before forwarding, so a leaky/logging/
+			# compromised app never receives — and cannot replay — a live SSO session
+			# token (session-cookie replay / lateral movement). Find-and-replace form
+			# removes just the sysible_sso pair; the apps' OWN cookies (sysible_web,
+			# sysible_connect_session) ride the same request and are left intact.
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
 }
@@ -104,12 +119,16 @@
 	# Live health for the portal dots. Proxied same-origin so the browser never
 	# reaches the app hosts directly (and CORS is a non-issue). Public (up/down
 	# only, no sensitive data) so the dots can render before/around login.
+	# Each proxy also strips the IdP session cookie (sysible_sso) so the browser's
+	# SSO token is never exposed to an app host on this path. tls_insecure_skip_verify
+	# carries the same CE residual risk documented on the (appsite) hop above.
 	handle /healthz/controller {
 		rewrite * /api/health
 		reverse_proxy https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
 			transport http {
 				tls_insecure_skip_verify
 			}
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
 	handle /healthz/slep {
@@ -118,6 +137,7 @@
 			transport http {
 				tls_insecure_skip_verify
 			}
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
 	handle /healthz/connect {
@@ -126,6 +146,7 @@
 			transport http {
 				tls_insecure_skip_verify
 			}
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
 

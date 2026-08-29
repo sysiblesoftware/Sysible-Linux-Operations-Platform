@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import warnings
+from html import unescape
 
 import pytest
 
@@ -48,8 +49,15 @@ def cl(client):
 HDR = {"origin": "http://slop.lan"}
 
 
+def _tok(c):
+    """Fetch the double-submit CSRF token the server hands out (a GET /login seeds
+    the cookie); its value is what every state-changing POST must echo back."""
+    c.get("/login", follow_redirects=False)
+    return c.cookies.get("sysible_csrf")
+
+
 def _login(c, user, pw):
-    return c.post("/login", data={"username": user, "password": pw},
+    return c.post("/login", data={"username": user, "password": pw, "csrf": _tok(c)},
                   headers=HDR, follow_redirects=False)
 
 
@@ -86,18 +94,25 @@ def test_admin_create_reset_and_forced_change(client):
     from starlette.testclient import TestClient
     cl, m = client
     _login(cl, "admin", ADMIN_PW)
-    r = cl.post("/admin/users", data={"username": "opsy", "role": "operator", "password": "temppass12345"},
-                headers=HDR)
+    r = cl.post("/admin/users",
+                data={"username": "opsy", "role": "operator", "password": "temppass12345",
+                      "csrf": _tok(cl)}, headers=HDR)
     assert r.status_code == 200 and "Created" in r.text
     # a freshly created user must change their password at first login
-    r = cl.post("/admin/users/opsy/reset", headers=HDR)
-    from html import unescape
+    r = cl.post("/admin/users/opsy/reset", data={"csrf": _tok(cl)}, headers=HDR)
     temp = re.search(r"password for 'opsy': (\S+)", unescape(r.text)).group(1)
     with TestClient(m.app, base_url="http://slop.lan") as d:
         r = _login(d, "opsy", temp)
         assert r.status_code == 302 and r.headers["location"].startswith("/account")
-        # role is reflected in the SSO probe
-        assert d.get("/auth/verify").headers["X-Sysible-Role"] == "operator"
+        # must_change is enforced at the gateway probe: no app access until changed
+        assert d.get("/auth/verify").status_code == 401
+        # after changing it, the probe passes and reflects the role
+        d.post("/account/password",
+               data={"current": temp, "new1": "opsynewpass123", "new2": "opsynewpass123",
+                     "csrf": _tok(d)}, headers=HDR)
+        v = d.get("/auth/verify")
+        assert v.status_code == 204
+        assert v.headers["X-Sysible-Role"] == "operator"
         # a non-superuser can't reach the admin console
         assert d.get("/admin").status_code == 403
 
@@ -105,8 +120,8 @@ def test_admin_create_reset_and_forced_change(client):
 def test_self_service_password_change(cl):
     _login(cl, "admin", ADMIN_PW)
     r = cl.post("/account/password",
-                data={"current": ADMIN_PW, "new1": "brandnewpass99", "new2": "brandnewpass99"},
-                headers=HDR)
+                data={"current": ADMIN_PW, "new1": "brandnewpass99", "new2": "brandnewpass99",
+                      "csrf": _tok(cl)}, headers=HDR)
     assert "Password changed" in r.text
     cl.post("/logout", headers=HDR, follow_redirects=False)
     assert _login(cl, "admin", "brandnewpass99").status_code == 302
@@ -114,38 +129,158 @@ def test_self_service_password_change(cl):
 
 def test_password_change_rejects_short_and_mismatch(cl):
     _login(cl, "admin", ADMIN_PW)
-    r = cl.post("/account/password", data={"current": ADMIN_PW, "new1": "short", "new2": "short"}, headers=HDR)
-    assert r.status_code == 400
-    r = cl.post("/account/password", data={"current": ADMIN_PW, "new1": "longenough123", "new2": "different123"},
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "short", "new2": "short", "csrf": _tok(cl)},
                 headers=HDR)
+    assert r.status_code == 400
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "longenough123", "new2": "different123",
+                      "csrf": _tok(cl)}, headers=HDR)
     assert r.status_code == 400
 
 
 def test_cross_site_post_blocked(cl):
     _login(cl, "admin", ADMIN_PW)
     r = cl.post("/account/password",
-                data={"current": ADMIN_PW, "new1": "xxxxxxxxxx11", "new2": "xxxxxxxxxx11"},
+                data={"current": ADMIN_PW, "new1": "xxxxxxxxxx11", "new2": "xxxxxxxxxx11",
+                      "csrf": _tok(cl)},
                 headers={"origin": "http://evil.example"})
+    assert r.status_code == 403
+
+
+def test_sibling_subdomain_origin_blocked(cl):
+    # A sibling *.slop.lan app shares the parent-domain session cookie; it must NOT
+    # be able to drive a state change here (the origin allowlist is the IdP only).
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "xxxxxxxxxx22", "new2": "xxxxxxxxxx22",
+                      "csrf": _tok(cl)},
+                headers={"origin": "http://controller.slop.lan"})
+    assert r.status_code == 403
+
+
+def test_csrf_token_required_on_state_change(cl):
+    # Right origin + right current password, but a MISSING csrf token is rejected.
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "nocsrfhere123", "new2": "nocsrfhere123"},
+                headers=HDR)
+    assert r.status_code == 403
+    # a WRONG csrf token is rejected too
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "nocsrfhere123", "new2": "nocsrfhere123",
+                      "csrf": "not-the-real-token"},
+                headers=HDR)
+    assert r.status_code == 403
+    # and the password was never changed
+    cl.post("/logout", headers=HDR, follow_redirects=False)
+    assert _login(cl, "admin", ADMIN_PW).status_code == 302
+
+
+def test_missing_origin_and_referer_fails_closed(cl):
+    # No Origin AND no Referer on a state-changing POST → reject (no silent allow).
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.post("/account/password",
+                data={"current": ADMIN_PW, "new1": "noorigin1234", "new2": "noorigin1234",
+                      "csrf": _tok(cl)})
     assert r.status_code == 403
 
 
 def test_cannot_delete_or_demote_last_superuser(cl):
     _login(cl, "admin", ADMIN_PW)
-    assert cl.post("/admin/users/admin/delete", headers=HDR).status_code == 400
-    assert cl.post("/admin/users/admin/role", data={"role": "operator"}, headers=HDR).status_code == 400
+    assert cl.post("/admin/users/admin/delete", data={"csrf": _tok(cl)}, headers=HDR).status_code == 400
+    assert cl.post("/admin/users/admin/role", data={"role": "operator", "csrf": _tok(cl)},
+                   headers=HDR).status_code == 400
 
 
 def test_reset_kills_existing_sessions(client):
     from starlette.testclient import TestClient
     cl, m = client
     _login(cl, "admin", ADMIN_PW)
-    cl.post("/admin/users", data={"username": "sam", "role": "auditor", "password": "sampass12345"}, headers=HDR)
+    cl.post("/admin/users", data={"username": "sam", "role": "auditor", "password": "sampass12345",
+                                  "csrf": _tok(cl)}, headers=HDR)
     with TestClient(m.app, base_url="http://slop.lan") as d:
         # first login forces a change; do it so sam has a live, usable session
-        d.post("/login", data={"username": "sam", "password": "sampass12345"}, headers=HDR, follow_redirects=False)
+        _login(d, "sam", "sampass12345")
         d.post("/account/password",
-               data={"current": "sampass12345", "new1": "sambrandnew99", "new2": "sambrandnew99"}, headers=HDR)
+               data={"current": "sampass12345", "new1": "sambrandnew99", "new2": "sambrandnew99",
+                     "csrf": _tok(d)}, headers=HDR)
         assert d.get("/auth/verify").status_code == 204
         # admin resets sam's password -> sam's live session is dropped immediately
-        cl.post("/admin/users/sam/reset", headers=HDR)
+        cl.post("/admin/users/sam/reset", data={"csrf": _tok(cl)}, headers=HDR)
         assert d.get("/auth/verify").status_code == 401
+
+
+# ---- regression tests for the pentest fixes --------------------------------
+def test_verify_blocked_until_password_changed(client):
+    """must_change is enforced at /auth/verify: 401 while pending, 204 only after
+    the password is actually changed."""
+    from starlette.testclient import TestClient
+    cl, m = client
+    _login(cl, "admin", ADMIN_PW)
+    cl.post("/admin/users",
+            data={"username": "newbie", "role": "operator", "password": "temppass12345",
+                  "csrf": _tok(cl)}, headers=HDR)
+    r = cl.post("/admin/users/newbie/reset", data={"csrf": _tok(cl)}, headers=HDR)
+    temp = re.search(r"password for 'newbie': (\S+)", unescape(r.text)).group(1)
+    with TestClient(m.app, base_url="http://slop.lan") as d:
+        assert _login(d, "newbie", temp).status_code == 302
+        # forced change pending -> the gateway probe refuses (no app access)
+        assert d.get("/auth/verify").status_code == 401
+        # change it -> probe now succeeds
+        d.post("/account/password",
+               data={"current": temp, "new1": "newbiepass777", "new2": "newbiepass777",
+                     "csrf": _tok(d)}, headers=HDR)
+        assert d.get("/auth/verify").status_code == 204
+
+
+def test_password_change_revokes_other_sessions(client):
+    """Changing a password invalidates OTHER sessions (a stolen cookie) while
+    keeping the acting browser signed in."""
+    from starlette.testclient import TestClient
+    cl, m = client
+    _login(cl, "admin", ADMIN_PW)
+    with TestClient(m.app, base_url="http://slop.lan") as thief:
+        _login(thief, "admin", ADMIN_PW)
+        assert thief.get("/auth/verify").status_code == 204
+        # the real user rotates their password in the first browser
+        r = cl.post("/account/password",
+                    data={"current": ADMIN_PW, "new1": "rotated-pw-123", "new2": "rotated-pw-123",
+                          "csrf": _tok(cl)}, headers=HDR)
+        assert "Password changed" in r.text
+        # acting browser stays signed in (fresh cookie minted on the response)...
+        assert cl.get("/auth/verify").status_code == 204
+        # ...but the other/stolen session is revoked immediately
+        assert thief.get("/auth/verify").status_code == 401
+
+
+def test_throttle_not_bypassable_by_spoofed_xff(client):
+    """Rotating X-Forwarded-For on every attempt must NOT dodge the throttle —
+    it keys on the real proxy peer + the target username, not on client XFF."""
+    cl, m = client
+    last = None
+    for i in range(m._LOGIN_MAX + 2):
+        last = cl.post(
+            "/login",
+            data={"username": "admin", "password": "wrong", "csrf": _tok(cl)},
+            headers={"origin": "http://slop.lan", "x-forwarded-for": f"10.0.0.{i}"},
+            follow_redirects=False,
+        )
+    assert last.status_code == 429
+
+
+def test_login_runs_scrypt_even_for_unknown_user(client):
+    """Timing side channel: the login path always runs a scrypt verify — against
+    the fixed dummy hash when the user doesn't exist — so both branches cost the
+    same and valid usernames can't be enumerated by latency."""
+    cl, m = client
+    seen = []
+    orig = m._verify_password
+    m._verify_password = lambda pw, stored: seen.append(stored) or orig(pw, stored)
+    try:
+        r = _login(cl, "definitely-not-a-real-user", "whateverpass12")
+    finally:
+        m._verify_password = orig
+    assert r.status_code == 401
+    # scrypt ran against the module-level dummy hash for the nonexistent user
+    assert m._DUMMY_HASH in seen

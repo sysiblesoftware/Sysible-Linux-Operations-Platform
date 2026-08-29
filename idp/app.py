@@ -57,15 +57,28 @@ DB_PATH = os.environ.get("SLOP_DB_PATH", os.path.join(DATA_DIR, "slop-idp.db"))
 SLOP_DOMAIN = os.environ.get("SLOP_DOMAIN", "slop.lan")
 _COOKIE_DOMAIN_ENV = os.environ.get("SLOP_COOKIE_DOMAIN")  # explicit override wins
 COOKIE = "sysible_sso"
+# Double-submit CSRF token cookie. Deliberately HOST-ONLY (no parent-domain
+# scope) so a sibling *.slop.lan app can't read it, and readable by our own form
+# JS-free flow (the server echoes it into a hidden field); a state-changing POST
+# must return the same value in that field.
+CSRF_COOKIE = "sysible_csrf"
 
 # Secure cookie by default (the gateway always terminates TLS). A deliberate
 # plain-HTTP dev run opts out so the cookie rides http:// during local testing.
 _ALLOW_INSECURE = os.environ.get("SLOP_ALLOW_INSECURE_COOKIE", "0") == "1"
 SESSION_TTL = int(os.environ.get("SLOP_SESSION_TTL", str(12 * 3600)))  # 12h
 
-# Brute-force throttle for POST /login (per client IP).
+# Brute-force throttle for POST /login. Caddy is the SOLE front end, so the
+# trusted client address is the direct proxy peer (request.client.host), never a
+# client-supplied X-Forwarded-For an attacker can rotate to dodge the limit. We
+# throttle on that peer AND per target username, so neither source-address
+# rotation nor username spraying can slip past the cap.
 _LOGIN_MAX = int(os.environ.get("SLOP_LOGIN_MAX_ATTEMPTS", "8"))
 _LOGIN_WINDOW = int(os.environ.get("SLOP_LOGIN_WINDOW_S", "300"))
+# Bound the in-memory attempt map: a flood of distinct usernames/peers must not
+# grow it without limit. Empty/expired buckets are purged each check; if still
+# over this many keys, the stalest are evicted.
+_LOGIN_ATTEMPTS_MAX_KEYS = int(os.environ.get("SLOP_LOGIN_MAX_KEYS", "4096"))
 
 # The three canonical SLOP roles, most→least privileged. Each app maps these onto
 # its own vocabulary (e.g. SLEP: auditor→viewer). Keep this list authoritative.
@@ -135,6 +148,12 @@ def _verify_password(password: str, stored: str) -> bool:
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(dk.hex(), hash_hex)
+
+
+# A fixed dummy hash (current _SCRYPT params) verified against whenever the
+# submitted username doesn't exist, so the login path always pays the same scrypt
+# cost either way — closing the username-enumeration timing side channel.
+_DUMMY_HASH = _hash_password(secrets.token_urlsafe(16))
 
 
 def _get_user(username: str) -> sqlite3.Row | None:
@@ -235,33 +254,59 @@ def _bootstrap_admin() -> None:
 # ---------------------------------------------------------------------------
 # Request helpers
 # ---------------------------------------------------------------------------
+# Failed-login timestamps, keyed by "ip:<peer>" and "user:<username>".
 _login_attempts: dict[str, list[float]] = {}
 
 
 def _client_ip(request: Request) -> str:
-    # Caddy is the only thing in front of us; honor its X-Forwarded-For so the
-    # throttle keys on the real client, not the proxy.
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    # Caddy is the ONLY thing in front of us, so the trusted client address is the
+    # direct peer — NOT a client-supplied X-Forwarded-For, which an attacker can
+    # rotate on every request to land in a fresh bucket and defeat the throttle.
+    # Never key the throttle on XFF here.
     return request.client.host if request.client else "unknown"
 
 
-def _throttled(ip: str) -> int:
-    now = time.time()
-    hits = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
-    _login_attempts[ip] = hits
+def _prune_attempts(now: float) -> None:
+    """Purge empty/expired buckets and, if still over the cap, evict the stalest
+    keys — so distinct source keys can't grow the map without bound."""
+    for k in [k for k, v in _login_attempts.items()
+              if not v or now - v[-1] >= _LOGIN_WINDOW]:
+        _login_attempts.pop(k, None)
+    excess = len(_login_attempts) - _LOGIN_ATTEMPTS_MAX_KEYS
+    if excess > 0:
+        for k in sorted(_login_attempts, key=lambda k: _login_attempts[k][-1])[:excess]:
+            _login_attempts.pop(k, None)
+
+
+def _bucket_wait(key: str, now: float) -> int:
+    hits = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW]
+    if hits:
+        _login_attempts[key] = hits
+    else:
+        _login_attempts.pop(key, None)
     if len(hits) >= _LOGIN_MAX:
         return int(_LOGIN_WINDOW - (now - hits[0]))
     return 0
 
 
-def _record_fail(ip: str) -> None:
-    _login_attempts.setdefault(ip, []).append(time.time())
+def _throttled(ip: str, username: str) -> int:
+    """Seconds the caller must wait before another attempt (0 if allowed).
+    Throttles on the trusted proxy peer AND the target username, so a spray that
+    rotates the source address still can't exceed the per-account limit."""
+    now = time.time()
+    _prune_attempts(now)
+    return max(_bucket_wait("ip:" + ip, now), _bucket_wait("user:" + username, now))
 
 
-def _clear_fails(ip: str) -> None:
-    _login_attempts.pop(ip, None)
+def _record_fail(ip: str, username: str) -> None:
+    now = time.time()
+    for key in ("ip:" + ip, "user:" + username):
+        _login_attempts.setdefault(key, []).append(now)
+
+
+def _clear_fails(ip: str, username: str) -> None:
+    _login_attempts.pop("ip:" + ip, None)
+    _login_attempts.pop("user:" + username, None)
 
 
 def _cookie_domain() -> str | None:
@@ -290,19 +335,53 @@ def _clear_session_cookie(resp: Response) -> None:
     resp.delete_cookie(COOKIE, domain=_cookie_domain(), path="/")
 
 
+def _csrf_token(request: Request) -> str:
+    """The browser's double-submit CSRF token, minting a fresh one if it has none
+    yet. Deterministic given an existing cookie, so building a form and setting
+    the cookie in the same handler use the SAME value."""
+    return request.cookies.get(CSRF_COOKIE) or secrets.token_urlsafe(32)
+
+
+def _set_csrf_cookie(resp: Response, token: str) -> None:
+    # Host-only (no Domain) so siblings can't read it; not httponly since it's a
+    # double-submit token the form must echo, never a credential.
+    resp.set_cookie(
+        CSRF_COOKIE, token,
+        max_age=SESSION_TTL,
+        httponly=False,
+        secure=not _ALLOW_INSECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _csrf_html(html: str, token: str, status_code: int = 200) -> HTMLResponse:
+    """Render HTML that already embeds `token` and (re)issue the matching cookie."""
+    resp = HTMLResponse(html, status_code=status_code)
+    _set_csrf_cookie(resp, token)
+    return resp
+
+
+def _csrf_ok(request: Request, submitted: str | None) -> bool:
+    """Double-submit check: the form's token must match the cookie (constant-time)."""
+    have = request.cookies.get(CSRF_COOKIE)
+    if not have or not submitted:
+        return False
+    return hmac.compare_digest(have, submitted)
+
+
 def _origin_ok(request: Request) -> bool:
-    """Same-origin backstop for state-changing POSTs (SameSite=Lax is the primary
-    control). If the browser sent an Origin/Referer, its host must be us or a
-    sibling *.slop.lan; absent both, allow (non-browser tooling / curl)."""
+    """Same-origin guard for state-changing POSTs. The Origin/Referer host must be
+    the IdP's OWN origin — never a sibling *.slop.lan app, which shares the
+    parent-domain session cookie and must not be able to drive state changes here.
+    Fail CLOSED when a browser sends neither header (no silent allow)."""
     for h in ("origin", "referer"):
         v = request.headers.get(h)
         if not v:
             continue
         host = (urlsplit(v).hostname or "").lower()
-        if host == SLOP_DOMAIN or host.endswith("." + SLOP_DOMAIN) or host in ("localhost", "127.0.0.1"):
-            return True
-        return False
-    return True
+        return host == SLOP_DOMAIN or host in ("localhost", "127.0.0.1")
+    return False  # neither Origin nor Referer present → reject
 
 
 def _safe_next(raw: str | None) -> str:
@@ -421,11 +500,18 @@ def auth_verify(request: Request) -> Response:
     sess = _current(request)
     if not sess:
         return Response(status_code=401, headers={"Cache-Control": "no-store"})
+    # Re-read the user on EVERY verify (the session row predates any later admin
+    # reset/role change). If the account is gone, or a forced password change is
+    # still pending, refuse: Caddy bounces to /login, which routes to /account, so
+    # no app subdomain is reachable until the password is actually changed.
+    user = _get_user(sess["username"])
+    if not user or user["must_change"]:
+        return Response(status_code=401, headers={"Cache-Control": "no-store"})
     return Response(
         status_code=204,
         headers={
-            "X-Sysible-User": sess["username"],
-            "X-Sysible-Role": sess["role"],
+            "X-Sysible-User": user["username"],
+            "X-Sysible-Role": user["role"],
             "Cache-Control": "no-store",
         },
     )
@@ -446,12 +532,17 @@ def auth_me(request: Request):
 
 
 # ---- login / logout --------------------------------------------------------
-def _login_form(next_url: str, msg: str = "") -> str:
+def _hidden_csrf(token: str) -> str:
+    return f"<input type=hidden name=csrf value='{escape(token)}'>"
+
+
+def _login_form(next_url: str, msg: str = "", csrf: str = "") -> str:
     body = (
         "<h1>Sign in</h1><p class=sub>One sign-in for Controller, Engineering "
         "Platform, and Connect.</p>"
         f"{_msg(msg)}"
         f"<form method=post action='/login?{urlencode({'next': next_url})}'>"
+        f"{_hidden_csrf(csrf)}"
         "<label>Username</label>"
         "<input name=username autocomplete=username autofocus required>"
         "<label>Password</label>"
@@ -464,9 +555,13 @@ def _login_form(next_url: str, msg: str = "") -> str:
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request, next: str = "/"):
     nxt = _safe_next(next)
+    tok = _csrf_token(request)
     if _current(request):  # already signed in → straight through
-        return RedirectResponse(nxt, status_code=302)
-    return HTMLResponse(_login_form(nxt))
+        resp: Response = RedirectResponse(nxt, status_code=302)
+    else:
+        resp = HTMLResponse(_login_form(nxt, csrf=tok))
+    _set_csrf_cookie(resp, tok)  # seed the double-submit token either way
+    return resp
 
 
 @app.post("/login")
@@ -474,28 +569,38 @@ def login_post(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    csrf: str = Form(""),
     next: str = "/",
 ):
     nxt = _safe_next(next)
+    tok = _csrf_token(request)
     if not _origin_ok(request):
-        return HTMLResponse(_login_form(nxt, "Request blocked (bad origin)."), status_code=403)
+        return _csrf_html(_login_form(nxt, "Request blocked (bad origin).", tok), tok, 403)
+    if not _csrf_ok(request, csrf):
+        return _csrf_html(_login_form(nxt, "Request blocked (bad or missing token).", tok), tok, 403)
+    uname = username.strip()
     ip = _client_ip(request)
-    wait = _throttled(ip)
+    wait = _throttled(ip, uname)
     if wait:
-        return HTMLResponse(
-            _login_form(nxt, f"Too many attempts. Try again in {max(wait, 1)}s."),
-            status_code=429,
+        return _csrf_html(
+            _login_form(nxt, f"Too many attempts. Try again in {max(wait, 1)}s.", tok), tok, 429
         )
-    user = _get_user(username.strip())
-    if not user or not _verify_password(password, user["pw_hash"]):
-        _record_fail(ip)
-        return HTMLResponse(_login_form(nxt, "Invalid username or password."), status_code=401)
-    _clear_fails(ip)
+    user = _get_user(uname)
+    # Always run a scrypt verification — against a fixed dummy hash when the user
+    # doesn't exist — so both branches cost the same and the response latency can't
+    # be used to enumerate valid usernames (timing side channel).
+    pw_hash = user["pw_hash"] if user else _DUMMY_HASH
+    ok = _verify_password(password, pw_hash)
+    if not user or not ok:
+        _record_fail(ip, uname)
+        return _csrf_html(_login_form(nxt, "Invalid username or password.", tok), tok, 401)
+    _clear_fails(ip, uname)
     token = _new_session(user["username"], user["role"])
     # A forced password change (fresh account / admin reset) routes to /account first.
     dest = "/account?first=1" if user["must_change"] else nxt
     resp = RedirectResponse(dest, status_code=302)
     _set_session_cookie(resp, token)
+    _set_csrf_cookie(resp, tok)
     return resp
 
 
@@ -508,7 +613,8 @@ def logout_post(request: Request):
 
 
 # ---- self-service account (change my own password) -------------------------
-def _account_page(sess: sqlite3.Row, first: bool, msg: str = "", kind: str = "err") -> str:
+def _account_page(sess: sqlite3.Row, first: bool, msg: str = "", kind: str = "err",
+                  csrf: str = "") -> str:
     must = first or (_get_user(sess["username"]) or {"must_change": 0})["must_change"]
     intro = (
         "<div class='msg err'>Set a new password to continue.</div>"
@@ -521,6 +627,7 @@ def _account_page(sess: sqlite3.Row, first: bool, msg: str = "", kind: str = "er
         f"<p class=sub>{admin_link}<a href='/'>Open portal →</a></p>"
         f"{intro}{_msg(msg, kind)}"
         "<form method=post action='/account/password'>"
+        f"{_hidden_csrf(csrf)}"
         "<label>Current password</label>"
         "<input type=password name=current autocomplete=current-password required>"
         "<label>New password</label>"
@@ -529,6 +636,7 @@ def _account_page(sess: sqlite3.Row, first: bool, msg: str = "", kind: str = "er
         "<input type=password name=new2 autocomplete=new-password required>"
         "<button type=submit>Change password</button></form>"
         "<form method=post action='/logout' style='margin-top:.6em'>"
+        f"{_hidden_csrf(csrf)}"
         "<button class=sec type=submit>Sign out</button></form>"
     )
     return _page("Account · SLOP", body)
@@ -539,7 +647,8 @@ def account_get(request: Request, first: int = 0):
     sess = _current(request)
     if not sess:
         return RedirectResponse("/login?" + urlencode({"next": "/account"}), status_code=302)
-    return HTMLResponse(_account_page(sess, bool(first)))
+    tok = _csrf_token(request)
+    return _csrf_html(_account_page(sess, bool(first), csrf=tok), tok)
 
 
 _MIN_PW = int(os.environ.get("SLOP_MIN_PASSWORD_LEN", "10"))
@@ -551,33 +660,41 @@ def account_password(
     current: str = Form(...),
     new1: str = Form(...),
     new2: str = Form(...),
+    csrf: str = Form(""),
 ):
     sess = _current(request)
     if not sess:
         return RedirectResponse("/login", status_code=302)
+    tok = _csrf_token(request)
     if not _origin_ok(request):
-        return HTMLResponse(_account_page(sess, False, "Request blocked (bad origin)."), status_code=403)
+        return _csrf_html(_account_page(sess, False, "Request blocked (bad origin).", csrf=tok), tok, 403)
+    if not _csrf_ok(request, csrf):
+        return _csrf_html(_account_page(sess, False, "Request blocked (bad or missing token).", csrf=tok), tok, 403)
     user = _get_user(sess["username"])
     if not user or not _verify_password(current, user["pw_hash"]):
-        return HTMLResponse(_account_page(sess, False, "Current password is incorrect."), status_code=401)
+        return _csrf_html(_account_page(sess, False, "Current password is incorrect.", csrf=tok), tok, 401)
     if new1 != new2:
-        return HTMLResponse(_account_page(sess, False, "The new passwords don't match."), status_code=400)
+        return _csrf_html(_account_page(sess, False, "The new passwords don't match.", csrf=tok), tok, 400)
     if len(new1) < _MIN_PW:
-        return HTMLResponse(
-            _account_page(sess, False, f"Use at least {_MIN_PW} characters."), status_code=400
-        )
+        return _csrf_html(_account_page(sess, False, f"Use at least {_MIN_PW} characters.", csrf=tok), tok, 400)
     if _verify_password(new1, user["pw_hash"]):
-        return HTMLResponse(
-            _account_page(sess, False, "Choose a password you haven't used here."), status_code=400
-        )
+        return _csrf_html(_account_page(sess, False, "Choose a password you haven't used here.", csrf=tok), tok, 400)
     _upsert_user(user["username"], new1, user["role"], must_change=False)
-    return HTMLResponse(_account_page(sess, False, "Password changed.", kind="ok"))
+    # A password change must revoke a stolen/older cookie: drop EVERY session for
+    # this user (including this browser's), then mint a fresh one and set it on the
+    # response so the acting browser stays signed in while all others are killed.
+    _drop_user_sessions(user["username"])
+    new_token = _new_session(user["username"], user["role"])
+    resp = _csrf_html(_account_page(sess, False, "Password changed.", kind="ok", csrf=tok), tok)
+    _set_session_cookie(resp, new_token)
+    return resp
 
 
 # ---- superuser: manage accounts + reset anyone's password ------------------
-def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok") -> str:
+def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = "") -> str:
     with _db() as c:
         rows = c.execute("SELECT username, role, must_change FROM users ORDER BY username").fetchall()
+    hidden = _hidden_csrf(csrf)
     trs = ""
     for r in rows:
         opts = "".join(
@@ -590,14 +707,14 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok") -> str:
             f"<tr><td>{escape(r['username'])}<span class=pill>{flag}</span></td>"
             f"<td><form method=post action='/admin/users/{escape(r['username'])}/role' class=row "
             f"style='align-items:center;margin:0'>"
-            f"<select name=role>{opts}</select>"
+            f"{hidden}<select name=role>{opts}</select>"
             f"<button class=mini type=submit>Set</button></form></td>"
             f"<td><form method=post action='/admin/users/{escape(r['username'])}/reset' style='margin:0'>"
-            f"<button class='mini sec' type=submit>Reset password</button></form></td>"
+            f"{hidden}<button class='mini sec' type=submit>Reset password</button></form></td>"
             f"<td style='text-align:right'>"
             + ("" if is_self else
                f"<form method=post action='/admin/users/{escape(r['username'])}/delete' style='margin:0'>"
-               f"<button class=danger type=submit>Delete</button></form>")
+               f"{hidden}<button class=danger type=submit>Delete</button></form>")
             + "</td></tr>"
         )
     role_opts = "".join(f"<option value='{ro}'>{ro}</option>" for ro in ROLES)
@@ -610,6 +727,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok") -> str:
         f"{trs}</table>"
         "<fieldset><legend>Add a user</legend>"
         "<form method=post action='/admin/users'>"
+        f"{hidden}"
         "<div class=row><div><label>Username</label>"
         "<input name=username required></div>"
         f"<div><label>Role</label><select name=role>{role_opts}</select></div></div>"
@@ -631,89 +749,109 @@ def _require_super(request: Request):
     return sess, None
 
 
+def _admin_guard(request: Request, sess: sqlite3.Row, csrf: str, tok: str):
+    """Shared origin + CSRF check for admin mutations. Returns an error response
+    to send, or None when the request may proceed."""
+    if not _origin_ok(request):
+        return _csrf_html(_admin_page(sess, "Request blocked (bad origin).", "err", csrf=tok), tok, 403)
+    if not _csrf_ok(request, csrf):
+        return _csrf_html(_admin_page(sess, "Request blocked (bad or missing token).", "err", csrf=tok), tok, 403)
+    return None
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_get(request: Request):
     sess, err = _require_super(request)
     if err:
         return err
-    return HTMLResponse(_admin_page(sess))
+    tok = _csrf_token(request)
+    return _csrf_html(_admin_page(sess, csrf=tok), tok)
 
 
 @app.post("/admin/users")
-def admin_add(request: Request, username: str = Form(...), role: str = Form(...), password: str = Form(...)):
+def admin_add(request: Request, username: str = Form(...), role: str = Form(...),
+              password: str = Form(...), csrf: str = Form("")):
     sess, err = _require_super(request)
     if err:
         return err
-    if not _origin_ok(request):
-        return HTMLResponse(_admin_page(sess, "Request blocked (bad origin).", "err"), status_code=403)
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
     username = username.strip()
     if not username or role not in ROLES:
-        return HTMLResponse(_admin_page(sess, "Username and a valid role are required.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, "Username and a valid role are required.", "err", csrf=tok), tok, 400)
     if len(password) < _MIN_PW:
-        return HTMLResponse(_admin_page(sess, f"Temporary password needs {_MIN_PW}+ characters.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, f"Temporary password needs {_MIN_PW}+ characters.", "err", csrf=tok), tok, 400)
     if _get_user(username):
-        return HTMLResponse(_admin_page(sess, f"User '{username}' already exists.", "err"), status_code=409)
+        return _csrf_html(_admin_page(sess, f"User '{username}' already exists.", "err", csrf=tok), tok, 409)
     _upsert_user(username, password, role, must_change=True)
-    return HTMLResponse(_admin_page(sess, f"Created '{username}'.", "ok"))
+    return _csrf_html(_admin_page(sess, f"Created '{username}'.", "ok", csrf=tok), tok)
 
 
 @app.post("/admin/users/{username}/reset")
-def admin_reset(request: Request, username: str):
+def admin_reset(request: Request, username: str, csrf: str = Form("")):
     sess, err = _require_super(request)
     if err:
         return err
-    if not _origin_ok(request):
-        return HTMLResponse(_admin_page(sess, "Request blocked (bad origin).", "err"), status_code=403)
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
     if not _get_user(username):
-        return HTMLResponse(_admin_page(sess, "No such user.", "err"), status_code=404)
+        return _csrf_html(_admin_page(sess, "No such user.", "err", csrf=tok), tok, 404)
     temp = secrets.token_urlsafe(12)
     u = _get_user(username)
     _upsert_user(username, temp, u["role"], must_change=True)
     _drop_user_sessions(username)  # force re-login with the new password
-    return HTMLResponse(
-        _admin_page(sess, f"Temporary password for '{username}': {temp}  (they must change it at next login)", "ok")
+    return _csrf_html(
+        _admin_page(sess, f"Temporary password for '{username}': {temp}  (they must change it at next login)", "ok", csrf=tok), tok
     )
 
 
 @app.post("/admin/users/{username}/role")
-def admin_role(request: Request, username: str, role: str = Form(...)):
+def admin_role(request: Request, username: str, role: str = Form(...), csrf: str = Form("")):
     sess, err = _require_super(request)
     if err:
         return err
-    if not _origin_ok(request):
-        return HTMLResponse(_admin_page(sess, "Request blocked (bad origin).", "err"), status_code=403)
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
     u = _get_user(username)
     if not u or role not in ROLES:
-        return HTMLResponse(_admin_page(sess, "No such user, or invalid role.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, "No such user, or invalid role.", "err", csrf=tok), tok, 400)
     # Don't let the last superuser demote themselves out of admin access.
     if u["role"] == "superuser" and role != "superuser" and _count_role("superuser") <= 1:
-        return HTMLResponse(_admin_page(sess, "Can't demote the only superuser.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, "Can't demote the only superuser.", "err", csrf=tok), tok, 400)
     # Update only the role in place — never touch the stored password hash.
     with _db() as c:
         c.execute("UPDATE users SET role=?, updated_at=? WHERE username=?",
                   (role, int(time.time()), username))
     _drop_user_sessions(username)  # role change takes effect immediately
-    return HTMLResponse(_admin_page(sess, f"Set {username}'s role to {role}.", "ok"))
+    return _csrf_html(_admin_page(sess, f"Set {username}'s role to {role}.", "ok", csrf=tok), tok)
 
 
 @app.post("/admin/users/{username}/delete")
-def admin_delete(request: Request, username: str):
+def admin_delete(request: Request, username: str, csrf: str = Form("")):
     sess, err = _require_super(request)
     if err:
         return err
-    if not _origin_ok(request):
-        return HTMLResponse(_admin_page(sess, "Request blocked (bad origin).", "err"), status_code=403)
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
     if username == sess["username"]:
-        return HTMLResponse(_admin_page(sess, "You can't delete your own account.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, "You can't delete your own account.", "err", csrf=tok), tok, 400)
     u = _get_user(username)
     if not u:
-        return HTMLResponse(_admin_page(sess, "No such user.", "err"), status_code=404)
+        return _csrf_html(_admin_page(sess, "No such user.", "err", csrf=tok), tok, 404)
     if u["role"] == "superuser" and _count_role("superuser") <= 1:
-        return HTMLResponse(_admin_page(sess, "Can't delete the only superuser.", "err"), status_code=400)
+        return _csrf_html(_admin_page(sess, "Can't delete the only superuser.", "err", csrf=tok), tok, 400)
     with _db() as c:
         c.execute("DELETE FROM users WHERE username=?", (username,))
     _drop_user_sessions(username)
-    return HTMLResponse(_admin_page(sess, f"Deleted '{username}'.", "ok"))
+    return _csrf_html(_admin_page(sess, f"Deleted '{username}'.", "ok", csrf=tok), tok)
 
 
 if __name__ == "__main__":

@@ -88,12 +88,23 @@ if ! command -v docker >/dev/null 2>&1; then
   _pm_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null \
     || _pm_install docker.io docker-compose-v2 2>/dev/null \
     || _pm_install docker.io docker-compose 2>/dev/null || true
-  # 2) Only if apt couldn't provide docker at all, the vendor convenience script.
+  # 2) Only if apt couldn't provide docker at all, the vendor convenience script —
+  #    but that pipes remote code straight into a ROOT shell with no chance to
+  #    inspect it, so it is NOT run automatically. Require an explicit operator
+  #    opt-in (SYSIBLE_ALLOW_DOCKER_CONVENIENCE_SCRIPT=1); otherwise fall through to
+  #    the die below, which prints the official manual-install URL.
   if ! command -v docker >/dev/null 2>&1; then
-    say "  no docker package available via apt — using the vendor install script"
-    if command -v curl >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh || true
-    elif command -v wget >/dev/null 2>&1; then wget -qO- https://get.docker.com | sh || true
-    else _pm_install curl >/dev/null 2>&1 && { curl -fsSL https://get.docker.com | sh || true; }
+    if [ "${SYSIBLE_ALLOW_DOCKER_CONVENIENCE_SCRIPT:-0}" = 1 ]; then
+      say "  no docker package via apt — running the vendor install script (opt-in via SYSIBLE_ALLOW_DOCKER_CONVENIENCE_SCRIPT=1)"
+      if command -v curl >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh || true
+      elif command -v wget >/dev/null 2>&1; then wget -qO- https://get.docker.com | sh || true
+      else _pm_install curl >/dev/null 2>&1 && { curl -fsSL https://get.docker.com | sh || true; }
+      fi
+    else
+      say "  no docker package available via apt. The get.docker.com convenience"
+      say "  script (curl | sh as root) is NOT run automatically. Re-run with"
+      say "  SYSIBLE_ALLOW_DOCKER_CONVENIENCE_SCRIPT=1 to allow it, or install Docker"
+      say "  manually (https://docs.docker.com/engine/install/) and re-run."
     fi
   fi
   command -v docker >/dev/null 2>&1 || die "Docker could not be installed automatically. Install Docker Engine + the compose plugin (https://docs.docker.com/engine/install/) and re-run."
@@ -160,9 +171,24 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running and could n
 # reuse it, so the same value reaches the gateway AND all three apps.
 ENV_FILE="$HERE/.env"
 _upsert_env() {  # _upsert_env KEY VALUE — set KEY=VALUE in $ENV_FILE (replace or append)
-  touch "$ENV_FILE"
+  # Create the secret store 0600 from the start — independent of the caller's
+  # umask — so the SSO shared secret is never even briefly world-readable.
+  if [ ! -f "$ENV_FILE" ]; then
+    ( umask 077; touch "$ENV_FILE" )
+  fi
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
   if grep -q "^$1=" "$ENV_FILE" 2>/dev/null; then
-    sed -i.bak "s|^$1=.*|$1=$2|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+    # Rewrite through a PRIVATE temp file, never `sed -i.bak`: an .env.bak is
+    # created 0644 and would leak the secret to any local reader before removal.
+    # The temp is created 0600, then atomically renamed over the original.
+    _tmp="$ENV_FILE.tmp.$$"
+    ( umask 077; : > "$_tmp" )
+    if sed "s|^$1=.*|$1=$2|" "$ENV_FILE" > "$_tmp"; then
+      mv "$_tmp" "$ENV_FILE"
+    else
+      rm -f "$_tmp"
+    fi
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
   else
     printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   fi
