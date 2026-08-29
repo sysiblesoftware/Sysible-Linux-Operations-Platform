@@ -99,6 +99,18 @@ if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev
     || die "the Docker Compose plugin is required and could not be installed automatically. Install it (https://docs.docker.com/compose/install/) and re-run."
 fi
 
+# Let the human who ran this (via sudo) drive Docker — and therefore sysible_ctl —
+# WITHOUT sudo going forward, the standard Docker post-install step. The
+# membership only takes effect on their next login; until then, sysible_ctl
+# transparently re-runs itself with sudo when it hits the root-owned socket.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  getent group docker >/dev/null 2>&1 || groupadd docker 2>/dev/null || true
+  if id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then :; else
+    usermod -aG docker "$SUDO_USER" 2>/dev/null \
+      && say "Added '$SUDO_USER' to the docker group — log out/in (or run 'newgrp docker') to use docker/sysible_ctl without sudo."
+  fi
+fi
+
 dirname_for() { basename "$1"; }
 clone_one() {  # clone_one <repo-url>
   _d="$SRC_DIR/$(dirname_for "$1")"
