@@ -406,47 +406,78 @@ def _current(request: Request) -> sqlite3.Row | None:
 # ---------------------------------------------------------------------------
 # HTML (inlined — three small server-rendered pages, styled to match the portal)
 # ---------------------------------------------------------------------------
+# Palette, fonts and background glows are lifted verbatim from portal/style.css so
+# the sign-in flow reads as one product with the portal and the app consoles: same
+# engineering-dark ground, same brand green, same light-theme toggle. The legacy
+# --fg/--mut/--brand names are kept as aliases so the page bodies need no edits.
 _CSS = """
-:root{--bg:#0a0d13;--panel:#121826;--line:#223;--fg:#e8edf5;--mut:#93a0b4;
---brand:#43a047;--accent:#5580ee;--err:#e5484d;--ok:#43a047}
+:root{--bg:#0d1117;--panel:#131923;--panel2:#1a212d;--line:#26303f;
+--text:#e6edf5;--muted:#93a1b5;--faint:#6f7d92;
+--accent:#43a047;--accent2:#5580ee;--ok:#4caf5a;--err:#e5534b;--amber:#e0a83b;
+--shadow:0 1px 2px rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.30);
+--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+--field:#0d1320;
+--fg:var(--text);--mut:var(--muted);--brand:var(--accent)}
+:root[data-theme="light"]{--bg:#eef1f6;--panel:#ffffff;--panel2:#f3f5f9;--line:#dbe1ea;
+--text:#1b2431;--muted:#5b6675;--faint:#8794a4;
+--accent:#2f8a37;--accent2:#2f6fe0;--ok:#2f9e4a;--err:#d23a30;--amber:#c98a12;
+--shadow:0 1px 2px rgba(20,30,50,.08),0 10px 30px rgba(20,30,50,.10);
+--field:#ffffff}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-background:radial-gradient(1200px 600px at 50% -10%,#161d29,var(--bg));
-color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+html,body{margin:0;min-height:100%}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+background:var(--bg);color:var(--text);font:15px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+.bg{position:fixed;inset:0;z-index:-1;pointer-events:none;
+background:radial-gradient(70% 55% at 15% -10%,rgba(67,160,71,.12),transparent 60%),
+radial-gradient(70% 60% at 100% 110%,rgba(85,128,238,.09),transparent 55%)}
 .card{width:min(94vw,420px);background:var(--panel);border:1px solid var(--line);
-border-radius:16px;padding:28px 26px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
 .wide{width:min(94vw,760px)}
-.brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-.brand b{color:var(--brand)}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.brand .brand-text{font-size:18px;letter-spacing:.2px}
+.brand b{color:var(--accent);font-weight:700}
 h1{font-size:19px;margin:.2em 0 .1em}
-p.sub{color:var(--mut);margin:.1em 0 1.2em;font-size:13.5px}
-label{display:block;font-size:12.5px;color:var(--mut);margin:.9em 0 .3em}
-input[type=text],input[type=password],select{width:100%;padding:10px 12px;border-radius:10px;
-border:1px solid var(--line);background:#0d1320;color:var(--fg);font-size:14px}
+p.sub{color:var(--muted);margin:.1em 0 1.2em;font-size:13.5px;line-height:1.55}
+label{display:block;font-size:12.5px;color:var(--muted);margin:.9em 0 .3em}
+input:not([type]),input[type=text],input[type=password],select{width:100%;padding:10px 12px;border-radius:10px;
+border:1px solid var(--line);background:var(--field);color:var(--text);font-size:14px;font-family:var(--font)}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+input:-webkit-autofill,input:-webkit-autofill:focus{-webkit-text-fill-color:var(--text);
+-webkit-box-shadow:0 0 0 1000px var(--field) inset;caret-color:var(--text)}
 button{margin-top:1.3em;width:100%;padding:11px;border:0;border-radius:10px;cursor:pointer;
-background:var(--brand);color:#04120a;font-weight:600;font-size:14.5px}
-button.sec{background:#1b2436;color:var(--fg);border:1px solid var(--line);font-weight:500}
-button.danger{background:transparent;color:var(--err);border:1px solid #40232a;width:auto;
-margin:0;padding:6px 10px;font-size:12.5px}
+background:var(--accent);color:#04120a;font-weight:600;font-size:14.5px;font-family:var(--font)}
+button:hover{filter:brightness(1.06)}
+button.sec{background:var(--panel2);color:var(--text);border:1px solid var(--line);font-weight:500}
+button.danger{background:transparent;color:var(--err);width:auto;margin:0;padding:6px 10px;font-size:12.5px;
+border:1px solid color-mix(in srgb,var(--err) 45%,var(--line))}
 button.mini{width:auto;margin:0;padding:6px 10px;font-size:12.5px}
-a{color:var(--accent);text-decoration:none}
-.msg{padding:9px 12px;border-radius:9px;font-size:13px;margin:.4em 0}
-.msg.err{background:#2a161a;color:#ff9ba0;border:1px solid #40232a}
-.msg.ok{background:#14241a;color:#8fe0a6;border:1px solid #22432f}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
+.msg{padding:9px 12px;border-radius:9px;font-size:13px;margin:.4em 0;border:1px solid transparent}
+.msg.err{background:color-mix(in srgb,var(--err) 14%,var(--panel));color:var(--err);
+border-color:color-mix(in srgb,var(--err) 40%,var(--line))}
+.msg.ok{background:color-mix(in srgb,var(--ok) 14%,var(--panel));color:var(--ok);
+border-color:color-mix(in srgb,var(--ok) 38%,var(--line))}
 .row{display:flex;gap:10px}.row>*{flex:1}
 table{width:100%;border-collapse:collapse;margin-top:.6em;font-size:13.5px}
 th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
-th{color:var(--mut);font-weight:500;font-size:12px}
+th{color:var(--muted);font-weight:500;font-size:12px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4em}
-.pill{font-size:11.5px;color:var(--mut)}
-.foot{margin-top:1.4em;color:var(--mut);font-size:12px;text-align:center}
+.pill{font-size:11.5px;color:var(--muted)}
+.foot{margin-top:1.4em;color:var(--faint);font-size:12px;text-align:center;letter-spacing:.04em}
 fieldset{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:1.2em 0 0}
-legend{color:var(--mut);font-size:12.5px;padding:0 6px}
+legend{color:var(--muted);font-size:12.5px;padding:0 6px}
+.theme-btn{position:fixed;top:16px;right:16px;background:transparent;border:1px solid var(--line);
+color:var(--muted);width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:15px;line-height:1}
+.theme-btn:hover{color:var(--text);border-color:var(--accent)}
 """
 
+# The portal's mark, verbatim (gradient chip + green ">_" prompt + blue cursor).
 _MARK = (
-    '<svg width="30" height="30" viewBox="0 0 128 128" aria-hidden="true">'
-    '<rect x="6" y="6" width="116" height="116" rx="28" fill="#121826"/>'
+    '<svg class="mark" width="34" height="34" viewBox="0 0 128 128" aria-hidden="true">'
+    '<defs><linearGradient id="t" x1="0" y1="0" x2="0" y2="1">'
+    '<stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d13"/></linearGradient></defs>'
+    '<rect x="6" y="6" width="116" height="116" rx="28" fill="url(#t)"/>'
     '<rect x="8.5" y="8.5" width="111" height="111" rx="25.5" fill="none" stroke="#43a047" stroke-width="4"/>'
     '<path d="M40 44 L64 64 L40 84" fill="none" stroke="#43a047" stroke-width="9" '
     'stroke-linecap="round" stroke-linejoin="round"/>'
@@ -455,15 +486,29 @@ _MARK = (
 
 
 def _page(title: str, body: str, wide: bool = False) -> str:
+    # The pre-paint script picks up the theme the operator chose on the portal
+    # (shared 'slop-theme' key), falling back to the OS preference, so the login
+    # never flashes the wrong theme. The trailing script wires the corner toggle.
     return (
         f"<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"<title>{escape(title)}</title><style>{_CSS}</style></head><body>"
+        f"<title>{escape(title)}</title>"
+        f"<script>try{{var t=localStorage.getItem('slop-theme');"
+        f"if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
+        f"document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>"
+        f"<style>{_CSS}</style></head><body>"
+        f"<div class=bg></div>"
+        f"<button class=theme-btn id=theme title='Toggle light / dark' aria-label='Toggle theme'>&#9728;</button>"
         f"<div class='card{' wide' if wide else ''}'>"
-        f"<div class=brand>{_MARK}<div>Sysible <b>Operations Platform</b></div></div>"
+        f"<div class=brand>{_MARK}<div class=brand-text>Sysible <b>Operations Platform</b></div></div>"
         f"{body}"
         f"<div class=foot>Sysible Linux Operations Platform · Community Edition</div>"
-        f"</div></body></html>"
+        f"</div>"
+        f"<script>(function(){{var b=document.getElementById('theme'),r=document.documentElement;"
+        f"function s(){{b.textContent=r.getAttribute('data-theme')==='light'?'\\u263e':'\\u2600'}}s();"
+        f"b.addEventListener('click',function(){{var n=r.getAttribute('data-theme')==='light'?'dark':'light';"
+        f"r.setAttribute('data-theme',n);try{{localStorage.setItem('slop-theme',n)}}catch(e){{}}s()}})}})();</script>"
+        f"</body></html>"
     )
 
 
