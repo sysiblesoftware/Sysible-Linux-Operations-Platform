@@ -82,6 +82,14 @@
 				tls_insecure_skip_verify
 			}
 			header_up X-Forwarded-Proto https
+			# Forward the browser-facing host so each app sees its REAL public origin
+			# (controller./slep./connect.<apex>) as Host. Without this the app receives
+			# the upstream dial host (host.docker.internal:PORT) as Host, so its
+			# same-origin CSRF/origin guard compares the browser Origin
+			# (https://controller.slop.lan) against that dial host, they never match,
+			# and every legitimate same-origin POST is refused "Cross-origin request
+			# rejected." (Caddy still sets X-Forwarded-Host too, for apps that prefer it.)
+			header_up Host {host}
 			# Strip ONLY the IdP session cookie before forwarding, so a leaky/logging/
 			# compromised app never receives — and cannot replay — a live SSO session
 			# token (session-cookie replay / lateral movement). Find-and-replace form
