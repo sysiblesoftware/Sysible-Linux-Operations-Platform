@@ -156,8 +156,17 @@ _upsert_env() {  # _upsert_env KEY VALUE — set KEY=VALUE in $ENV_FILE (replace
     printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   fi
 }
-_secret_from_env() { [ -f "$ENV_FILE" ] && sed -n 's/^SYSIBLE_SSO_SHARED_SECRET=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1; }
-SSO_SECRET="${SYSIBLE_SSO_SHARED_SECRET:-$(_secret_from_env)}"
+# NOTE: must ALWAYS return 0. Under dash (Debian's /bin/sh) with `set -e`, a
+# `VAR="${X:-$(fn)}"` assignment whose command substitution returns non-zero aborts
+# the whole script — silently. On a first run there is no .env yet, so a function
+# that returned non-zero here killed install.sh right after installing the CLI,
+# before it ever cloned the apps. Return 0 explicitly (and belt-and-suspenders the
+# call site with `|| true`).
+_secret_from_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^SYSIBLE_SSO_SHARED_SECRET=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+}
+SSO_SECRET="${SYSIBLE_SSO_SHARED_SECRET:-$(_secret_from_env || true)}"
 if [ -z "$SSO_SECRET" ]; then
   SSO_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   _upsert_env SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
