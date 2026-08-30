@@ -111,10 +111,16 @@
 }
 
 # ---- the one front door: IdP + portal + the three apps, all by path --------
-# Responds to the configured host — an IP (e.g. 192.168.8.249) or a name; tls
-# internal issues a matching self-signed cert (IP SAN included). No subdomains
-# anywhere, so a raw IP works end to end. Defaults to localhost for local dev.
-{$SLOP_DOMAIN:localhost} {
+# Answer on 443 for the configured host — an IP (e.g. 192.168.8.249) or a name —
+# AND always for localhost + 127.0.0.1. That last part matters: Caddy serves TLS
+# only for the site's own hostnames, and the sysible_ctl health probe (and any
+# on-box tooling) hits https://localhost:443/ — without localhost here that probe
+# gets NO cert for its SNI and reports "no response on 443" even though the gateway
+# is fine. Listing all three also covers a browser hitting the raw IP (no SNI ->
+# served as the default) and local dev. tls internal issues a matching self-signed
+# cert per name (IP SAN included); duplicate names (e.g. SLOP_DOMAIN=localhost) are
+# de-duplicated by Caddy, so this is safe for every SLOP_DOMAIN value.
+{$SLOP_DOMAIN:localhost}, localhost, 127.0.0.1 {
 	tls internal
 	encode gzip
 
