@@ -2,18 +2,20 @@
 
 **One front door for the Sysible suite.** SLOP unifies the three Sysible apps —
 **Controller** (fleet management), the **Engineering Platform / SLEP** (infra
-automation), and **Connect** (browser terminals) — behind a single domain, a
+automation), and **Connect** (browser terminals) — behind a single origin, a
 single TLS story, and a branded portal, without changing the apps themselves.
+Everything is addressed by **path** (`/controller` `/slep` `/connect`), so SLOP
+is reachable by the server's **raw IP** — no subdomains, no DNS, no `/etc/hosts`.
 
 It's the **CE SLOP** download: instead of standing up and bookmarking three
 separate consoles on three ports, you run the apps and put SLOP in front.
 
 ```
                       ┌─────────────────────────────┐
-   https://slop.lan → │   SLOP gateway (Caddy) +     │
+   https://<host>/  → │   SLOP gateway (Caddy) +     │
                       │   portal landing / nav       │
                       └──────────────┬──────────────┘
-        controller.slop.lan  slep.slop.lan  connect.slop.lan
+            /controller/        /slep/         /connect/
                  │                │                │
           Controller :8800   SLEP :8810     Connect :8700   (unchanged)
 ```
@@ -22,8 +24,8 @@ separate consoles on three ports, you run the apps and put SLOP in front.
 
 - **One URL + one portal** — a branded landing page with a card per app and a
   **live health dot** for each, so you see at a glance what's up.
-- **One TLS front door** — Caddy terminates HTTPS for the apex and all three app
-  subdomains (internal CA by default, or bring real certs).
+- **One TLS front door** — Caddy terminates HTTPS for the single origin (internal
+  CA by default, with the server's IP in the cert, or bring real certs).
 - **Real unified single sign-on** — SLOP ships its own identity provider: you sign
   in **once** at the portal and reach all three apps with no second login. SLOP
   owns the accounts, roles, and **password resets for all three** (self-service at
@@ -51,8 +53,8 @@ SLOP runs everything in containers, so the host needs very little — and
 - **Ports 80 and 443** free on the host (the single front door).
 - **Outbound network** the first time only — to clone the app repos and pull the
   base images (`caddy:2-alpine`, `python:3.12-slim`, and each app's build deps).
-- **DNS or `/etc/hosts`** entries for `slop.lan` and the `controller.`/`slep.`/
-  `connect.` subdomains pointing at this host.
+- **No DNS or `/etc/hosts`** needed — set `SLOP_DOMAIN` to the server's IP (or a
+  hostname you already resolve) and reach everything at `https://<that>/`.
 
 That's it — no Python, Node, or database on the host. Each piece pins its own deps:
 
@@ -77,11 +79,11 @@ sudo ./install.sh                 # the whole stack (apps + gateway + IdP)
 #   sudo ./install.sh gateway     # only the gateway + IdP (apps already running)
 #   sudo ./deploy/sysible_ctl install   # same thing, if you reach for sysible_ctl
 
-# 3. Resolve the domain + subdomains to this host (DNS, or every client's hosts):
-#    192.168.8.10  slop.lan controller.slop.lan slep.slop.lan connect.slop.lan
+# 3. Set SLOP_DOMAIN to this host's IP (or a name) in .env — no subdomains, no DNS:
+#    SLOP_DOMAIN=192.168.8.10
 
 # 4. Open the portal:
-open https://slop.lan/
+open https://192.168.8.10/
 ```
 
 `install.sh` clones each app from its own official repo, builds it, and manages
@@ -101,7 +103,7 @@ browser warns once; trust the CA or proceed. For public certs, see
 | `install.sh` | One-command installer: the three apps + this gateway + IdP (`sudo ./install.sh`). Generates the SSO shared secret into `.env`. |
 | `docker-compose.yml` | The front door: the gateway (Caddy) + the IdP service. |
 | `idp/` | The identity provider — the user store, login, `/account`, and `/admin` (accounts + password resets). Python deps in `idp/requirements.txt`; tests in `idp/tests/`. |
-| `gateway/Caddyfile` | Reverse-proxy: portal at the apex, `controller./slep./connect.` subdomains to the apps, TLS, health proxying, and the SSO `forward_auth` + shared-secret enforcement. |
+| `gateway/Caddyfile` | Reverse-proxy on ONE origin: portal at `/`, the apps under `/controller` `/slep` `/connect` (prefix-stripped), TLS, health proxying, and the SSO `forward_auth` + shared-secret enforcement. |
 | `portal/` | The branded landing page (app cards + live health + signed-in user chip + light/dark). |
 | `.env.example` | `SLOP_DOMAIN`, `SYSIBLE_SSO_SHARED_SECRET`, the first-run admin, and the three upstream `host:port`s. |
 | `docs/ARCHITECTURE.md` | Design, routing, TLS options. |

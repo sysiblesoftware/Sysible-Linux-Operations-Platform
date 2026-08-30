@@ -14,7 +14,8 @@
 #
 #   1. Bring up the apps + door together:   sudo ./install.sh
 #      (or bring up the apps yourself, then `docker compose up -d --build` here).
-#   2. Point DNS/hosts for $SLOP_DOMAIN + controller./slep./connect. at this host.
+#   2. Set SLOP_DOMAIN to this host's IP or name — everything is ONE origin,
+#      addressed by path (/controller /slep /connect). No subdomains, no DNS.
 #   3. Open  https://$SLOP_DOMAIN/  and sign in.
 #
 # See .env.example for the knobs and docs/SSO.md for the SSO contract.
@@ -26,8 +27,9 @@ services:
     restart: unless-stopped
     environment:
       SLOP_DOMAIN: ${SLOP_DOMAIN:-slop.lan}
-      # Cookie is scoped to ".$SLOP_DOMAIN" by default so one login covers every
-      # subdomain; override only for unusual setups.
+      # The session cookie is HOST-ONLY (SLOP is one origin, addressed by path) —
+      # correct for an IP too, where a Domain-scoped cookie would be invalid. Set
+      # SLOP_COOKIE_DOMAIN only for a custom multi-host/subdomain layout.
       SLOP_COOKIE_DOMAIN: ${SLOP_COOKIE_DOMAIN:-}
       # First-run bootstrap. Leave SLOP_ADMIN_PASSWORD empty to have a random one
       # generated and printed to the idp logs once (docker logs sysible-slop-idp).
