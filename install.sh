@@ -230,8 +230,11 @@ if [ "$WANT_APPS" -eq 1 ]; then
       FAILED="$FAILED $p(clone)"; say "  WARNING: could not clone $p — skipping it."; continue
     fi
     _dir="$SRC_DIR/$(dirname_for "$repo")"
-    # Pass the app dir, turn its SSO trust flag on, and hand it the shared secret.
-    if env "$var=$_dir" "$trust=1" SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET" sysible_ctl "$p" up; then
+    # Pass the app dir, turn its SSO trust flag on, hand it the shared secret, and
+    # build its front end under the gateway path prefix (/controller/ etc.) so its
+    # assets + API calls resolve on the one shared origin (see gateway/Caddyfile).
+    if env "$var=$_dir" "$trust=1" SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET" \
+           SYSIBLE_BASE_PATH="/$p/" sysible_ctl "$p" up; then
       say "  $p is up."
     else
       FAILED="$FAILED $p"; say "  WARNING: $p did not come up — continuing (scroll up for the error)."

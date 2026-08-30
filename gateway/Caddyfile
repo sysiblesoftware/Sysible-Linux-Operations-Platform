@@ -4,18 +4,25 @@
 # (CE). A user signs in ONCE at the SLOP IdP; the gateway then proves their
 # identity to each app so none of them shows its own login.
 #
+# Everything lives on ONE origin, addressed by PATH — so SLOP is reachable by a
+# raw IP or any hostname, with no subdomains and no /etc/hosts on any client:
+#
 #   Portal        https://{$SLOP_DOMAIN}/                (requires sign-in)
 #   Sign in       https://{$SLOP_DOMAIN}/login
 #   Your account  https://{$SLOP_DOMAIN}/account         (change your password)
 #   Accounts      https://{$SLOP_DOMAIN}/admin           (superuser: users + resets)
-#   Controller    https://controller.{$SLOP_DOMAIN}/
-#   SLEP          https://slep.{$SLOP_DOMAIN}/
-#   Connect       https://connect.{$SLOP_DOMAIN}/
+#   Controller    https://{$SLOP_DOMAIN}/controller/
+#   SLEP          https://{$SLOP_DOMAIN}/slep/
+#   Connect       https://{$SLOP_DOMAIN}/connect/
+#
+# Set SLOP_DOMAIN to the server's IP or hostname (e.g. 192.168.8.249). tls
+# internal issues a matching self-signed cert (IP SAN included) — trust
+# gateway/root.crt, or switch to real certs (docs/ARCHITECTURE.md).
 #
 # How SSO works (full contract in ../docs/SSO.md):
 #   1. The IdP (this repo's idp/ service) owns the user store and issues a
-#      session cookie scoped to the PARENT domain (.slop.lan), so one login is
-#      visible to every *.slop.lan subdomain.
+#      host-only session cookie on this one origin, so a single login is visible
+#      to every /controller /slep /connect path.
 #   2. On each proxied request the gateway asks the IdP "is this signed in?"
 #      (forward_auth -> /auth/verify). On success it injects the caller's
 #      identity to the upstream app as X-Sysible-User / X-Sysible-Role, plus a
@@ -24,10 +31,6 @@
 #      (each app runs with SYSIBLE_SSO_SHARED_SECRET + its own trust flag).
 #   3. Any client-supplied X-Sysible-* is STRIPPED before forward_auth, so a
 #      browser can never forge an identity — only the gateway can set them.
-#
-# Point DNS (or /etc/hosts) for {$SLOP_DOMAIN} and the three subdomains at this
-# host. TLS is Caddy's internal CA by default (self-signed) — trust
-# gateway/root.crt on clients, or switch to real certs (docs/ARCHITECTURE.md).
 {
 	admin off
 	log {
@@ -38,70 +41,80 @@
 	# SLOP_ACME_EMAIL to have Caddy fetch real Let's Encrypt certs instead.
 }
 
-# ---- SSO for a fronted app -------------------------------------------------
-# Imported by each app site as:  import appsite <upstream-url>
-# Everything is inside one `route` so the steps run in written order:
-#   strip forged identity  ->  forward_auth (sets real identity)  ->  stamp the
-#   shared secret  ->  proxy to the app.
+# ---- SSO for a fronted app, mounted under a PATH prefix --------------------
+# Imported by the site once per app:  import appsite <prefix> <upstream-url>
+#   {args[0]} = the URL path prefix (e.g. /controller)
+#   {args[1]} = the app's upstream (host:port)
+# Steps run in written order: match the prefix -> strip forged identity ->
+# forward_auth (sets real identity, redirect to /login on miss) -> stamp the
+# shared secret -> strip the prefix -> proxy to the app (which serves at root).
 (appsite) {
-	tls internal
-	encode gzip
-	route {
-		# 1) A client must never be able to assert its own identity.
-		request_header -X-Sysible-User
-		request_header -X-Sysible-Role
-		request_header -X-Sysible-Auth
+	handle {args[0]}/* {
+		route {
+			# 1) A client must never be able to assert its own identity.
+			request_header -X-Sysible-User
+			request_header -X-Sysible-Role
+			request_header -X-Sysible-Auth
 
-		# 2) Ask the IdP whether this browser is signed in. On 401/403 bounce to
-		#    the portal login with a next= back to where they were headed. On
-		#    success, copy the asserted identity onto the upstream request.
-		forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
-			uri /auth/verify
-			copy_headers X-Sysible-User X-Sysible-Role
-			@sso_bad status 401 403
-			handle_response @sso_bad {
-				redir https://{$SLOP_DOMAIN:slop.lan}/login?next={scheme}://{host}{uri} 302
+			# 2) Ask the IdP whether this browser is signed in. On 401/403 bounce to
+			#    the portal login with next= back to where they were headed. {uri}
+			#    still carries the /controller-style prefix here (the strip below runs
+			#    AFTER this), so login returns them to the right app path. On success,
+			#    copy the asserted identity onto the upstream request.
+			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
+				uri /auth/verify
+				copy_headers X-Sysible-User X-Sysible-Role
+				@sso_bad status 401 403
+				handle_response @sso_bad {
+					redir /login?next={uri} 302
+				}
 			}
-		}
 
-		# 3) Prove to the app that this request really came through the gateway.
-		request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
+			# 3) Prove to the app that this request really came through the gateway.
+			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
 
-		# 4) Hand off to the app (unchanged, on its own port).
-		reverse_proxy {args[0]} {
-			transport http {
-				# CE ships self-signed app certs, so the gateway can't verify the
-				# upstream cert. RESIDUAL RISK: an attacker able to interpose on the
-				# gateway->app hop (win a bind race on the app port, spoof
-				# host.docker.internal) can stand up a rogue TLS listener and capture
-				# X-Sysible-Auth, then forge any identity directly at the app port.
-				# EE fix: put the gateway + apps on a private network and verify the
-				# upstream (tls_trusted_ca_cert_file + tls_server_name / mTLS), or
-				# remove the untrusted network path. Do NOT drop this in CE — the
-				# self-signed apps would fail the handshake and the gateway would break.
-				tls_insecure_skip_verify
+			# 4) Drop the prefix so the app sees its own root paths (/, /api, /assets,
+			#    websockets). The app's front end was built with this prefix as its
+			#    base, so the browser requests /controller/assets/... which becomes
+			#    /assets/... here — the app itself needs no path awareness.
+			uri strip_prefix {args[0]}
+
+			# 5) Hand off to the app (unchanged, on its own port).
+			reverse_proxy {args[1]} {
+				transport http {
+					# CE ships self-signed app certs, so the gateway can't verify the
+					# upstream cert. RESIDUAL RISK: an attacker able to interpose on the
+					# gateway->app hop (win a bind race on the app port, spoof
+					# host.docker.internal) can stand up a rogue TLS listener and capture
+					# X-Sysible-Auth, then forge any identity directly at the app port.
+					# EE fix: put the gateway + apps on a private network and verify the
+					# upstream (tls_trusted_ca_cert_file + tls_server_name / mTLS), or
+					# remove the untrusted network path. Do NOT drop this in CE — the
+					# self-signed apps would fail the handshake and the gateway would break.
+					tls_insecure_skip_verify
+				}
+				header_up X-Forwarded-Proto https
+				# Forward the browser-facing host so each app sees the real public origin
+				# as its Host. Without this the app receives the upstream dial host
+				# (host.docker.internal:PORT) and its same-origin CSRF/origin guard
+				# rejects legitimate same-origin POSTs as "cross-origin".
+				header_up Host {host}
+				# Strip ONLY the IdP session cookie before forwarding, so a leaky/logging/
+				# compromised app never receives — and cannot replay — a live SSO session
+				# token (session-cookie replay / lateral movement). Find-and-replace form
+				# removes just the sysible_sso pair; the apps' OWN cookies (sysible_web,
+				# sysible_connect_session) ride the same request and are left intact.
+				header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 			}
-			header_up X-Forwarded-Proto https
-			# Forward the browser-facing host so each app sees its REAL public origin
-			# (controller./slep./connect.<apex>) as Host. Without this the app receives
-			# the upstream dial host (host.docker.internal:PORT) as Host, so its
-			# same-origin CSRF/origin guard compares the browser Origin
-			# (https://controller.slop.lan) against that dial host, they never match,
-			# and every legitimate same-origin POST is refused "Cross-origin request
-			# rejected." (Caddy still sets X-Forwarded-Host too, for apps that prefer it.)
-			header_up Host {host}
-			# Strip ONLY the IdP session cookie before forwarding, so a leaky/logging/
-			# compromised app never receives — and cannot replay — a live SSO session
-			# token (session-cookie replay / lateral movement). Find-and-replace form
-			# removes just the sysible_sso pair; the apps' OWN cookies (sysible_web,
-			# sysible_connect_session) ride the same request and are left intact.
-			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
 }
 
-# ---- Portal + IdP (apex) ---------------------------------------------------
-{$SLOP_DOMAIN:slop.lan}, localhost {
+# ---- the one front door: IdP + portal + the three apps, all by path --------
+# Responds to the configured host — an IP (e.g. 192.168.8.249) or a name; tls
+# internal issues a matching self-signed cert (IP SAN included). No subdomains
+# anywhere, so a raw IP works end to end. Defaults to localhost for local dev.
+{$SLOP_DOMAIN:localhost} {
 	tls internal
 	encode gzip
 
@@ -126,9 +139,9 @@
 
 	# Live health for the portal dots. Proxied same-origin so the browser never
 	# reaches the app hosts directly (and CORS is a non-issue). Public (up/down
-	# only, no sensitive data) so the dots can render before/around login.
-	# Each proxy also strips the IdP session cookie (sysible_sso) so the browser's
-	# SSO token is never exposed to an app host on this path. tls_insecure_skip_verify
+	# only, no sensitive data) so the dots can render before/around login. Each
+	# proxy strips the IdP session cookie (sysible_sso) so the browser's SSO token
+	# is never exposed to an app host on this path; tls_insecure_skip_verify
 	# carries the same CE residual risk documented on the (appsite) hop above.
 	handle /healthz/controller {
 		rewrite * /api/health
@@ -158,7 +171,12 @@
 		}
 	}
 
-	# The portal itself — require sign-in, then serve the static launcher.
+	# The three apps, each SSO-gated and prefix-stripped (see the appsite snippet).
+	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
+	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
+	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
+
+	# The portal itself (root) — require sign-in, then serve the static launcher.
 	handle {
 		route {
 			request_header -X-Sysible-User
@@ -175,17 +193,4 @@
 			file_server
 		}
 	}
-}
-
-# ---- The three apps (each gated by the appsite SSO snippet) ----------------
-controller.{$SLOP_DOMAIN:slop.lan} {
-	import appsite https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
-}
-
-slep.{$SLOP_DOMAIN:slop.lan} {
-	import appsite https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
-}
-
-connect.{$SLOP_DOMAIN:slop.lan} {
-	import appsite https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
 }

@@ -3,15 +3,12 @@
 (function () {
   "use strict";
 
-  // The portal is served at the apex domain (e.g. slop.lan). Each app lives at
-  // <sub>.<apex>/. Derive that from the current host so the links work on any
-  // domain the operator chose, with no build-time config.
-  var apex = location.hostname;                 // e.g. "slop.lan" or "localhost"
-  var proto = location.protocol;                // keep https
-
+  // SLOP is one origin, addressed by PATH: the portal is served at / and each app
+  // lives at /<sub>/ on the SAME host. Same-origin relative links, so this works by
+  // raw IP or any hostname with no build-time config and no subdomains.
   document.querySelectorAll(".card[data-sub]").forEach(function (card) {
     var sub = card.getAttribute("data-sub");
-    card.href = proto + "//" + sub + "." + apex + "/";
+    card.href = "/" + sub + "/";
   });
 
   // Health: the gateway proxies /healthz/<app> to each app's own health endpoint,

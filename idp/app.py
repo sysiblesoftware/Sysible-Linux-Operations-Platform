@@ -310,20 +310,15 @@ def _clear_fails(ip: str, username: str) -> None:
 
 
 def _cookie_domain() -> str | None:
-    # Only a NON-EMPTY override wins. docker-compose passes this through as
-    # ${SLOP_COOKIE_DOMAIN:-}, so inside the container the var is present but an
-    # EMPTY string when the operator didn't set it — that must mean "derive from
-    # SLOP_DOMAIN", NOT "host-only". Treating "" as an explicit override was a bug:
-    # it scoped sysible_sso host-only to the apex, so the cookie never rode to
-    # controller./slep./connect.<apex> and every app subdomain bounced the browser
-    # in a forward_auth redirect loop (verify 401 -> /login -> back -> …).
-    if _COOKIE_DOMAIN_ENV:
-        return _COOKIE_DOMAIN_ENV
-    # A bare hostname with no dot (localhost, an IP) can't carry a domain-scoped
-    # cookie — fall back to a host-only cookie the browser will still accept.
-    if "." not in SLOP_DOMAIN:
-        return None
-    return "." + SLOP_DOMAIN
+    # SLOP is ONE origin, addressed by path (/controller /slep /connect), so the
+    # session cookie is HOST-ONLY by default — the single origin already covers
+    # every app path. Host-only is also the only VALID choice when SLOP_DOMAIN is a
+    # bare IP: a Domain=.192.168.8.249 cookie is malformed and silently dropped by
+    # the browser (that drop is exactly what left an IP deployment unable to sign
+    # in). docker-compose passes ${SLOP_COOKIE_DOMAIN:-} (present-but-empty when
+    # unset), which correctly means host-only here. Set SLOP_COOKIE_DOMAIN to a
+    # value ONLY for a custom multi-host/subdomain layout that needs a parent scope.
+    return _COOKIE_DOMAIN_ENV or None
 
 
 def _set_session_cookie(resp: Response, token: str) -> None:

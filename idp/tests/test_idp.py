@@ -289,19 +289,18 @@ def test_login_runs_scrypt_even_for_unknown_user(client):
     assert m._DUMMY_HASH in seen
 
 
-def test_cookie_scoped_to_parent_domain(tmp_path):
-    """Regression for the app-subdomain redirect loop.
+def test_session_cookie_is_host_only(tmp_path):
+    """SLOP is one origin addressed by path (/controller /slep /connect), so the
+    session cookie is HOST-ONLY — the single origin already covers every app path.
 
-    docker-compose passes SLOP_COOKIE_DOMAIN through as ${SLOP_COOKIE_DOMAIN:-},
-    so inside the container the var is PRESENT but an EMPTY string when the
-    operator didn't set it. That empty value must be read as 'derive from
-    SLOP_DOMAIN' -> Domain=.slop.lan, so the one session cookie rides to the apex
-    AND controller./slep./connect.slop.lan. Treating "" as an explicit host-only
-    override scoped the cookie to the apex only, so /auth/verify never saw it on a
-    subdomain and every app looped app -> /login -> app."""
+    Host-only is also the only VALID choice for an IP deployment: a
+    Domain=.192.168.8.249 cookie is malformed and silently dropped by the browser,
+    which is what left an IP-addressed SLOP unable to stay signed in. compose passes
+    ${SLOP_COOKIE_DOMAIN:-} (present-but-empty when unset), which must mean host-only.
+    A non-empty SLOP_COOKIE_DOMAIN stays honoured for custom subdomain layouts."""
     from starlette.testclient import TestClient
 
-    def _reload(cookie_domain, slop_domain="slop.lan"):
+    def _reload(cookie_domain, slop_domain="192.168.8.249"):
         os.environ.update(
             SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
             SLOP_ADMIN_USER="admin", SLOP_ADMIN_PASSWORD=ADMIN_PW,
@@ -312,19 +311,21 @@ def test_cookie_scoped_to_parent_domain(tmp_path):
         return importlib.reload(m)
 
     try:
-        # The exact value compose injects when unset: empty -> parent-domain cookie.
+        # The exact value compose injects when unset: empty -> host-only, no Domain=.
         m = _reload("")
-        assert m._cookie_domain() == ".slop.lan"
-        with TestClient(m.app, base_url="http://slop.lan") as c:
+        assert m._cookie_domain() is None
+        with TestClient(m.app, base_url="http://192.168.8.249") as c:
             r = c.post("/login", data={"username": "admin", "password": ADMIN_PW,
-                                       "csrf": _tok(c)}, headers=HDR, follow_redirects=False)
+                                       "csrf": _tok(c)}, headers={"origin": "http://192.168.8.249"},
+                       follow_redirects=False)
             assert r.status_code == 302
             sso = next(v for k, v in r.headers.multi_items()
                        if k.lower() == "set-cookie" and v.startswith("sysible_sso="))
-            assert "domain=.slop.lan" in sso.lower()
-        # A non-empty value is still honoured as an explicit override.
+            # host-only: the Set-Cookie carries NO Domain= attribute (never .<ip>).
+            assert "domain=" not in sso.lower()
+        # A non-empty value is still honoured as an explicit override (custom layouts).
         assert _reload(".custom.example")._cookie_domain() == ".custom.example"
-        # A dotless apex (localhost / bare IP) can't carry a domain scope -> host-only.
-        assert _reload("", slop_domain="localhost")._cookie_domain() is None
+        # Host-only for a hostname deployment too (one origin, path-routed).
+        assert _reload("", slop_domain="slop.lan")._cookie_domain() is None
     finally:
         os.environ.pop("SLOP_COOKIE_DOMAIN", None)
