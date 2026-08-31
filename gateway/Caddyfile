@@ -4,20 +4,22 @@
 # (CE). A user signs in ONCE at the SLOP IdP; the gateway then proves their
 # identity to each app so none of them shows its own login.
 #
-# Everything lives on ONE origin, addressed by PATH — so SLOP is reachable by a
-# raw IP or any hostname, with no subdomains and no /etc/hosts on any client:
+# Everything lives on ONE origin, addressed by PATH, on whatever IP this server
+# has — no domain, no subdomains, no /etc/hosts, nothing to configure. Reach it at
+# https://<server-ip>/ :
 #
-#   Portal        https://{$SLOP_DOMAIN}/                (requires sign-in)
-#   Sign in       https://{$SLOP_DOMAIN}/login
-#   Your account  https://{$SLOP_DOMAIN}/account         (change your password)
-#   Accounts      https://{$SLOP_DOMAIN}/admin           (superuser: users + resets)
-#   Controller    https://{$SLOP_DOMAIN}/controller/
-#   SLEP          https://{$SLOP_DOMAIN}/slep/
-#   Connect       https://{$SLOP_DOMAIN}/connect/
+#   Portal        https://<server-ip>/                (requires sign-in)
+#   Sign in       https://<server-ip>/login
+#   Your account  https://<server-ip>/account         (change your password)
+#   Accounts      https://<server-ip>/admin           (superuser: users + resets)
+#   Controller    https://<server-ip>/controller/
+#   SLEP          https://<server-ip>/slep/
+#   Connect       https://<server-ip>/connect/
 #
-# Set SLOP_DOMAIN to the server's IP or hostname (e.g. 192.168.8.249). tls
-# internal issues a matching self-signed cert (IP SAN included) — trust
-# gateway/root.crt, or switch to real certs (docs/ARCHITECTURE.md).
+# TLS is a self-signed cert Caddy mints itself (see the cert-holder site below), so
+# the browser shows the usual one-time "not trusted" warning — click through. Want a
+# trusted cert / a name? Point external DNS at this IP and drop a real cert in front;
+# nothing in here needs to know the address.
 #
 # How SSO works (full contract in ../docs/SSO.md):
 #   1. The IdP (this repo's idp/ service) owns the user store and issues a
@@ -37,8 +39,12 @@
 		output stdout
 		format console
 	}
-	# Default to Caddy's internal CA. Set SLOP_TLS=acme + a public SLOP_DOMAIN and
-	# SLOP_ACME_EMAIL to have Caddy fetch real Let's Encrypt certs instead.
+	# There is NO configured domain. SLOP answers on 443 for whatever address the
+	# client uses — the server's IP, straight up. To make TLS work without knowing
+	# that IP ahead of time, Caddy mints one self-signed cert under a fixed internal
+	# name (the cert-holder site below) and serves it for every connection whose SNI
+	# doesn't match — i.e. every raw-IP request. default_sni selects that cert.
+	default_sni sysible.slop
 }
 
 # ---- SSO for a fronted app, mounted under a PATH prefix --------------------
@@ -110,18 +116,23 @@
 	}
 }
 
-# ---- the one front door: IdP + portal + the three apps, all by path --------
-# Answer on 443 for the configured host — an IP (e.g. 192.168.8.249) or a name —
-# AND always for localhost + 127.0.0.1. That last part matters: Caddy serves TLS
-# only for the site's own hostnames, and the sysible_ctl health probe (and any
-# on-box tooling) hits https://localhost:443/ — without localhost here that probe
-# gets NO cert for its SNI and reports "no response on 443" even though the gateway
-# is fine. Listing all three also covers a browser hitting the raw IP (no SNI ->
-# served as the default) and local dev. tls internal issues a matching self-signed
-# cert per name (IP SAN included); duplicate names (e.g. SLOP_DOMAIN=localhost) are
-# de-duplicated by Caddy, so this is safe for every SLOP_DOMAIN value.
-{$SLOP_DOMAIN:localhost}, localhost, 127.0.0.1 {
+# ---- cert holder: mint ONE self-signed cert, no domain needed ---------------
+# This tiny site exists only so Caddy's internal CA issues a self-signed cert under
+# a fixed internal name. It is never browsed to; default_sni (above) serves this
+# cert for every raw-IP / no-SNI request to the real site below. Unique per install
+# (lives in the slop-caddy-data volume), so there is nothing to configure and no
+# shared key across installs.
+sysible.slop {
 	tls internal
+	respond 204
+}
+
+# ---- the one front door: IdP + portal + the three apps, all by path ---------
+# Catch-all on :443 — SLOP answers for ANY host/IP the client uses, with the
+# self-signed cert from the holder above. No domain, no SLOP_DOMAIN: reach it at
+# https://<this server's IP>/ (accept the one-time self-signed warning). Point
+# external DNS at the IP if you want a name; nothing here needs to know about it.
+:443 {
 	encode gzip
 
 	# The IdP UI + API. These are PUBLIC at the gateway (the IdP itself enforces

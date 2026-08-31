@@ -32,7 +32,6 @@ def client(tmp_path):
         SLOP_ADMIN_PASSWORD=ADMIN_PW,
         SLOP_ADMIN_FORCE_CHANGE="0",
         SLOP_ALLOW_INSECURE_COOKIE="1",
-        SLOP_DOMAIN="slop.lan",
     )
     import app as m
     m = importlib.reload(m)
@@ -151,14 +150,14 @@ def test_cross_site_post_blocked(cl):
     assert r.status_code == 403
 
 
-def test_sibling_subdomain_origin_blocked(cl):
-    # A sibling *.slop.lan app shares the parent-domain session cookie; it must NOT
-    # be able to drive a state change here (the origin allowlist is the IdP only).
+def test_cross_origin_blocked(cl):
+    # A POST whose Origin host differs from the host this request was addressed to
+    # (base_url slop.lan) must be rejected — the same-origin guard is host-exact.
     _login(cl, "admin", ADMIN_PW)
     r = cl.post("/account/password",
                 data={"current": ADMIN_PW, "new1": "xxxxxxxxxx22", "new2": "xxxxxxxxxx22",
                       "csrf": _tok(cl)},
-                headers={"origin": "http://controller.slop.lan"})
+                headers={"origin": "http://other-host.example"})
     assert r.status_code == 403
 
 
@@ -290,42 +289,25 @@ def test_login_runs_scrypt_even_for_unknown_user(client):
 
 
 def test_session_cookie_is_host_only(tmp_path):
-    """SLOP is one origin addressed by path (/controller /slep /connect), so the
-    session cookie is HOST-ONLY — the single origin already covers every app path.
-
-    Host-only is also the only VALID choice for an IP deployment: a
-    Domain=.192.168.8.249 cookie is malformed and silently dropped by the browser,
-    which is what left an IP-addressed SLOP unable to stay signed in. compose passes
-    ${SLOP_COOKIE_DOMAIN:-} (present-but-empty when unset), which must mean host-only.
-    A non-empty SLOP_COOKIE_DOMAIN stays honoured for custom subdomain layouts."""
+    """The session cookie is ALWAYS host-only (no Domain=), for any address. SLOP has
+    no configured domain — it answers on the server's IP — and a Domain-scoped cookie
+    is both unnecessary (one origin) and invalid for a bare IP (a Domain=.192.168.8.249
+    cookie is malformed and silently dropped, which is what broke sign-in by IP)."""
     from starlette.testclient import TestClient
 
-    def _reload(cookie_domain, slop_domain="192.168.8.249"):
-        os.environ.update(
-            SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
-            SLOP_ADMIN_USER="admin", SLOP_ADMIN_PASSWORD=ADMIN_PW,
-            SLOP_ADMIN_FORCE_CHANGE="0", SLOP_ALLOW_INSECURE_COOKIE="1",
-            SLOP_DOMAIN=slop_domain, SLOP_COOKIE_DOMAIN=cookie_domain,
-        )
-        import app as m
-        return importlib.reload(m)
-
-    try:
-        # The exact value compose injects when unset: empty -> host-only, no Domain=.
-        m = _reload("")
-        assert m._cookie_domain() is None
-        with TestClient(m.app, base_url="http://192.168.8.249") as c:
-            r = c.post("/login", data={"username": "admin", "password": ADMIN_PW,
-                                       "csrf": _tok(c)}, headers={"origin": "http://192.168.8.249"},
-                       follow_redirects=False)
-            assert r.status_code == 302
-            sso = next(v for k, v in r.headers.multi_items()
-                       if k.lower() == "set-cookie" and v.startswith("sysible_sso="))
-            # host-only: the Set-Cookie carries NO Domain= attribute (never .<ip>).
-            assert "domain=" not in sso.lower()
-        # A non-empty value is still honoured as an explicit override (custom layouts).
-        assert _reload(".custom.example")._cookie_domain() == ".custom.example"
-        # Host-only for a hostname deployment too (one origin, path-routed).
-        assert _reload("", slop_domain="slop.lan")._cookie_domain() is None
-    finally:
-        os.environ.pop("SLOP_COOKIE_DOMAIN", None)
+    os.environ.update(
+        SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
+        SLOP_ADMIN_USER="admin", SLOP_ADMIN_PASSWORD=ADMIN_PW,
+        SLOP_ADMIN_FORCE_CHANGE="0", SLOP_ALLOW_INSECURE_COOKIE="1",
+    )
+    import app as m
+    m = importlib.reload(m)
+    assert m._cookie_domain() is None
+    # Reached by a raw IP: the Set-Cookie must carry NO Domain= attribute.
+    with TestClient(m.app, base_url="http://192.168.8.249") as c:
+        r = c.post("/login", data={"username": "admin", "password": ADMIN_PW, "csrf": _tok(c)},
+                   headers={"origin": "http://192.168.8.249"}, follow_redirects=False)
+        assert r.status_code == 302
+        sso = next(v for k, v in r.headers.multi_items()
+                   if k.lower() == "set-cookie" and v.startswith("sysible_sso="))
+        assert "domain=" not in sso.lower()

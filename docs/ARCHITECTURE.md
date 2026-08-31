@@ -3,36 +3,39 @@
 SLOP is a **gateway + portal**, deliberately thin. It does not replace or fork the
 apps; it puts a single, branded, TLS-terminated front door in front of them.
 
-## Routing model — subdomains
+## Routing model — one origin, addressed by path
 
-The apex domain serves the **portal**; each app gets a **subdomain** that reverse-
-proxies to the app on its host port:
+There is **no domain and nothing to configure**. SLOP answers on 443 for whatever
+IP this host has; everything lives on that ONE origin, addressed by **path**. The
+root serves the **portal**; each app is mounted under a path prefix that the
+gateway strips before proxying to the app on its host port:
 
 | URL | → upstream (default) |
 |---|---|
-| `https://$SLOP_DOMAIN/` | the SLOP portal (static, served by Caddy) |
-| `https://controller.$SLOP_DOMAIN/` | `$SLOP_CONTROLLER_UPSTREAM` (`:8800`) |
-| `https://slep.$SLOP_DOMAIN/` | `$SLOP_SLEP_UPSTREAM` (`:8810`) |
-| `https://connect.$SLOP_DOMAIN/` | `$SLOP_CONNECT_UPSTREAM` (`:8700`) |
+| `https://<server-ip>/` | the SLOP portal (static, served by Caddy) |
+| `https://<server-ip>/controller/` | `$SLOP_CONTROLLER_UPSTREAM` (`:8800`) |
+| `https://<server-ip>/slep/` | `$SLOP_SLEP_UPSTREAM` (`:8810`) |
+| `https://<server-ip>/connect/` | `$SLOP_CONNECT_UPSTREAM` (`:8700`) |
 
-**Why subdomains, not paths.** All three consoles are single-page apps that assume
-they live at the web root (absolute `/assets/...`, cookie paths, a terminal
-websocket). Serving each at its own subdomain root means the apps need **zero
-changes** — no base-path rebuild, no cookie-path rewriting, no websocket path
-juggling. The cost is DNS: point the apex and the three subdomains at this host
-(wildcard `*.$SLOP_DOMAIN`, or per-name entries, or `/etc/hosts` on each client).
+**Why paths, not subdomains.** One origin means one login cookie and zero DNS: no
+apex, no wildcard, no `/etc/hosts`, and it just works on a raw IP for anyone on any
+machine. Each app is built with its prefix as its front-end base path, so the
+browser requests `/controller/assets/...`; the gateway strips the prefix and the
+app sees its own root paths (`/assets/...`, cookies, websockets) unchanged.
 
 ## TLS
 
 Caddy owns TLS for every site. Three options:
 
-1. **Internal CA (default).** `tls internal` — Caddy mints certs from its own CA.
-   Self-signed like the apps today; trust `caddy`'s root (exportable from the
-   `slop-caddy-data` volume, `/data/caddy/pki/authorities/local/root.crt`) on
-   clients, or click through the warning.
-2. **Public ACME.** Give `$SLOP_DOMAIN` a real public name with ports 80/443
-   reachable, drop the `tls internal` lines, set an ACME email in the global
-   block — Caddy fetches Let's Encrypt certs automatically.
+1. **Internal CA (default).** Caddy mints ONE self-signed cert under a fixed
+   internal name (the cert-holder site in the Caddyfile) and serves it for every
+   raw-IP / no-SNI request via `default_sni` — so TLS works without knowing the IP
+   ahead of time. Trust `caddy`'s root (exportable from the `slop-caddy-data`
+   volume, `/data/caddy/pki/authorities/local/root.crt`) on clients, or click
+   through the one-time warning.
+2. **Public ACME.** Point external DNS at this IP, give the `:443` site a real
+   public name, set an ACME email in the global block — Caddy fetches Let's Encrypt
+   certs automatically. Nothing else in the config needs to know the address.
 3. **Bring your own.** Mount a cert/key and use `tls /path/cert.pem /path/key.pem`.
 
 The apps keep serving their own self-signed HTTPS internally; the gateway proxies

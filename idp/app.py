@@ -14,10 +14,10 @@ How the pieces fit (see ../docs/SSO.md for the full contract):
                  ▼
              this IdP  /auth/verify   ← "is this browser signed in?"
 
-  * A browser signs in here (POST /login). We set a session cookie scoped to
-    the PARENT domain (Domain=.slop.lan), so the same cookie rides requests to
-    every *.slop.lan subdomain — that shared cookie is what makes it single
-    sign-on across the three apps rather than three separate logins.
+  * A browser signs in here (POST /login). We set a HOST-ONLY session cookie
+    (no Domain=). SLOP is ONE origin — the portal and all three apps share it,
+    addressed by path — so that one cookie rides every /controller /slep /connect
+    request, which is what makes it single sign-on rather than three logins.
   * On each proxied request Caddy calls GET /auth/verify with the browser's
     cookies. We answer 200 + headers `X-Sysible-User` / `X-Sysible-Role` when
     the session is valid (Caddy copies those onto the upstream request and adds
@@ -50,15 +50,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 DATA_DIR = os.environ.get("SLOP_DATA_DIR", "/data")
 DB_PATH = os.environ.get("SLOP_DB_PATH", os.path.join(DATA_DIR, "slop-idp.db"))
 
-# The apex the portal answers on (e.g. "slop.lan"). The session cookie is scoped
-# to ".<apex>" so it is sent to the apex AND every app subdomain — the mechanism
-# that makes one login cover all three apps. localhost has no dot-parent, so the
-# cookie domain is omitted there (host-only cookie), which the browser accepts.
-SLOP_DOMAIN = os.environ.get("SLOP_DOMAIN", "slop.lan")
-_COOKIE_DOMAIN_ENV = os.environ.get("SLOP_COOKIE_DOMAIN")  # explicit override wins
+# SLOP has NO configured domain: it answers on whatever IP/name the client uses,
+# on one origin addressed by path. The session cookie is therefore always HOST-ONLY
+# (no Domain=), which is the only valid choice for a raw IP and needs no config. The
+# CSRF checks below are same-origin (compare against the request's own host), so
+# nothing here needs to know the address.
 COOKIE = "sysible_sso"
-# Double-submit CSRF token cookie. Deliberately HOST-ONLY (no parent-domain
-# scope) so a sibling *.slop.lan app can't read it, and readable by our own form
+# Double-submit CSRF token cookie. Deliberately HOST-ONLY (no Domain=), matching
+# the session cookie, and readable by our own form
 # JS-free flow (the server echoes it into a hidden field); a state-changing POST
 # must return the same value in that field.
 CSRF_COOKIE = "sysible_csrf"
@@ -309,16 +308,12 @@ def _clear_fails(ip: str, username: str) -> None:
     _login_attempts.pop("user:" + username, None)
 
 
-def _cookie_domain() -> str | None:
-    # SLOP is ONE origin, addressed by path (/controller /slep /connect), so the
-    # session cookie is HOST-ONLY by default — the single origin already covers
-    # every app path. Host-only is also the only VALID choice when SLOP_DOMAIN is a
-    # bare IP: a Domain=.192.168.8.249 cookie is malformed and silently dropped by
-    # the browser (that drop is exactly what left an IP deployment unable to sign
-    # in). docker-compose passes ${SLOP_COOKIE_DOMAIN:-} (present-but-empty when
-    # unset), which correctly means host-only here. Set SLOP_COOKIE_DOMAIN to a
-    # value ONLY for a custom multi-host/subdomain layout that needs a parent scope.
-    return _COOKIE_DOMAIN_ENV or None
+def _cookie_domain() -> None:
+    # Always host-only (no Domain=). SLOP is one origin addressed by path, reached by
+    # the server's IP, so a host-only cookie is both correct and the only valid choice
+    # for an IP (a Domain=.<ip> cookie is malformed and silently dropped). Nothing to
+    # configure.
+    return None
 
 
 def _set_session_cookie(resp: Response, token: str) -> None:
@@ -374,30 +369,31 @@ def _csrf_ok(request: Request, submitted: str | None) -> bool:
 
 def _origin_ok(request: Request) -> bool:
     """Same-origin guard for state-changing POSTs. The Origin/Referer host must be
-    the IdP's OWN origin — never a sibling *.slop.lan app, which shares the
-    parent-domain session cookie and must not be able to drive state changes here.
-    Fail CLOSED when a browser sends neither header (no silent allow)."""
+    the IdP's OWN origin. Fail CLOSED when a browser sends neither header (no
+    silent allow)."""
+    # Same-origin: the Origin/Referer host must match the host THIS request was
+    # addressed to. No fixed domain — SLOP answers on whatever IP/name the client
+    # used, and the gateway preserves that as the Host / X-Forwarded-Host header.
+    self_host = (request.headers.get("x-forwarded-host")
+                 or request.headers.get("host") or "").split(",")[0].split(":")[0].strip().lower()
     for h in ("origin", "referer"):
         v = request.headers.get(h)
         if not v:
             continue
         host = (urlsplit(v).hostname or "").lower()
-        return host == SLOP_DOMAIN or host in ("localhost", "127.0.0.1")
+        return bool(self_host) and host == self_host
     return False  # neither Origin nor Referer present → reject
 
 
 def _safe_next(raw: str | None) -> str:
-    """Validate a ?next= redirect target to stop open-redirects: allow only a
-    site-relative path, or an absolute URL whose host is the apex / a *.slop.lan
-    subdomain. Anything else falls back to the portal."""
+    """Validate a ?next= redirect target to stop open-redirects. SLOP is one origin
+    addressed by path, so every legitimate target is a site-relative path (e.g.
+    /controller/…); anything with a scheme/host is refused and falls back to /."""
     if not raw:
         return "/"
     parts = urlsplit(raw)
     if not parts.scheme and not parts.netloc and raw.startswith("/"):
         return raw  # site-relative
-    host = (parts.hostname or "").lower()
-    if host == SLOP_DOMAIN or host.endswith("." + SLOP_DOMAIN):
-        return raw
     return "/"
 
 

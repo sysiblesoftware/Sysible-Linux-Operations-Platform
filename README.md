@@ -53,8 +53,8 @@ SLOP runs everything in containers, so the host needs very little — and
 - **Ports 80 and 443** free on the host (the single front door).
 - **Outbound network** the first time only — to clone the app repos and pull the
   base images (`caddy:2-alpine`, `python:3.12-slim`, and each app's build deps).
-- **No DNS or `/etc/hosts`** needed — set `SLOP_DOMAIN` to the server's IP (or a
-  hostname you already resolve) and reach everything at `https://<that>/`.
+- **No DNS or `/etc/hosts`** needed — and nothing to configure. SLOP answers on
+  443 for whatever IP this host has; reach everything at `https://<server-ip>/`.
 
 That's it — no Python, Node, or database on the host. Each piece pins its own deps:
 
@@ -70,7 +70,8 @@ One command from this repo stands up the **whole stack** — Controller, SLEP an
 Connect as containers, with the SLOP gateway in front of them:
 
 ```sh
-# 1. Optional: set your domain + upstreams (defaults: slop.lan, apps on this host)
+# 1. Optional: only the SSO secret + app upstreams live here — there is NO domain.
+#    install.sh generates the secret for you, so you can skip this entirely.
 cp .env.example .env
 
 # 2. Install everything (installs Docker + git if missing, plus sysible_ctl):
@@ -79,11 +80,8 @@ sudo ./install.sh                 # the whole stack (apps + gateway + IdP)
 #   sudo ./install.sh gateway     # only the gateway + IdP (apps already running)
 #   sudo ./deploy/sysible_ctl install   # same thing, if you reach for sysible_ctl
 
-# 3. Set SLOP_DOMAIN to this host's IP (or a name) in .env — no subdomains, no DNS:
-#    SLOP_DOMAIN=192.168.8.10
-
-# 4. Open the portal:
-open https://192.168.8.10/
+# 3. Open the portal at this host's IP — no domain, no subdomains, no DNS:
+open https://<server-ip>/
 ```
 
 `install.sh` clones each app from its own official repo, builds it, and manages
@@ -105,7 +103,7 @@ browser warns once; trust the CA or proceed. For public certs, see
 | `idp/` | The identity provider — the user store, login, `/account`, and `/admin` (accounts + password resets). Python deps in `idp/requirements.txt`; tests in `idp/tests/`. |
 | `gateway/Caddyfile` | Reverse-proxy on ONE origin: portal at `/`, the apps under `/controller` `/slep` `/connect` (prefix-stripped), TLS, health proxying, and the SSO `forward_auth` + shared-secret enforcement. |
 | `portal/` | The branded landing page (app cards + live health + signed-in user chip + light/dark). |
-| `.env.example` | `SLOP_DOMAIN`, `SYSIBLE_SSO_SHARED_SECRET`, the first-run admin, and the three upstream `host:port`s. |
+| `.env.example` | `SYSIBLE_SSO_SHARED_SECRET`, the first-run admin, and the three upstream `host:port`s. (No domain — SLOP serves on whatever IP the host has.) |
 | `docs/ARCHITECTURE.md` | Design, routing, TLS options. |
 | `docs/SSO.md` | The shipped single-sign-on architecture (SLOP as the identity provider). |
 

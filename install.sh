@@ -263,8 +263,10 @@ else
   say "All done — the code is cloned under $SRC_DIR and everything is running in containers."
 fi
 if [ "$WANT_GW" -eq 1 ] && [ -z "$FAILED" ]; then
-  say "One front door is up: https://slop.lan/  (point slop.lan + the"
-  say "controller./slep./connect. subdomains at this host — DNS or /etc/hosts;"
-  say "set SLOP_DOMAIN + upstreams in this repo's .env to change the defaults)."
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$ip" ] || ip="<this server's IP>"
+  say "One front door is up: https://$ip/  — no domain, no DNS, no /etc/hosts."
+  say "Everything is ONE origin addressed by path (/controller /slep /connect) on"
+  say "whatever IP this host has. Accept the one-time self-signed cert warning."
 fi
 say "Manage everything with:  sysible_ctl status   |   sysible_ctl update all"

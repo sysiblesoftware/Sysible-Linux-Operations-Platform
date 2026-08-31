@@ -20,10 +20,11 @@ the EE note at the end.)
 
 - **IdP** (`idp/`, a small FastAPI service): the user store (SQLite), `POST /login`,
   self-service `/account` (change your password), and superuser `/admin` (create /
-  delete users, reset anyone's password, set roles). It issues a session cookie
-  `sysible_sso` scoped to the **parent** domain (`.slop.lan`), so one login is
-  visible to the apex **and** every app subdomain — that shared cookie is what
-  makes it single sign-on rather than three logins.
+  delete users, reset anyone's password, set roles). It issues a **host-only**
+  session cookie `sysible_sso` (no `Domain=`). Because SLOP is ONE origin — the
+  portal and all three apps share it, addressed by path — that single cookie rides
+  every `/controller /slep /connect` request, which is what makes it single sign-on
+  rather than three logins. Host-only is also the only valid cookie on a raw IP.
 - **Gateway** (`gateway/Caddyfile`): on every proxied request it asks the IdP
   "is this browser signed in?" (`forward_auth` → `GET /auth/verify`). A 2xx lets
   it through; a 401/403 redirects the browser to `/login?next=…`.
@@ -62,8 +63,8 @@ the app keeps its own native login for direct, non-gateway use.
 Because the apps trust SLOP, there is effectively **one credential**. Manage it in
 the portal:
 
-- **Your password:** `https://$SLOP_DOMAIN/account`.
-- **Everyone's accounts + resets (superuser):** `https://$SLOP_DOMAIN/admin` — add
+- **Your password:** `https://<server-ip>/account`.
+- **Everyone's accounts + resets (superuser):** `https://<server-ip>/admin` — add
   or remove users, set roles, and reset any user's password (which forces a change
   at their next login and drops their live sessions immediately).
 
