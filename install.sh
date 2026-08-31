@@ -193,6 +193,34 @@ _upsert_env() {  # _upsert_env KEY VALUE — set KEY=VALUE in $ENV_FILE (replace
     printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   fi
 }
+
+# _upsert_kv FILE KEY VALUE — set KEY=VALUE in an arbitrary env file (0600),
+# replace-or-append, same private-temp handling as _upsert_env. Used to PERSIST
+# the SSO secret + trust flag into each app's compose-directory .env.
+_upsert_kv() {
+  _f="$1"; _k="$2"; _v="$3"
+  if [ ! -f "$_f" ]; then ( umask 077; touch "$_f" ); fi
+  chmod 600 "$_f" 2>/dev/null || true
+  if grep -q "^$_k=" "$_f" 2>/dev/null; then
+    _t="$_f.tmp.$$"; ( umask 077; : > "$_t" )
+    if sed "s|^$_k=.*|$_k=$_v|" "$_f" > "$_t"; then mv "$_t" "$_f"; else rm -f "$_t"; fi
+    chmod 600 "$_f" 2>/dev/null || true
+  else
+    printf '%s=%s\n' "$_k" "$_v" >> "$_f"
+  fi
+}
+
+# _app_compose_dir DIR — echo the directory that holds the app's compose file
+# (its own root, or a deploy/ subdir), matching how sysible_ctl finds it. That is
+# the directory docker compose loads .env from, so it's where the SSO env must live.
+_app_compose_dir() {
+  for _d in "$1" "$1/deploy"; do
+    for _f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+      [ -f "$_d/$_f" ] && { printf '%s\n' "$_d"; return 0; }
+    done
+  done
+  return 1
+}
 # NOTE: must ALWAYS return 0. Under dash (Debian's /bin/sh) with `set -e`, a
 # `VAR="${X:-$(fn)}"` assignment whose command substitution returns non-zero aborts
 # the whole script — silently. On a first run there is no .env yet, so a function
@@ -230,6 +258,19 @@ if [ "$WANT_APPS" -eq 1 ]; then
       FAILED="$FAILED $p(clone)"; say "  WARNING: could not clone $p — skipping it."; continue
     fi
     _dir="$SRC_DIR/$(dirname_for "$repo")"
+    # PERSIST the SSO secret + trust flag + base path into the app's OWN compose
+    # .env, so they survive EVERY future recreate. Without this the values only
+    # existed in the ambient env of the single install-time `up` below; any later
+    # `docker compose up -d` / `sysible_ctl up`/`update`/rebuild brought the app up
+    # with an empty secret and trust=0 (docker resolves ${VAR:-default}), so it
+    # failed closed and fell back to its OWN login — the SSO "stopped working after
+    # a redeploy" bug. docker compose auto-loads this .env from the compose dir.
+    if _cdir="$(_app_compose_dir "$_dir")"; then
+      _aenv="$_cdir/.env"
+      _upsert_kv "$_aenv" SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
+      _upsert_kv "$_aenv" "$trust" 1
+      _upsert_kv "$_aenv" SYSIBLE_BASE_PATH "/$p/"
+    fi
     # Pass the app dir, turn its SSO trust flag on, hand it the shared secret, and
     # build its front end under the gateway path prefix (/controller/ etc.) so its
     # assets + API calls resolve on the one shared origin (see gateway/Caddyfile).
