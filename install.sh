@@ -255,18 +255,8 @@ if [ "$WANT_GW" -eq 1 ]; then
   fi
 fi
 
-say
 if [ -n "$FAILED" ]; then
+  say
   say "Finished WITH PROBLEMS — these did not come up:$FAILED"
   say "Inspect with 'sysible_ctl status'; the errors above are usually network, DNS, or a Docker build."
-else
-  say "All done — the code is cloned under $SRC_DIR and everything is running in containers."
 fi
-if [ "$WANT_GW" -eq 1 ] && [ -z "$FAILED" ]; then
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  [ -n "$ip" ] || ip="<this server's IP>"
-  say "One front door is up: https://$ip/  — no domain, no DNS, no /etc/hosts."
-  say "Everything is ONE origin addressed by path (/controller /slep /connect) on"
-  say "whatever IP this host has. Accept the one-time self-signed cert warning."
-fi
-say "Manage everything with:  sysible_ctl status   |   sysible_ctl update all"
