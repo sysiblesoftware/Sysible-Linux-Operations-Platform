@@ -462,6 +462,9 @@ th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:500;font-size:12px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4em}
 .pill{font-size:11.5px;color:var(--muted)}
+.back{display:inline-flex;align-items:center;gap:5px;margin-bottom:10px;padding:5px 11px;
+  border:1px solid var(--line);border-radius:8px;font-size:13px;color:var(--muted)}
+.back:hover{color:var(--accent2);border-color:var(--accent2)}
 .foot{margin-top:1.4em;color:var(--faint);font-size:12px;text-align:center;letter-spacing:.04em}
 fieldset{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:1.2em 0 0}
 legend{color:var(--muted);font-size:12.5px;padding:0 6px}
@@ -673,6 +676,7 @@ def _account_page(sess: sqlite3.Row, first: bool, msg: str = "", kind: str = "er
     )
     admin_link = "<a href='/admin'>Manage accounts →</a> · " if sess["role"] == "superuser" else ""
     body = (
+        "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Your account</h1><span class=pill>{escape(sess['username'])} "
         f"· {escape(sess['role'])}</span></div>"
         f"<p class=sub>{admin_link}<a href='/'>Open portal →</a></p>"
@@ -774,6 +778,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
         )
     role_opts = "".join(f"<option value='{ro}'>{ro}</option>" for ro in ROLES)
     body = (
+        "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
         f"<p class=sub><a href='/admin/settings'>Configuration</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
@@ -1029,6 +1034,7 @@ def _config_page(sess: sqlite3.Row) -> str:
     ])
 
     body = (
+        "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Configuration</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
         "<p class=sub><a href='/admin'>Accounts</a> · <a href='/account'>Your account</a> · "
