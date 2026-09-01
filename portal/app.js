@@ -9,6 +9,10 @@
   document.querySelectorAll(".card[data-sub]").forEach(function (card) {
     var sub = card.getAttribute("data-sub");
     card.href = "/" + sub + "/";
+    // Open each app in a new tab, keeping the portal open behind it. rel guards the
+    // new tab from reaching back through window.opener.
+    card.target = "_blank";
+    card.rel = "noopener";
   });
 
   // Health: the gateway proxies /healthz/<app> to each app's own health endpoint,
