@@ -311,3 +311,37 @@ def test_session_cookie_is_host_only(tmp_path):
         sso = next(v for k, v in r.headers.multi_items()
                    if k.lower() == "set-cookie" and v.startswith("sysible_sso="))
         assert "domain=" not in sso.lower()
+
+
+def test_config_page_requires_superuser(cl):
+    # Not signed in → bounced to login (302 to /login).
+    r = cl.get("/admin/settings", follow_redirects=False)
+    assert r.status_code in (302, 401, 403)
+
+
+def test_config_page_renders_for_superuser_and_masks_secret(client, monkeypatch):
+    cl, m = client
+    monkeypatch.setenv("SYSIBLE_SSO_SHARED_SECRET", "topsecret-shared-value-xyz")
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.get("/admin/settings")
+    assert r.status_code == 200
+    body = r.text
+    # Documents the parameters…
+    assert "Configuration" in body
+    assert "SYSIBLE_SSO_SHARED_SECRET" in body and "SLOP_SESSION_TTL" in body
+    # …but never prints the actual secret value.
+    assert "topsecret-shared-value-xyz" not in body
+    assert "configured" in body
+
+
+def test_config_page_forbidden_for_non_superuser(client):
+    from starlette.testclient import TestClient
+    cl, m = client
+    _login(cl, "admin", ADMIN_PW)
+    cl.post("/admin/users", data={"username": "auditguy", "role": "auditor",
+            "password": "auditorpass123", "csrf": _tok(cl)}, headers=HDR)
+    with TestClient(m.app, base_url="http://slop.lan") as d:
+        d.post("/login", data={"username": "auditguy", "password": "auditorpass123",
+               "csrf": _tok(d)}, headers=HDR, follow_redirects=False)
+        # auditor is signed in but not superuser → 403 on the config console
+        assert d.get("/admin/settings").status_code == 403

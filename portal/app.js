@@ -48,6 +48,9 @@
       if (me.role === "superuser") {
         var a = document.getElementById("adminlink");
         if (a) a.hidden = false;
+        // The Administration tile (accounts + all SLOP configuration) is superuser-only.
+        var adminCard = document.getElementById("card-admin");
+        if (adminCard) adminCard.hidden = false;
       }
       var box = document.getElementById("userbox");
       if (box) box.hidden = false;

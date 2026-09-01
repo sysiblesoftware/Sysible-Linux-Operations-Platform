@@ -774,9 +774,9 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
         )
     role_opts = "".join(f"<option value='{ro}'>{ro}</option>" for ro in ROLES)
     body = (
-        f"<div class=top><h1>Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub><a href='/account'>Your account</a> · <a href='/'>Portal →</a> · "
-        "one credential signs a user into all three apps.</p>"
+        f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
+        f"<p class=sub><a href='/admin/settings'>Configuration</a> · <a href='/account'>Your account</a> · "
+        "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
         f"{_msg(msg, kind)}"
         "<table><tr><th>User</th><th>Role</th><th>Password</th><th></th></tr>"
         f"{trs}</table>"
@@ -907,6 +907,120 @@ def admin_delete(request: Request, username: str, csrf: str = Form("")):
         c.execute("DELETE FROM users WHERE username=?", (username,))
     _drop_user_sessions(username)
     return _csrf_html(_admin_page(sess, f"Deleted '{username}'.", "ok", csrf=tok), tok)
+
+
+# ---------------------------------------------------------------------------
+# Configuration console — a read-only reference of every SLOP parameter, with
+# the running values (secrets never shown) and where each is set. SLOP is
+# configured through environment variables applied on restart, so this is a
+# status + reference view, not an editor; the account actions on /admin are the
+# runtime-editable surface.
+# ---------------------------------------------------------------------------
+def _cfg_table(items) -> str:
+    """items: list of (env_name, value_html, desc). value_html is pre-escaped/marked."""
+    trs = "".join(
+        f"<tr><td><code>{escape(name)}</code></td><td class=mono>{value}</td>"
+        f"<td class=sub style='margin:0'>{escape(desc)}</td></tr>"
+        for name, value, desc in items
+    )
+    return ("<table><tr><th>Parameter</th><th>Value</th><th>What it does</th></tr>"
+            f"{trs}</table>")
+
+
+def _secret_status(v: str) -> str:
+    # Never render a secret; show only whether it is configured.
+    return "<span class=pill>configured</span>" if v else "<span class=pill>not set</span>"
+
+
+def _config_page(sess: sqlite3.Row) -> str:
+    _admin_pw_set = bool(os.environ.get("SLOP_ADMIN_PASSWORD", "").strip())
+
+    identity = _cfg_table([
+        ("SLOP_ADMIN_USER", escape(os.environ.get("SLOP_ADMIN_USER", "admin") or "admin"),
+         "Username of the first-run bootstrap superuser."),
+        ("SLOP_ADMIN_PASSWORD",
+         "<span class=pill>set</span>" if _admin_pw_set else "<span class=pill>auto-generated</span>",
+         "Bootstrap admin password. Empty = a random one is generated and printed once to the idp logs."),
+        ("SLOP_ADMIN_FORCE_CHANGE",
+         "on" if os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "1") == "1" else "off",
+         "Force the bootstrap admin to change the password at first login."),
+        ("SLOP_MIN_PASSWORD_LEN", str(_MIN_PW),
+         "Minimum length for a new or changed password."),
+        ("SLOP_SESSION_TTL", f"{SESSION_TTL}s (≈{SESSION_TTL // 3600}h)",
+         "How long a sign-in lasts before re-login is required."),
+    ])
+
+    logins = _cfg_table([
+        ("SLOP_LOGIN_MAX_ATTEMPTS", str(_LOGIN_MAX),
+         "Failed sign-ins allowed per source within the window before throttling."),
+        ("SLOP_LOGIN_WINDOW_S", f"{_LOGIN_WINDOW}s",
+         "Rolling window the failed-login count is measured over."),
+        ("SLOP_LOGIN_MAX_KEYS", str(_LOGIN_ATTEMPTS_MAX_KEYS),
+         "Cap on tracked source keys for the throttle (memory bound against a spray)."),
+        ("SLOP_ALLOW_INSECURE_COOKIE", "on (HTTP allowed)" if _ALLOW_INSECURE else "off (HTTPS only)",
+         "Allow the session cookie over plain HTTP. Keep off in production."),
+    ])
+
+    sso = _cfg_table([
+        ("SYSIBLE_SSO_SHARED_SECRET", _secret_status(os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")),
+         "The gateway stamps this on proxied requests so each app can prove a request came "
+         "through the gateway before trusting the asserted identity. Must be IDENTICAL here "
+         "and in every app's SYSIBLE_SSO_SHARED_SECRET."),
+    ])
+
+    store = _cfg_table([
+        ("SLOP_DATA_DIR", escape(DATA_DIR), "Directory holding the IdP data volume."),
+        ("SLOP_DB_PATH", escape(DB_PATH), "Path to the SQLite user + session store."),
+        ("PORT", escape(os.environ.get("PORT", "8080")), "Port the IdP listens on inside its container."),
+    ])
+
+    # Gateway-side values live on the Caddy container, not this IdP process, so show the
+    # documented defaults (from .env.example) rather than a value this process can't read.
+    upstreams = _cfg_table([
+        ("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800", "Where the Controller listens (host:port)."),
+        ("SLOP_SLEP_UPSTREAM", "host.docker.internal:8810", "Where the Engineering Platform (SLEP) listens."),
+        ("SLOP_CONNECT_UPSTREAM", "host.docker.internal:8700", "Where Connect listens."),
+        ("SLOP_IDP_UPSTREAM", "idp:8080", "Where the gateway finds this IdP."),
+    ])
+
+    # App-side flags each app reads from its OWN .env; listed here as the SSO reference.
+    apps = _cfg_table([
+        ("SYSIBLE_WEBGUI_TRUST_SSO", "1 in SLOP", "Controller: trust the gateway-asserted identity."),
+        ("SLEP_TRUST_GATEWAY_AUTH", "1 in SLOP", "SLEP: trust the gateway-asserted identity."),
+        ("SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH", "1 in SLOP", "Connect: trust the gateway-asserted identity."),
+        ("SYSIBLE_CONNECT_CONTROLLER_URL", "https://&lt;host-ip&gt;:9000",
+         "Connect auto-attaches to the local Controller at this URL over SSO (no manual login)."),
+    ])
+
+    body = (
+        f"<div class=top><h1>Administration · Configuration</h1>"
+        f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
+        "<p class=sub><a href='/admin'>Accounts</a> · <a href='/account'>Your account</a> · "
+        "<a href='/'>Portal &rarr;</a></p>"
+        "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
+        "(the gateway host, and each app), applied when the stack is restarted "
+        "(<code>sysible_ctl &lt;app&gt; up</code>). This page shows the running values and "
+        "documents every parameter &mdash; passwords and the shared secret are never displayed. "
+        "Manage users and password resets under <a href='/admin'>Accounts</a>.</p>"
+        f"<fieldset><legend>Identity &amp; passwords</legend>{identity}</fieldset>"
+        f"<fieldset><legend>Login throttle &amp; sessions</legend>{logins}</fieldset>"
+        f"<fieldset><legend>Single sign-on (trust boundary)</legend>{sso}</fieldset>"
+        f"<fieldset><legend>App upstreams (set on the gateway)</legend>"
+        "<p class=sub style='margin:.2rem 0 .6rem'>Defaults shown &mdash; override in the "
+        "gateway's <code>.env</code> if an app runs elsewhere.</p>"
+        f"{upstreams}</fieldset>"
+        f"<fieldset><legend>Per-app SSO (set in each app's .env)</legend>{apps}</fieldset>"
+        f"<fieldset><legend>Data store</legend>{store}</fieldset>"
+    )
+    return _page("Configuration · SLOP", body, wide=True)
+
+
+@app.get("/admin/settings", response_class=HTMLResponse)
+def admin_settings(request: Request):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    return HTMLResponse(_config_page(sess))
 
 
 if __name__ == "__main__":
