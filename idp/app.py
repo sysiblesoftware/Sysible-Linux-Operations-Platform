@@ -983,6 +983,42 @@ def _config_page(sess: sqlite3.Row) -> str:
         ("SLOP_IDP_UPSTREAM", "idp:8080", "Where the gateway finds this IdP."),
     ])
 
+    # One identity, three apps: how the SLOP-asserted role maps into each app's own
+    # role model (SLOP is the identity authority; each app trusts + maps it).
+    role_map = (
+        "<table><tr><th>SLOP role</th><th>Controller</th><th>Engineering Platform</th><th>Connect</th></tr>"
+        "<tr><td>superuser</td><td>superuser</td><td>superuser</td><td>full user</td></tr>"
+        "<tr><td>operator</td><td>sysadmin</td><td>operator</td><td>full user</td></tr>"
+        "<tr><td>auditor</td><td>auditor</td><td>viewer</td><td>&mdash;</td></tr>"
+        "</table>"
+    )
+
+    # The Controller owns the deep RBAC + security parameters (they're managed live
+    # there, with its own audit trail). Surface them here as one-click deep links —
+    # SSO carries the operator's identity, so each opens the exact settings tab with
+    # no second login.
+    def _clink(tab, label, desc):
+        href = f"/controller/?view=settings&amp;tab={tab}"
+        return (f"<tr><td><a href='{href}' target=_blank rel=noopener>{escape(label)} &rarr;</a></td>"
+                f"<td class=sub style='margin:0'>{escape(desc)}</td></tr>")
+
+    controller_rbac = (
+        "<table><tr><th>Controller setting</th><th>What it manages</th></tr>"
+        + _clink("admins", "Administrators (RBAC)",
+                 "Controller admin accounts, roles (superuser / sysadmin / auditor), and per-account 'sudo on Connect'.")
+        + _clink("policy", "Password Policy",
+                 "Minimum length and required character classes for Controller passwords.")
+        + _clink("enrollacl", "Enrollment Access",
+                 "Which source networks may enroll agents, the enrollment pause kill-switch, and rate limits.")
+        + _clink("tls", "TLS / Certificates",
+                 "The Controller's HTTPS certificate and the hostnames it's valid for.")
+        + _clink("controller", "Controller address",
+                 "The routable address / hostnames agents and SLEP connect to (host:9000).")
+        + _clink("audit", "Audit log",
+                 "The record of privileged Controller actions.")
+        + "</table>"
+    )
+
     # App-side flags each app reads from its OWN .env; listed here as the SSO reference.
     apps = _cfg_table([
         ("SYSIBLE_WEBGUI_TRUST_SSO", "1 in SLOP", "Controller: trust the gateway-asserted identity."),
@@ -1005,6 +1041,15 @@ def _config_page(sess: sqlite3.Row) -> str:
         f"<fieldset><legend>Identity &amp; passwords</legend>{identity}</fieldset>"
         f"<fieldset><legend>Login throttle &amp; sessions</legend>{logins}</fieldset>"
         f"<fieldset><legend>Single sign-on (trust boundary)</legend>{sso}</fieldset>"
+        f"<fieldset><legend>Role mapping (one identity, every app)</legend>"
+        "<p class=sub style='margin:.2rem 0 .6rem'>SLOP is the identity authority; each "
+        "app trusts the gateway-asserted role and maps it to its own.</p>"
+        f"{role_map}</fieldset>"
+        f"<fieldset><legend>Controller RBAC &amp; security parameters</legend>"
+        "<p class=sub style='margin:.2rem 0 .6rem'>These are managed live in the Controller "
+        "(with its own audit trail). Each link opens the exact settings tab &mdash; signed in "
+        "by SSO, no second login.</p>"
+        f"{controller_rbac}</fieldset>"
         f"<fieldset><legend>App upstreams (set on the gateway)</legend>"
         "<p class=sub style='margin:.2rem 0 .6rem'>Defaults shown &mdash; override in the "
         "gateway's <code>.env</code> if an app runs elsewhere.</p>"
