@@ -58,6 +58,19 @@ generates one strong secret and wires it into the gateway and all three apps.
 All three also read `SYSIBLE_SSO_SHARED_SECRET`. Turn a flag off (the default) and
 the app keeps its own native login for direct, non-gateway use.
 
+### Connect → Controller (same-host auto-attach)
+
+In the all-in-one SLOP stack Connect **auto-attaches to the local Controller** — no
+manual "log in to the Controller" step and no machine API key to provision. The
+installer sets `SYSIBLE_CONNECT_CONTROLLER_URL` to the Controller's backend API
+(`https://<host-LAN-IP>:9000`); Connect then authenticates to the Controller with the
+**same `SYSIBLE_SSO_SHARED_SECRET`** it already holds. The Controller trusts that
+shared secret on its fleet/read + terminal routes (`GET /agents`, `GET /remote/hosts`,
+the terminal proxy) as an alternative to the machine API key — superuser-gated actions
+still require an admin token on top. Use the Controller's service name / LAN address,
+never `localhost` (Connect's SSRF guard blocks loopback). Leave the URL empty for a
+standalone Connect, which keeps its manual "connect a Controller" (URL + key) flow.
+
 ## Accounts & password resets
 
 Because the apps trust SLOP, there is effectively **one credential**. Manage it in

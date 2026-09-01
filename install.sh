@@ -242,6 +242,12 @@ export SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET"
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then
+  # The host's LAN IP — where the Controller publishes its backend/agent API on :9000.
+  # Same detection sysible_ctl uses when it seeds the Controller's advertised address.
+  # Connect (all-in-one SLOP host) auto-attaches to the local Controller at this address
+  # over SSO, so the operator never has to "log in to the Controller" from Connect.
+  HOST_ADDR="${SYSIBLE_CONTROLLER_ADDR:-}"
+  [ -n "$HOST_ADDR" ] || HOST_ADDR="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   # controller (already cloned above) + slep + connect. The 4th field is each
   # app's "trust the SLOP gateway identity" flag — set to 1 here so the app trusts
   # the gateway-asserted identity (guarded by the shared secret above).
@@ -265,11 +271,18 @@ if [ "$WANT_APPS" -eq 1 ]; then
     # with an empty secret and trust=0 (docker resolves ${VAR:-default}), so it
     # failed closed and fell back to its OWN login — the SSO "stopped working after
     # a redeploy" bug. docker compose auto-loads this .env from the compose dir.
+    # Connect auto-attaches to the LOCAL Controller over SSO — hand it that URL
+    # (host LAN IP + the Controller's published :9000). No machine API key needed:
+    # Connect authenticates to the Controller with the shared secret. Persisted into
+    # the app's .env (which docker compose auto-loads), so it survives every recreate.
     if _cdir="$(_app_compose_dir "$_dir")"; then
       _aenv="$_cdir/.env"
       _upsert_kv "$_aenv" SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
       _upsert_kv "$_aenv" "$trust" 1
       _upsert_kv "$_aenv" SYSIBLE_BASE_PATH "/$p/"
+      if [ "$p" = "connect" ] && [ -n "$HOST_ADDR" ]; then
+        _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
+      fi
     fi
     # Pass the app dir, turn its SSO trust flag on, hand it the shared secret, and
     # build its front end under the gateway path prefix (/controller/ etc.) so its
