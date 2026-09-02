@@ -408,6 +408,25 @@ def test_security_headers_present(cl):
     assert r.headers.get("Cache-Control") == "no-store"
 
 
+def test_referrer_policy_is_not_no_referrer(cl):
+    """Regression: 'no-referrer' silently breaks EVERY form on this service.
+
+    Chromium derives a navigation's Origin header from the referrer policy, so with
+    Referrer-Policy: no-referrer an ordinary same-origin HTML form POST arrives as
+    `Origin: null` with no Referer at all — and _origin_ok then (correctly) refuses
+    it. That took out sign-in, /account/password and sign-out together, with no
+    error the user could see: the click just bounced back to the same page. Verified
+    in a real Chromium against this app. 'same-origin' still sends nothing off-site.
+
+    (fetch()/XHR is unaffected — the browser sets Origin on those regardless — which
+    is why the SPA apps behind the gateway never showed the fault.)
+    """
+    r = cl.get("/login", follow_redirects=False)
+    pol = r.headers.get("Referrer-Policy", "")
+    assert pol and "no-referrer" not in pol
+    assert pol in ("same-origin", "strict-origin-when-cross-origin")
+
+
 def test_second_superuser_can_be_demoted(cl):
     # The last-superuser guard must NOT block demotion when another superuser
     # remains (regression for the atomic-guarded UPDATE).

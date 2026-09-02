@@ -183,6 +183,13 @@ sysible.slop {
 	#     new tabs (never iframes), so this breaks nothing.
 	#   - nosniff: no MIME-sniffing an upload/response into executable script.
 	#   - Referrer-Policy: never leak the path (which app / which account) off-site.
+	#     It is 'same-origin', NOT 'no-referrer'. Chromium derives a navigation's
+	#     Origin header from the referrer policy, so 'no-referrer' makes an ordinary
+	#     same-origin HTML form POST arrive as `Origin: null` with no Referer — which
+	#     the IdP's same-origin CSRF gate (correctly) rejects, silently breaking sign
+	#     in, password change and sign out. 'same-origin' keeps the full referrer for
+	#     our own pages and still sends NOTHING off-site, so the leak protection is
+	#     unchanged. Do not "harden" this back to no-referrer.
 	#   - HSTS: inert for the raw-IP / self-signed default (browsers ignore HSTS for
 	#     IP hosts and untrusted certs) but protects real-name / real-cert installs.
 	# A restrictive default-src is deliberately NOT forced here — the three fronted
@@ -193,7 +200,7 @@ sysible.slop {
 		Content-Security-Policy "frame-ancestors 'none'"
 		X-Frame-Options DENY
 		X-Content-Type-Options nosniff
-		Referrer-Policy no-referrer
+		Referrer-Policy same-origin
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		-Server
 	}

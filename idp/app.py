@@ -588,7 +588,12 @@ async def _security_headers(request: Request, call_next):
     resp.headers.setdefault("Content-Security-Policy", _CSP)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
-    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    # same-origin, NOT no-referrer: Chromium derives a navigation's Origin header
+    # from the referrer policy, so no-referrer turns every HTML form POST here
+    # (login, /account/password, the admin forms, sign out) into `Origin: null`
+    # with no Referer, which _origin_ok correctly rejects — breaking sign-in and
+    # sign-out outright. same-origin still sends nothing off-site.
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
     # The IdP serves only per-user, security-relevant responses (login forms with
     # CSRF tokens, the admin user list, one-time temp passwords). None of it should
     # ever land in a shared/back-button cache; auth_verify already sets this, hence
