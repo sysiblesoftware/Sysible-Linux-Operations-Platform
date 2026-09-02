@@ -61,6 +61,8 @@ services:
       SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
       SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}
       SLOP_CONNECT_UPSTREAM: ${SLOP_CONNECT_UPSTREAM:-host.docker.internal:8700}
+      # Flashback (the config time machine) runs as its own stack on this host port.
+      SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-host.docker.internal:8720}
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./portal:/srv/portal:ro

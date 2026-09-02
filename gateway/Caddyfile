@@ -116,6 +116,38 @@
 	}
 }
 
+# ---- same as (appsite), but for a PLAIN-HTTP upstream ----------------------
+# Identical SSO gate + prefix strip + cookie strip as (appsite); the only
+# difference is the upstream speaks plain HTTP inside the private network (e.g.
+# Flashback), so there is no upstream TLS to skip-verify. Same trust boundary: the
+# gateway strips any client X-Sysible-*, injects identity only from the IdP, and
+# stamps the shared secret AFTER auth. The gateway->app hop is still on the trusted
+# internal network; publish the app port only where that hop can't be interposed.
+(appsite_http) {
+	handle {args[0]}/* {
+		route {
+			request_header -X-Sysible-User
+			request_header -X-Sysible-Role
+			request_header -X-Sysible-Auth
+			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
+				uri /auth/verify
+				copy_headers X-Sysible-User X-Sysible-Role
+				@sso_bad status 401 403
+				handle_response @sso_bad {
+					redir /login?next={uri} 302
+				}
+			}
+			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
+			uri strip_prefix {args[0]}
+			reverse_proxy {args[1]} {
+				header_up X-Forwarded-Proto https
+				header_up Host {host}
+				header_up Cookie "sysible_sso=[^;]*;?\s*" ""
+			}
+		}
+	}
+}
+
 # ---- plain HTTP: bounce to HTTPS -------------------------------------------
 # The real site below is host-less :443 (raw-IP), and Caddy only auto-creates an
 # HTTP->HTTPS redirect per NAMED host — so without this a plain http://<ip>/ hit
@@ -227,11 +259,21 @@ sysible.slop {
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
+	# Flashback serves plain HTTP inside the private network (TLS is the gateway's
+	# job), so this hop is http:// — no upstream cert to skip-verify.
+	handle /healthz/flashback {
+		rewrite * /api/health
+		reverse_proxy http://{$SLOP_FLASHBACK_UPSTREAM:host.docker.internal:8720} {
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
+		}
+	}
 
 	# The three apps, each SSO-gated and prefix-stripped (see the appsite snippet).
 	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
 	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
 	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
+	# Flashback (the config time machine) — plain HTTP upstream (see /healthz/flashback).
+	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:host.docker.internal:8720}
 
 	# The portal itself (root) — require sign-in, then serve the static launcher.
 	handle {

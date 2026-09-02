@@ -31,7 +31,7 @@
       .then(function (r) { setDot(app, r.ok ? "up" : "down"); })
       .catch(function () { setDot(app, "down"); });
   }
-  function pollAll() { ["controller", "slep", "connect"].forEach(poll); }
+  function pollAll() { ["controller", "slep", "connect", "flashback"].forEach(poll); }
   pollAll();
   setInterval(pollAll, 15000);
 
