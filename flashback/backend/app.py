@@ -109,6 +109,33 @@ def _startup() -> None:
 # --------------------------------------------------------------------------- #
 # Identity helpers
 # --------------------------------------------------------------------------- #
+def _wants_html(request: Request) -> bool:
+    """True for a browser navigation, as opposed to the console's own fetch() or an
+    agent. Chooses only the ERROR REPRESENTATION — never authorization."""
+    return "text/html" in (request.headers.get("accept") or "")
+
+
+@app.exception_handler(HTTPException)
+async def _http_error(request: Request, exc: HTTPException):
+    """Refuse in the representation the caller can actually read.
+
+    A browser that follows the portal tile and gets a bare
+    `{"detail":"Not signed in."}` has no way to tell a direct hit apart from a
+    gateway that isn't stamping identity — it just looks like "Flashback does
+    nothing". On 401/403 a navigation gets the diagnostic page instead, naming
+    which wiring fault occurred (identity.deny_reason leaks nothing secret).
+    API and agent callers keep the JSON contract unchanged.
+    """
+    if exc.status_code in (401, 403) and _wants_html(request):
+        code, why = identity.deny_reason(request)
+        if not why:                       # denied for a role reason, not a wiring one
+            why = str(exc.detail)
+        return HTMLResponse(ui.denied_page(why, code, exc.status_code),
+                            status_code=exc.status_code, headers=exc.headers or {})
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                        headers=exc.headers or {})
+
+
 def _require_identity(request: Request) -> identity.Identity:
     who = identity.current(request)
     if who is None:

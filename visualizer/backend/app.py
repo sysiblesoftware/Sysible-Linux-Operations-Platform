@@ -92,6 +92,26 @@ def _startup() -> None:
     print(identity.startup_notice(), flush=True)
 
 
+def _wants_html(request: Request) -> bool:
+    """True for a browser navigation, as opposed to the console's own fetch().
+    Chooses only the ERROR REPRESENTATION — never authorization."""
+    return "text/html" in (request.headers.get("accept") or "")
+
+
+@app.exception_handler(HTTPException)
+async def _http_error(request: Request, exc: HTTPException):
+    """Refuse in the representation the caller can actually read: a navigation gets
+    the diagnostic page naming the wiring fault, fetch()/API callers keep JSON."""
+    if exc.status_code in (401, 403) and _wants_html(request):
+        code, why = identity.deny_reason(request)
+        if not why:
+            why = str(exc.detail)
+        return HTMLResponse(ui.denied_page(why, code, exc.status_code),
+                            status_code=exc.status_code, headers=exc.headers or {})
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                        headers=exc.headers or {})
+
+
 def _require_identity(request: Request) -> identity.Identity:
     who = identity.current(request)
     if who is None:

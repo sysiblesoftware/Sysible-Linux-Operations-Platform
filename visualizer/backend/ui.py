@@ -40,15 +40,28 @@ border:1px solid var(--line);background:var(--field);color:var(--text);font-fami
 padding:.45em .7em;border-radius:8px;font-family:inherit;font-size:12.5px;cursor:pointer}
 .bar button:hover{border-color:var(--accent)}
 .wrap{padding:.6em 1em 2em}
-table{width:100%;border-collapse:collapse;font-size:13px}
+/* table-layout:fixed is load-bearing. A single Controller row can carry a
+   multi-kilobyte fleet-posture script in Detail; with auto layout that one cell
+   sets the column width and squeezes When/Who/Action into unreadable slivers. */
+table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
 th{text-align:left;color:var(--faint);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
 padding:.5em .6em;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
 td{padding:.5em .6em;border-bottom:1px solid var(--line);vertical-align:top}
 tr:hover td{background:var(--panel2)}
-td.ts{white-space:nowrap;color:var(--muted);font-size:12.5px}
-td.actor{white-space:nowrap}
-td.act{font-weight:600}
-td.detail{font-family:var(--mono);font-size:12px;color:var(--muted);word-break:break-word}
+th.ts,td.ts{width:11.5em;white-space:nowrap;color:var(--muted);font-size:12.5px}
+th.actor,td.actor{width:9em;overflow-wrap:anywhere}
+th.act,td.act{width:11em;font-weight:600;overflow-wrap:anywhere}
+th.tgt,td.tgt{width:11em;overflow-wrap:anywhere}
+td.detail{font-family:var(--mono);font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+/* Long detail is CLAMPED to a few lines, not truncated: nothing is lost, the row
+   just stays scannable until you open it. */
+td.detail .clip{white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;
+-webkit-box-orient:vertical;overflow:hidden}
+td.detail.open .clip{display:block;max-height:24em;overflow:auto;
+background:var(--field);border:1px solid var(--line);border-radius:8px;padding:.5em .6em}
+td.detail .more{margin-top:.35em;border:1px solid var(--line);background:var(--panel2);
+color:var(--muted);font-family:inherit;font-size:11px;padding:.1em .55em;border-radius:20px;cursor:pointer}
+td.detail .more:hover{color:var(--text);border-color:var(--accent)}
 .pill{display:inline-block;padding:.05em .5em;border-radius:20px;font-size:11px;border:1px solid var(--line);color:var(--muted)}
 .msg{margin:.5em 1em;padding:.55em .8em;border-radius:8px;font-size:12.5px}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
@@ -65,7 +78,7 @@ const $=s=>document.querySelector(s);
 // page's own directory so the console works standalone AND behind the gateway.
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const U = p => BASE + String(p).replace(/^\//,'');
-let APPS=[], cur=null, rows=[], limit=100;
+let APPS=[], cur=null, rows=[], limit=100, lastFailed=false;
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;}
 function fmt(t){if(!t)return '—';const d=new Date(t*1000);return d.toLocaleString();}
 async function jget(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json();}
@@ -94,18 +107,46 @@ async function load(){
   (d.errors||[]).forEach(m=>$('#msgs').appendChild(el('div','msg err', d.label+' — '+m)));
   (d.notes ||[]).forEach(m=>$('#msgs').appendChild(el('div','msg note', d.label+' — '+m)));
   rows=d.events||[];
+  lastFailed=(d.errors||[]).length>0;
   const tab=document.querySelector('.tab[data-key="'+cur+'"]');
   if(tab && !tab.querySelector('.cnt')){const s=el('span','cnt','');tab.appendChild(s);}
   if(tab)tab.querySelector('.cnt').textContent=rows.length?('· '+rows.length):'';
   render();
 }
+// Detail is whatever the owning app recorded, and some of it is enormous — a
+// Controller fleet-posture run stores the entire several-kilobyte shell script it
+// ran. Dumping that raw makes the table unreadable, and truncating it throws away
+// the thing an operator opened the console to read. So: clamp to three lines, with
+// a toggle that opens the full text in place (scrollable, never re-fetched).
+const CLAMP_AT = 240;
+function detailCell(text){
+  const td=el('td','detail');
+  if(!text) return td;
+  td.appendChild(el('div','clip',text));
+  if(text.length>CLAMP_AT){
+    const b=el('button','more','more');
+    b.setAttribute('aria-expanded','false');
+    b.onclick=()=>{const open=td.classList.toggle('open');
+      b.textContent=open?'less':'more'; b.setAttribute('aria-expanded',String(open));};
+    td.appendChild(b);
+  }
+  return td;
+}
 function render(){
   const q=($('#q').value||'').toLowerCase();
   const body=$('#body'); body.innerHTML='';
   const list=rows.filter(r=>!q || (r.actor+' '+r.action+' '+r.target+' '+r.detail).toLowerCase().includes(q));
-  if(!list.length){body.appendChild(el('div','empty', rows.length?'No rows match that filter.':'No activity recorded yet.'));return;}
+  if(!list.length){
+    // Distinguish "this app has recorded nothing" from "we could not read it" —
+    // the same blank table otherwise reads as a quiet, healthy fleet.
+    const why = rows.length ? 'No rows match that filter.'
+              : lastFailed  ? 'Could not read this app’s activity — see the message above.'
+                            : 'No activity recorded yet.';
+    body.appendChild(el('div','empty', why)); return;
+  }
   const t=el('table'); const thead=el('thead'); const tr=el('tr');
-  ['When','Who','Action','Target','Detail'].forEach(h=>tr.appendChild(el('th',null,h)));
+  [['When','ts'],['Who','actor'],['Action','act'],['Target','tgt'],['Detail','detail']]
+    .forEach(([h,c])=>tr.appendChild(el('th',c,h)));
   thead.appendChild(tr); t.appendChild(thead);
   const tb=el('tbody');
   list.forEach(r=>{
@@ -113,8 +154,8 @@ function render(){
     row.appendChild(el('td','ts',fmt(r.ts)));
     row.appendChild(el('td','actor',r.actor||'—'));
     row.appendChild(el('td','act',r.action||'—'));
-    row.appendChild(el('td',null,r.target||''));
-    row.appendChild(el('td','detail',r.detail||''));
+    row.appendChild(el('td','tgt',r.target||''));
+    row.appendChild(detailCell(r.detail||''));
     tb.appendChild(row);
   });
   t.appendChild(tb); body.appendChild(t);
@@ -169,4 +210,37 @@ def page(user: str, role: str) -> str:
         "<div class=wrap><div id=body></div><div id=log></div></div>"
         f"<script>{_JS}</script>"
         "</body></html>"
+    )
+
+
+def denied_page(reason: str, code: str, status: int = 401) -> str:
+    """What a BROWSER gets instead of raw `{"detail":"Not signed in."}` — the same
+    self-describing refusal Flashback serves. `reason` comes from
+    identity.deny_reason() and never contains a secret."""
+    head = "Not signed in" if status == 401 else "Not permitted"
+    return (
+        "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Sysible Visualizer &mdash; " + escape(head) + "</title>"
+        "<script>try{var t=localStorage.getItem('slop-theme');"
+        "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
+        "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
+        f"<style>{_CSS}"
+        ".gate{max-width:44em;margin:12vh auto;padding:0 1.2em}"
+        ".gate h1{font-size:20px;margin:0 0 .5em}"
+        ".gate p{color:var(--muted);line-height:1.6;margin:.6em 0}"
+        ".gate .why{background:var(--panel);border:1px solid var(--line);border-radius:10px;"
+        "padding:.9em 1.1em;color:var(--text)}"
+        ".gate code{font-family:var(--mono);font-size:12.5px;color:var(--accent2)}"
+        ".gate a{color:var(--accent)}"
+        "</style></head><body>"
+        "<header class=head><div class=brand>Sysible <b>Visualizer</b> &mdash; activity &amp; logs</div></header>"
+        "<div class=gate>"
+        f"<h1>{escape(head)}</h1>"
+        f"<div class=why>{escape(reason)}</div>"
+        "<p>Visualizer has no login of its own — it takes your identity from the "
+        "Sysible Operations Platform gateway. Open it from the portal tile at "
+        "<code>/visualizer/</code> after signing in at <a href='/login'>/login</a>.</p>"
+        f"<p><code>{escape(code)}</code></p>"
+        "</div></body></html>"
     )

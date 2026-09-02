@@ -91,6 +91,41 @@ def current(request) -> Identity | None:
     return Identity(_LOCAL_USER, _LOCAL_ROLE if _LOCAL_ROLE in ROLES else "auditor")
 
 
+def deny_reason(request) -> tuple[str, str]:
+    """Why current() refused, as (code, operator-facing sentence).
+
+    A browser that lands on Flashback and is told only "Not signed in." has no way
+    to tell a direct hit apart from a misconfigured gateway, so this names the
+    actual failure. It deliberately reveals NOTHING secret: whether a proof header
+    was PRESENT is not the secret's value, and someone who can't produce the secret
+    learns nothing they couldn't learn by trying. Each case maps to one fix.
+    """
+    if not gateway_configured():
+        return ("open", "Flashback is running in unauthenticated local mode.")
+    proof = request.headers.get("x-sysible-auth", "")
+    if not proof:
+        return ("no-proof",
+                "This request carried no gateway proof header. Either you reached "
+                "Flashback directly (it is only meant to be used through the SLOP "
+                "gateway at /flashback/), or the gateway is not stamping this route.")
+    if not hmac.compare_digest(proof, _SSO_SECRET):
+        return ("bad-proof",
+                "The gateway's proof header did not match. SYSIBLE_SSO_SHARED_SECRET "
+                "differs between the gateway and Flashback — set the same value for "
+                "both (it lives in the SLOP .env) and recreate both containers.")
+    user = (request.headers.get("x-sysible-user") or "").strip()
+    role = (request.headers.get("x-sysible-role") or "").strip().lower()
+    if not user:
+        return ("no-user",
+                "The gateway proved itself but asserted no user. The gateway's "
+                "forward_auth is not copying X-Sysible-User from the IdP.")
+    if role not in ROLES:
+        return ("bad-role",
+                f"The gateway asserted an unusable role for {user!r}. Expected one "
+                f"of: {', '.join(ROLES)}.")
+    return ("ok", "")
+
+
 def startup_notice() -> str:
     if gateway_configured():
         return "Flashback: SSO gateway trust ON — identity taken from the SLOP gateway."

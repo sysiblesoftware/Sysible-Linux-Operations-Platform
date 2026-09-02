@@ -148,3 +148,50 @@ def test_oversized_body_rejected(client, mod):
 
 def test_health_is_public_for_the_portal_dot(client):
     assert client.get("/api/health").json()["service"] == "visualizer"
+
+
+# ---- how it refuses --------------------------------------------------------
+# A browser that lands here unauthenticated used to get a bare
+# {"detail":"Not signed in."} — which from the portal tile just looks like the app
+# is broken. Navigations now get a page naming the wiring fault; fetch()/API
+# callers keep the JSON contract, and neither may echo the shared secret.
+BROWSER = {"Accept": "text/html,application/xhtml+xml"}
+
+
+def _why(resp):
+    import re
+    m = re.search(r"<div class=why>(.*?)</div>", resp.text, re.S)
+    return m.group(1) if m else ""
+
+
+def test_api_refusal_is_still_json(client):
+    r = client.get("/api/apps")
+    assert r.status_code == 401
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json() == {"detail": "Not signed in."}
+
+
+def test_browser_refusal_names_the_fault(client):
+    r = client.get("/", headers=BROWSER)
+    assert r.status_code == 401 and r.headers["content-type"].startswith("text/html")
+    assert "no gateway proof header" in _why(r)
+
+    r = client.get("/", headers={**BROWSER, "X-Sysible-Auth": "wrong"})
+    assert "SYSIBLE_SSO_SHARED_SECRET" in _why(r)
+
+    r = client.get("/", headers={**BROWSER, "X-Sysible-Auth": SECRET})
+    assert "asserted no user" in _why(r)
+
+    r = client.get("/", headers={**BROWSER, "X-Sysible-Auth": SECRET,
+                                 "X-Sysible-User": "bob", "X-Sysible-Role": "wizard"})
+    assert "unusable role" in _why(r)
+
+
+def test_refusal_never_echoes_the_secret(client):
+    for extra in ({}, {"X-Sysible-Auth": "wrong"}, {"X-Sysible-Auth": SECRET}):
+        assert SECRET not in client.get("/", headers={**BROWSER, **extra}).text
+
+
+def test_signed_in_browser_gets_the_console(client):
+    r = client.get("/", headers={**BROWSER, **hdr()})
+    assert r.status_code == 200 and "activity &amp; logs" in r.text

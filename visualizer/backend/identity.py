@@ -76,6 +76,35 @@ def current(request) -> Identity | None:
     return Identity(_LOCAL_USER, _LOCAL_ROLE if _LOCAL_ROLE in ROLES else "auditor")
 
 
+def deny_reason(request) -> tuple[str, str]:
+    """Why current() refused, as (code, operator-facing sentence). Mirrors
+    Flashback's: it names the wiring fault and reveals nothing secret."""
+    if not gateway_configured():
+        return ("open", "Visualizer is running in unauthenticated local mode.")
+    proof = request.headers.get("x-sysible-auth", "")
+    if not proof:
+        return ("no-proof",
+                "This request carried no gateway proof header. Either you reached "
+                "Visualizer directly (it is only meant to be used through the SLOP "
+                "gateway at /visualizer/), or the gateway is not stamping this route.")
+    if not hmac.compare_digest(proof, _SSO_SECRET):
+        return ("bad-proof",
+                "The gateway's proof header did not match. SYSIBLE_SSO_SHARED_SECRET "
+                "differs between the gateway and Visualizer — set the same value for "
+                "both (it lives in the SLOP .env) and recreate both containers.")
+    user = (request.headers.get("x-sysible-user") or "").strip()
+    role = (request.headers.get("x-sysible-role") or "").strip().lower()
+    if not user:
+        return ("no-user",
+                "The gateway proved itself but asserted no user. The gateway's "
+                "forward_auth is not copying X-Sysible-User from the IdP.")
+    if role not in ROLES:
+        return ("bad-role",
+                f"The gateway asserted an unusable role for {user!r}. Expected one "
+                f"of: {', '.join(ROLES)}.")
+    return ("ok", "")
+
+
 def startup_notice() -> str:
     if gateway_configured():
         return "Visualizer: SSO gateway trust ON — identity taken from the SLOP gateway."
