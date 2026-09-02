@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -67,11 +68,12 @@ CSRF_COOKIE = "sysible_csrf"
 _ALLOW_INSECURE = os.environ.get("SLOP_ALLOW_INSECURE_COOKIE", "0") == "1"
 SESSION_TTL = int(os.environ.get("SLOP_SESSION_TTL", str(12 * 3600)))  # 12h
 
-# Brute-force throttle for POST /login. Caddy is the SOLE front end, so the
-# trusted client address is the direct proxy peer (request.client.host), never a
-# client-supplied X-Forwarded-For an attacker can rotate to dodge the limit. We
-# throttle on that peer AND per target username, so neither source-address
-# rotation nor username spraying can slip past the cap.
+# Brute-force throttle for POST /login. Caddy is the SOLE front end and APPENDS
+# the real client to X-Forwarded-For, so _client_ip() takes the rightmost hop as
+# the trusted per-client key (see the note there for why the raw proxy peer would
+# collapse into one platform-wide bucket). We throttle on that client IP AND per
+# target username, so neither source-address rotation nor username spraying slips
+# past the cap — and one client's failures can't lock everyone else out.
 _LOGIN_MAX = int(os.environ.get("SLOP_LOGIN_MAX_ATTEMPTS", "8"))
 _LOGIN_WINDOW = int(os.environ.get("SLOP_LOGIN_WINDOW_S", "300"))
 # Bound the in-memory attempt map: a flood of distinct usernames/peers must not
@@ -82,6 +84,11 @@ _LOGIN_ATTEMPTS_MAX_KEYS = int(os.environ.get("SLOP_LOGIN_MAX_KEYS", "4096"))
 # The three canonical SLOP roles, most→least privileged. Each app maps these onto
 # its own vocabulary (e.g. SLEP: auditor→viewer). Keep this list authoritative.
 ROLES = ("superuser", "operator", "auditor")
+
+# Accepted username shape at CREATION time (existing/bootstrap accounts are never
+# re-validated). Keep it to a portable identifier set so the same name is valid as
+# a primary key here and in every downstream app's user vocabulary.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 # scrypt work factors (OWASP-ish interactive defaults). Stored alongside each hash
 # so a later bump doesn't lock out existing users. scrypt's buffer is ~128*r*N
@@ -160,11 +167,6 @@ def _get_user(username: str) -> sqlite3.Row | None:
         return c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
 
 
-def _count_role(role: str) -> int:
-    with _db() as c:
-        return c.execute("SELECT COUNT(*) n FROM users WHERE role=?", (role,)).fetchone()["n"]
-
-
 def _upsert_user(username: str, password: str, role: str, must_change: bool) -> None:
     now = int(time.time())
     with _db() as c:
@@ -179,6 +181,7 @@ def _upsert_user(username: str, password: str, role: str, must_change: bool) -> 
 
 
 def _new_session(username: str, role: str) -> str:
+    _sweep_expired_sessions()  # opportunistic, self-throttled bulk cleanup on login
     token = secrets.token_urlsafe(32)
     now = int(time.time())
     with _db() as c:
@@ -216,6 +219,25 @@ def _drop_user_sessions(username: str) -> None:
     delete, so a credential change takes effect immediately everywhere."""
     with _db() as c:
         c.execute("DELETE FROM sessions WHERE username=?", (username,))
+
+
+_last_session_sweep = 0.0
+_SESSION_SWEEP_INTERVAL = 3600  # seconds between opportunistic sweeps
+
+
+def _sweep_expired_sessions(force: bool = False) -> None:
+    """Bulk-delete every expired session row. _resolve_session already drops a row
+    lazily when its own token is presented, but a session that's simply abandoned
+    (browser closed, device lost) is never presented again and would otherwise sit
+    in the table forever. Sweep on startup and at most once an interval thereafter
+    so the table can't grow without bound."""
+    global _last_session_sweep
+    now = time.time()
+    if not force and now - _last_session_sweep < _SESSION_SWEEP_INTERVAL:
+        return
+    _last_session_sweep = now
+    with _db() as c:
+        c.execute("DELETE FROM sessions WHERE expires_at < ?", (int(now),))
 
 
 def _sha(s: str) -> str:
@@ -258,11 +280,18 @@ _login_attempts: dict[str, list[float]] = {}
 
 
 def _client_ip(request: Request) -> str:
-    # Caddy is the ONLY thing in front of us, so the trusted client address is the
-    # direct peer — NOT a client-supplied X-Forwarded-For, which an attacker can
-    # rotate on every request to land in a fresh bucket and defeat the throttle.
-    # Never key the throttle on XFF here.
-    return request.client.host if request.client else "unknown"
+    # Caddy (the single front proxy) APPENDS the real client's address to
+    # X-Forwarded-For, so the LAST hop is the trusted client IP. Keying the throttle on
+    # the direct peer instead would be Caddy's OWN address for every user — a single
+    # global bucket that a few failed logins could use to lock the whole platform out of
+    # sign-in (the SSO front door for Controller/SLEP/Connect). Taking the last XFF hop
+    # is spoofing-resistant: a client may PREPEND fake entries, but only Caddy appends
+    # the rightmost one. Falls back to the direct peer when there's no proxy (standalone).
+    xff = request.headers.get("x-forwarded-for", "")
+    peer = request.client.host if request.client else "unknown"
+    if xff:
+        return xff.split(",")[-1].strip() or peer
+    return peer
 
 
 def _prune_attempts(now: float) -> None:
@@ -391,8 +420,18 @@ def _safe_next(raw: str | None) -> str:
     /controller/…); anything with a scheme/host is refused and falls back to /."""
     if not raw:
         return "/"
+    # Must be a single-slash site-relative path. Reject, in addition to any
+    # scheme/host: a leading "//" (scheme-relative -> another origin) and ANY
+    # backslash. urlsplit() does NOT fold "\" to "/", so "/\evil.com" parses with
+    # an empty netloc and would slip through the scheme/host test — yet a browser
+    # treats "\" as "/", so Location: /\evil.com navigates to //evil.com. The
+    # shipped Starlette happens to percent-encode "\" in the Location and defang it,
+    # but that's an implementation detail one dependency bump could remove, so we
+    # refuse backslashes here rather than lean on it.
+    if not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
+        return "/"
     parts = urlsplit(raw)
-    if not parts.scheme and not parts.netloc and raw.startswith("/"):
+    if not parts.scheme and not parts.netloc:
         return raw  # site-relative
     return "/"
 
@@ -436,6 +475,8 @@ border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
 .brand b{color:var(--accent);font-weight:700}
 h1{font-size:19px;margin:.2em 0 .1em}
 p.sub{color:var(--muted);margin:.1em 0 1.2em;font-size:13.5px;line-height:1.55}
+td.sub{color:var(--muted);font-size:12.5px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px}
 label{display:block;font-size:12.5px;color:var(--muted);margin:.9em 0 .3em}
 input:not([type]),input[type=text],input[type=password],select{width:100%;padding:10px 12px;border-radius:10px;
 border:1px solid var(--line);background:var(--field);color:var(--text);font-size:14px;font-family:var(--font)}
@@ -525,10 +566,42 @@ def _msg(text: str, kind: str = "err") -> str:
 app = FastAPI(title="SLOP IdP", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+# Content-Security-Policy for the IdP's own pages. The single-origin SLOP model
+# means an XSS in ANY app runs at the same origin as this admin console, so a real
+# CSP here is the containment that separate origins would otherwise give: no
+# framing (anti-clickjacking of the destructive admin forms), no base-tag or form
+# hijack, no plugins, nothing loaded off-origin. The pages carry a small inline
+# theme <script> and inline <style>, so script/style keep 'unsafe-inline' (server-
+# rendered, no user-injected markup reaches them). The gateway adds framing/sniff
+# headers for the apps it fronts; this covers the IdP whether reached through the
+# gateway or directly.
+_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("Content-Security-Policy", _CSP)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    # The IdP serves only per-user, security-relevant responses (login forms with
+    # CSRF tokens, the admin user list, one-time temp passwords). None of it should
+    # ever land in a shared/back-button cache; auth_verify already sets this, hence
+    # setdefault.
+    resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
+
+
 @app.on_event("startup")
 def _startup() -> None:
     _init_db()
     _bootstrap_admin()
+    _sweep_expired_sessions(force=True)
 
 
 @app.get("/healthz")
@@ -574,7 +647,11 @@ def auth_me(request: Request):
     return {
         "authenticated": True,
         "user": sess["username"],
-        "role": sess["role"],
+        # Report the LIVE role from the user row (like /auth/verify), not the value
+        # frozen into the session at login. Role changes drop sessions today, so the
+        # two agree — but reading the live row keeps them consistent if that ever
+        # changes, and never over-reports a stale privileged role.
+        "role": (u["role"] if u else sess["role"]),
         "must_change": bool(u["must_change"]) if u else False,
     }
 
@@ -659,7 +736,14 @@ def login_post(
 
 
 @app.post("/logout")
-def logout_post(request: Request):
+def logout_post(request: Request, csrf: str = Form("")):
+    # Same origin + CSRF guard as every other state-changing POST. SameSite=Lax
+    # already blunts pure cross-site logout POSTs, but the account page renders a
+    # hidden CSRF field in its sign-out form, so there's no reason to leave this
+    # one route un-guarded (defense-in-depth against forced logout). On a bad/
+    # missing token we simply don't drop the session and bounce to the portal.
+    if not _origin_ok(request) or not _csrf_ok(request, csrf):
+        return RedirectResponse("/", status_code=302)
     _drop_session(request.cookies.get(COOKIE))
     resp = RedirectResponse("/login", status_code=302)
     _clear_session_cookie(resp)
@@ -841,6 +925,10 @@ def admin_add(request: Request, username: str = Form(...), role: str = Form(...)
     username = username.strip()
     if not username or role not in ROLES:
         return _csrf_html(_admin_page(sess, "Username and a valid role are required.", "err", csrf=tok), tok, 400)
+    if not _USERNAME_RE.match(username):
+        return _csrf_html(_admin_page(
+            sess, "Username must be 1–64 chars: letters, digits, dot, dash or underscore.",
+            "err", csrf=tok), tok, 400)
     if len(password) < _MIN_PW:
         return _csrf_html(_admin_page(sess, f"Temporary password needs {_MIN_PW}+ characters.", "err", csrf=tok), tok, 400)
     if _get_user(username):
@@ -858,10 +946,10 @@ def admin_reset(request: Request, username: str, csrf: str = Form("")):
     blocked = _admin_guard(request, sess, csrf, tok)
     if blocked:
         return blocked
-    if not _get_user(username):
+    u = _get_user(username)
+    if not u:
         return _csrf_html(_admin_page(sess, "No such user.", "err", csrf=tok), tok, 404)
     temp = secrets.token_urlsafe(12)
-    u = _get_user(username)
     _upsert_user(username, temp, u["role"], must_change=True)
     _drop_user_sessions(username)  # force re-login with the new password
     return _csrf_html(
@@ -881,13 +969,22 @@ def admin_role(request: Request, username: str, role: str = Form(...), csrf: str
     u = _get_user(username)
     if not u or role not in ROLES:
         return _csrf_html(_admin_page(sess, "No such user, or invalid role.", "err", csrf=tok), tok, 400)
-    # Don't let the last superuser demote themselves out of admin access.
-    if u["role"] == "superuser" and role != "superuser" and _count_role("superuser") <= 1:
-        return _csrf_html(_admin_page(sess, "Can't demote the only superuser.", "err", csrf=tok), tok, 400)
-    # Update only the role in place — never touch the stored password hash.
+    # Update only the role in place — never touch the stored password hash. The
+    # "don't demote the last superuser" guard lives INSIDE the UPDATE (the count
+    # sub-select is evaluated under the same write lock as the write), so two
+    # superusers demoting each other at once can't both slip past a separate
+    # count-then-update and leave zero superusers (TOCTOU). rowcount==0 means the
+    # guard blocked the demotion.
     with _db() as c:
-        c.execute("UPDATE users SET role=?, updated_at=? WHERE username=?",
-                  (role, int(time.time()), username))
+        cur = c.execute(
+            """UPDATE users SET role=?, updated_at=? WHERE username=? AND (
+                   ?='superuser' OR role<>'superuser'
+                   OR (SELECT COUNT(*) FROM users WHERE role='superuser')>1)""",
+            (role, int(time.time()), username, role),
+        )
+        changed = cur.rowcount
+    if not changed:
+        return _csrf_html(_admin_page(sess, "Can't demote the only superuser.", "err", csrf=tok), tok, 400)
     _drop_user_sessions(username)  # role change takes effect immediately
     return _csrf_html(_admin_page(sess, f"Set {username}'s role to {role}.", "ok", csrf=tok), tok)
 
@@ -906,10 +1003,20 @@ def admin_delete(request: Request, username: str, csrf: str = Form("")):
     u = _get_user(username)
     if not u:
         return _csrf_html(_admin_page(sess, "No such user.", "err", csrf=tok), tok, 404)
-    if u["role"] == "superuser" and _count_role("superuser") <= 1:
-        return _csrf_html(_admin_page(sess, "Can't delete the only superuser.", "err", csrf=tok), tok, 400)
+    # As with role demotion, the last-superuser guard is evaluated INSIDE the
+    # DELETE (count sub-select under the same write lock) so two concurrent
+    # superuser deletes can't both pass a separate count check and empty the admin
+    # set (TOCTOU). rowcount==0 means the guard held.
     with _db() as c:
-        c.execute("DELETE FROM users WHERE username=?", (username,))
+        cur = c.execute(
+            """DELETE FROM users WHERE username=? AND (
+                   role<>'superuser'
+                   OR (SELECT COUNT(*) FROM users WHERE role='superuser')>1)""",
+            (username,),
+        )
+        deleted = cur.rowcount
+    if not deleted:
+        return _csrf_html(_admin_page(sess, "Can't delete the only superuser.", "err", csrf=tok), tok, 400)
     _drop_user_sessions(username)
     return _csrf_html(_admin_page(sess, f"Deleted '{username}'.", "ok", csrf=tok), tok)
 
@@ -1042,7 +1149,9 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
         "(<code>sysible_ctl &lt;app&gt; up</code>). This page shows the running values and "
-        "documents every parameter &mdash; passwords and the shared secret are never displayed. "
+        "documents every parameter &mdash; stored passwords and the shared secret are never "
+        "displayed (only whether each is set; a one-time temp password from a reset is shown "
+        "once, on the reset screen). "
         "Manage users and password resets under <a href='/admin'>Accounts</a>.</p>"
         f"<fieldset><legend>Identity &amp; passwords</legend>{identity}</fieldset>"
         f"<fieldset><legend>Login throttle &amp; sessions</legend>{logins}</fieldset>"

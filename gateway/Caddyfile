@@ -116,6 +116,14 @@
 	}
 }
 
+# ---- plain HTTP: bounce to HTTPS -------------------------------------------
+# The real site below is host-less :443 (raw-IP), and Caddy only auto-creates an
+# HTTP->HTTPS redirect per NAMED host — so without this a plain http://<ip>/ hit
+# would have no handler. Redirect every :80 request to the same URL on https.
+:80 {
+	redir https://{host}{uri} permanent
+}
+
 # ---- cert holder: mint ONE self-signed cert, no domain needed ---------------
 # This tiny site exists only so Caddy's internal CA issues a self-signed cert under
 # a fixed internal name. It is never browsed to; default_sni (above) serves this
@@ -135,6 +143,29 @@ sysible.slop {
 :443 {
 	encode gzip
 
+	# Security headers on EVERY response from this origin. The single-origin SLOP
+	# model collapses isolation between the portal, the three apps, and the admin
+	# IdP, so these platform-wide defenses matter more here than usual:
+	#   - frame-ancestors 'none' + X-Frame-Options: nothing may frame any SLOP page,
+	#     so the destructive IdP admin forms can't be clickjacked. The apps open in
+	#     new tabs (never iframes), so this breaks nothing.
+	#   - nosniff: no MIME-sniffing an upload/response into executable script.
+	#   - Referrer-Policy: never leak the path (which app / which account) off-site.
+	#   - HSTS: inert for the raw-IP / self-signed default (browsers ignore HSTS for
+	#     IP hosts and untrusted certs) but protects real-name / real-cert installs.
+	# A restrictive default-src is deliberately NOT forced here — the three fronted
+	# apps are SPAs with their own resource needs; each ships its own CSP, and the
+	# IdP adds a strict one to its own pages. Multiple CSP headers intersect, so the
+	# frame-ancestors below is enforced regardless of an app's own policy.
+	header {
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
 	# The IdP UI + API. These are PUBLIC at the gateway (the IdP itself enforces
 	# session/role on /account and /admin, and /login must be reachable when
 	# signed out). No forward_auth here, or you couldn't reach the login page.
@@ -147,10 +178,19 @@ sysible.slop {
 	handle /logout {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
-	handle /account* {
+	# Exact path + own subtree only — a loose /account* suffix would also match an
+	# unrelated /accountsomething. The IdP serves /account, /account/password,
+	# /admin, and /admin/... (users, settings), all covered by these two pairs.
+	handle /account {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
-	handle /admin* {
+	handle /account/* {
+		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
+	}
+	handle /admin {
+		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
+	}
+	handle /admin/* {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
 

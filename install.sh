@@ -234,6 +234,14 @@ _secret_from_env() {
 SSO_SECRET="${SYSIBLE_SSO_SHARED_SECRET:-$(_secret_from_env || true)}"
 if [ -z "$SSO_SECRET" ]; then
   SSO_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # /bin/sh has no `pipefail`, so a partial failure in the /dev/urandom fallback
+  # pipe (head|od|tr) is masked and could yield a short/empty secret. This secret
+  # is the WHOLE app-trust boundary, so refuse to proceed unless it's the full
+  # 64 hex chars we asked for — a weak or truncated secret must never be shipped.
+  case "$SSO_SECRET" in
+    *[!0-9a-f]* | "") die "failed to generate a valid SSO shared secret (need 64 hex chars)." ;;
+  esac
+  [ "${#SSO_SECRET}" -eq 64 ] || die "generated SSO shared secret is not 64 hex chars (got ${#SSO_SECRET})."
   _upsert_env SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
   say "Generated a unified-SSO shared secret into $ENV_FILE"
 fi
@@ -284,10 +292,14 @@ if [ "$WANT_APPS" -eq 1 ]; then
         _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
       fi
     fi
-    # Pass the app dir, turn its SSO trust flag on, hand it the shared secret, and
-    # build its front end under the gateway path prefix (/controller/ etc.) so its
-    # assets + API calls resolve on the one shared origin (see gateway/Caddyfile).
-    if env "$var=$_dir" "$trust=1" SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET" \
+    # Pass the app dir, turn its SSO trust flag on, and build its front end under
+    # the gateway path prefix (/controller/ etc.) so its assets + API calls resolve
+    # on the one shared origin (see gateway/Caddyfile). The shared secret is NOT
+    # passed on this argv — it would sit in /proc/<pid>/cmdline, readable by any
+    # local user for the command's lifetime. It reaches the child two safer ways:
+    # it's export'ed into this shell's environment (above) and persisted to the
+    # app's 0600 .env (above), which docker compose auto-loads.
+    if env "$var=$_dir" "$trust=1" \
            SYSIBLE_BASE_PATH="/$p/" sysible_ctl "$p" up; then
       say "  $p is up."
     else

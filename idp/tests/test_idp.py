@@ -85,8 +85,19 @@ def test_auth_me(cl):
 
 def test_logout_invalidates_session(cl):
     _login(cl, "admin", ADMIN_PW)
-    assert cl.post("/logout", headers=HDR, follow_redirects=False).status_code == 302
+    tok = _tok(cl)
+    assert cl.post("/logout", data={"csrf": tok}, headers=HDR,
+                   follow_redirects=False).status_code == 302
     assert cl.get("/auth/verify").status_code == 401
+
+
+def test_logout_without_csrf_keeps_session(cl):
+    # Logout is a state-changing POST; without a valid double-submit token (or a
+    # same-origin Origin/Referer) it must NOT drop the session — forced-logout CSRF.
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.post("/logout", follow_redirects=False)  # no csrf, no origin
+    assert r.status_code == 302
+    assert cl.get("/auth/verify").status_code == 204  # still signed in
 
 
 def test_admin_create_reset_and_forced_change(client):
@@ -345,3 +356,53 @@ def test_config_page_forbidden_for_non_superuser(client):
                "csrf": _tok(d)}, headers=HDR, follow_redirects=False)
         # auditor is signed in but not superuser → 403 on the config console
         assert d.get("/admin/settings").status_code == 403
+
+
+# ---- regression tests for the security-audit fixes -------------------------
+def test_safe_next_rejects_open_redirect_vectors():
+    import app as m
+    # Site-relative targets are preserved…
+    assert m._safe_next("/controller/") == "/controller/"
+    assert m._safe_next("/account?first=1") == "/account?first=1"
+    # …every off-origin vector collapses to "/", including the backslash bypass
+    # that urlsplit() alone would let through.
+    for bad in ("//evil.com", "/\\evil.com", "/\\/evil.com", "\\\\evil.com",
+                "http://evil.com", "https:evil.com", "javascript:alert(1)",
+                "  //evil.com", None, ""):
+        assert m._safe_next(bad) == "/", bad
+
+
+def test_admin_add_rejects_bad_username(cl):
+    _login(cl, "admin", ADMIN_PW)
+    for bad in ("has space", "quote'd", "<script>", "a" * 65, "semi;colon"):
+        r = cl.post("/admin/users",
+                    data={"username": bad, "role": "operator", "password": "temppass12345",
+                          "csrf": _tok(cl)}, headers=HDR)
+        assert r.status_code == 400, bad
+    # a clean name still works
+    r = cl.post("/admin/users",
+                data={"username": "ok.user-1", "role": "operator", "password": "temppass12345",
+                      "csrf": _tok(cl)}, headers=HDR)
+    assert r.status_code == 200 and "Created" in r.text
+
+
+def test_security_headers_present(cl):
+    r = cl.get("/login", follow_redirects=False)
+    assert r.headers.get("X-Frame-Options") == "DENY"
+    assert r.headers.get("X-Content-Type-Options") == "nosniff"
+    assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+    assert r.headers.get("Cache-Control") == "no-store"
+
+
+def test_second_superuser_can_be_demoted(cl):
+    # The last-superuser guard must NOT block demotion when another superuser
+    # remains (regression for the atomic-guarded UPDATE).
+    _login(cl, "admin", ADMIN_PW)
+    cl.post("/admin/users", data={"username": "super2", "role": "superuser",
+            "password": "super2pass123", "csrf": _tok(cl)}, headers=HDR)
+    r = cl.post("/admin/users/super2/role", data={"role": "operator", "csrf": _tok(cl)},
+                headers=HDR)
+    assert r.status_code == 200 and "role to operator" in r.text
+    # now super2 is demoted, admin is the only superuser again → guard re-engages
+    assert cl.post("/admin/users/admin/role", data={"role": "operator", "csrf": _tok(cl)},
+                   headers=HDR).status_code == 400
