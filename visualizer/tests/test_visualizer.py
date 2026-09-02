@@ -194,4 +194,97 @@ def test_refusal_never_echoes_the_secret(client):
 
 def test_signed_in_browser_gets_the_console(client):
     r = client.get("/", headers={**BROWSER, **hdr()})
-    assert r.status_code == 200 and "activity &amp; logs" in r.text
+    assert r.status_code == 200 and "Sysible <b>Visualizer</b>" in r.text
+
+
+# ---- fleet topology --------------------------------------------------------
+# The map is assembled from five Controller endpoints. What matters at this level
+# is that the caller's OWN identity goes to every one of them (so an auditor gets
+# an auditor's fleet), that the expensive posture sweep is opt-in, and that a dead
+# endpoint degrades the map instead of erroring the whole view.
+def _fleet_upstreams(seen=None):
+    def fake_get(url, identity, params=None, want_json=True):
+        if seen is not None:
+            seen.setdefault("urls", []).append(url)
+            seen["headers"] = __import__("backend.sources", fromlist=["x"])._headers(identity)
+        if url.endswith("/api/hosts"):
+            return {"hosts": [
+                {"id": "h1", "label": "kvm-1", "environment": "Labs", "type_text": "Agent"},
+                {"id": "h2", "label": "vm-a", "environment": "Dev", "type_text": "Agent"},
+            ]}, None
+        if url.endswith("/api/fleet-health"):
+            return {"hosts": [{"id": "h1", "online": True, "verdict": "OK",
+                               "hyp": "kvm", "vms": 1, "vm_names": ["vm-a"]},
+                              {"id": "h2", "online": True, "verdict": "OK"}]}, None
+        if url.endswith("/api/agents"):
+            return {"agents": [{"host_id": "h1", "hostname": "kvm-1", "ip": "10.0.0.9"}]}, None
+        if url.endswith("/api/suppressions"):
+            return {"suppressions": []}, None
+        if url.endswith("/api/fleet-posture"):
+            return {"hosts": [{"id": "h2", "flags": {"eol_os": True}, "posture": {}}]}, None
+        return None, "unexpected"
+    return fake_get
+
+
+def test_topology_merges_the_fleet_and_forwards_identity(mod, monkeypatch):
+    app_mod, sources = mod
+    seen = {}
+    monkeypatch.setattr(sources, "_get", _fleet_upstreams(seen))
+    c = TestClient(app_mod.app)
+    d = c.get("/api/topology", headers=hdr(user="alice", role="auditor")).json()
+
+    assert [n["label"] for n in d["nodes"]] == ["kvm-1", "vm-a"]
+    assert d["parents"] == {"vm-a": "kvm-1"}          # guest nests across environments
+    assert d["counts"]["online"] == 2
+    # Every upstream is queried as the real caller, never as the service itself.
+    assert seen["headers"]["X-Sysible-User"] == "alice"
+    assert seen["headers"]["X-Sysible-Role"] == "auditor"
+    # …and the expensive sweep is NOT one of them by default.
+    assert not any(u.endswith("/api/fleet-posture") for u in seen["urls"])
+    assert d["posture"] is False
+
+
+def test_topology_posture_is_opt_in(mod, monkeypatch):
+    app_mod, sources = mod
+    seen = {}
+    monkeypatch.setattr(sources, "_get", _fleet_upstreams(seen))
+    c = TestClient(app_mod.app)
+    d = c.get("/api/topology", params={"posture": 1}, headers=hdr()).json()
+    assert any(u.endswith("/api/fleet-posture") for u in seen["urls"])
+    assert d["posture"] is True
+    # The posture flag is what raises the critical ring on vm-a.
+    assert [n["hasCrit"] for n in d["nodes"]] == [False, True]
+
+
+def test_topology_survives_a_dead_overlay(mod, monkeypatch):
+    app_mod, sources = mod
+
+    def fake_get(url, identity, params=None, want_json=True):
+        if url.endswith("/api/hosts"):
+            return {"hosts": [{"id": "h1", "label": "web-1", "environment": "Prod"}]}, None
+        return None, "unreachable (ConnectError)"
+
+    monkeypatch.setattr(sources, "_get", fake_get)
+    c = TestClient(app_mod.app)
+    d = c.get("/api/topology", headers=hdr()).json()
+    # The map still has its node; the failures are reported as notes, not errors,
+    # because losing colour is not losing the map.
+    assert [n["label"] for n in d["nodes"]] == ["web-1"]
+    assert d["errors"] == []
+    assert len(d["notes"]) >= 3
+
+
+def test_topology_reports_a_dead_inventory_as_an_error(mod, monkeypatch):
+    app_mod, sources = mod
+    monkeypatch.setattr(sources, "_get",
+                        lambda *a, **k: (None, "unreachable (ConnectError)"))
+    c = TestClient(app_mod.app)
+    d = c.get("/api/topology", headers=hdr()).json()
+    # No host inventory means no map at all — that one IS an error.
+    assert d["nodes"] == []
+    assert any("/api/hosts" in e for e in d["errors"])
+
+
+def test_topology_requires_a_signed_in_caller(mod):
+    app_mod, _ = mod
+    assert TestClient(app_mod.app).get("/api/topology").status_code == 401

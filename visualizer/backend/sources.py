@@ -27,6 +27,8 @@ import os
 
 import httpx
 
+from . import fleet
+
 # Where each app listens. Defaults mirror the gateway's SLOP_*_UPSTREAM values in
 # docker-compose.yml, so a stock stack needs no extra configuration.
 _CONTROLLER = os.getenv("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800")
@@ -206,3 +208,47 @@ def fetch_log(app: str, identity, ref: str) -> tuple[str | None, str | None]:
         return _get(_url(_CONTROLLER, "https") + "/api/controller-log", identity,
                     {"lines": 500}, want_json=False)
     return None, "this app exposes no log endpoint"
+
+
+# --------------------------------------------------------------------------- #
+# Fleet topology — the Controller's Network Topology view, served from here.
+# --------------------------------------------------------------------------- #
+# The map correlates FIVE Controller readings. Four are cheap; fleet-posture is a
+# whole-fleet sweep that can take many seconds on a cold cache, so it is opt-in
+# per request: the console loads the map without it and fires a second request to
+# fill in the critical rings and gateway labels. Blocking the map on the slow one
+# was exactly what made the original view feel broken on a large fleet.
+def topology(identity, with_posture: bool = False) -> dict:
+    """The merged fleet map for ONE caller, fetched with that caller's identity.
+
+    Same trust rule as every other source: the upstream applies its own RBAC to
+    the real human behind the request, so an auditor sees an auditor's fleet. A
+    reading we can't get degrades the map (and is reported) rather than blanking
+    it — a half-drawn map beats an empty one when one endpoint is slow."""
+    base = _url(_CONTROLLER, "https")
+    errors, notes = [], []
+
+    def read(path, key, params=None, fatal=True):
+        data, err = _get(f"{base}{path}", identity, params or {})
+        if err:
+            (errors if fatal else notes).append(f"{path}: {err}")
+            return []
+        return (data or {}).get(key) or []
+
+    hosts = read("/api/hosts", "hosts")
+    # Health/agents/suppressions are overlays: without them the map still has its
+    # shape, just fewer colours, so their failure is a note rather than an error.
+    health = read("/api/fleet-health", "hosts", fatal=False)
+    agents = read("/api/agents", "agents", fatal=False)
+    supps = read("/api/suppressions", "suppressions", fatal=False)
+    posture = read("/api/fleet-posture", "hosts", fatal=False) if with_posture else []
+
+    nodes = fleet.build(hosts, health, agents, supps, posture)
+    return {
+        "nodes": nodes,
+        "parents": fleet.parents(nodes),
+        "counts": fleet.counts(nodes),
+        "posture": bool(with_posture),
+        "errors": errors,
+        "notes": notes,
+    }

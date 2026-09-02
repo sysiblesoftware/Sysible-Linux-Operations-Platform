@@ -152,6 +152,15 @@ def api_activity(request: Request, app: str = Query(...),
         raise HTTPException(status_code=404, detail="Unknown app.")
 
 
+@app.get("/api/topology")
+def api_topology(request: Request, posture: int = Query(0, ge=0, le=1)) -> dict:
+    """The fleet map. ?posture=1 adds the expensive whole-fleet posture sweep
+    (critical rings + gateway labels); the console requests the map without it
+    first so the graph paints immediately, then overlays."""
+    who = _require_identity(request)
+    return sources.topology(who, with_posture=bool(posture))
+
+
 @app.get("/api/log", response_class=PlainTextResponse)
 def api_log(request: Request, app: str = Query(...), ref: str = Query("")):
     who = _require_identity(request)
