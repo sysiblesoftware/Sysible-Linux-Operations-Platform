@@ -15,6 +15,20 @@
     card.rel = "noopener";
   });
 
+  // Sign out: the IdP verifies the double-submit CSRF token when one is supplied.
+  // This page is STATIC (served by Caddy), so there is no server-rendered token to
+  // embed in the form — read it from the JS-readable 'sysible_csrf' cookie (which is
+  // non-HttpOnly for exactly this purpose) and post it as a hidden field.
+  (function wireLogout() {
+    var form = document.querySelector("form.logout");
+    if (!form) return;
+    var m = document.cookie.match(/(?:^|;\s*)sysible_csrf=([^;]*)/);
+    if (!m) return;                       // no token → the IdP's origin check still gates it
+    var f = document.createElement("input");
+    f.type = "hidden"; f.name = "csrf"; f.value = decodeURIComponent(m[1]);
+    form.appendChild(f);
+  })();
+
   // Health: the gateway proxies /healthz/<app> to each app's own health endpoint,
   // so this stays same-origin (no CORS) and works even if the app subdomains
   // aren't reachable from the browser directly.

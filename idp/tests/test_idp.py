@@ -91,13 +91,27 @@ def test_logout_invalidates_session(cl):
     assert cl.get("/auth/verify").status_code == 401
 
 
-def test_logout_without_csrf_keeps_session(cl):
-    # Logout is a state-changing POST; without a valid double-submit token (or a
-    # same-origin Origin/Referer) it must NOT drop the session — forced-logout CSRF.
+def test_logout_requires_same_origin_but_not_a_token(cl):
+    # SameSite=Lax means a cross-site POST carries no session cookie, so the
+    # same-origin check is the real gate. A cross-site / origin-less POST must NOT
+    # drop the session...
     _login(cl, "admin", ADMIN_PW)
-    r = cl.post("/logout", follow_redirects=False)  # no csrf, no origin
+    r = cl.post("/logout", follow_redirects=False)          # no origin, no csrf
     assert r.status_code == 302
-    assert cl.get("/auth/verify").status_code == 204  # still signed in
+    assert cl.get("/auth/verify").status_code == 204          # still signed in
+
+    # ...and a WRONG token is rejected even from the right origin.
+    r = cl.post("/logout", data={"csrf": "not-the-real-token"}, headers=HDR,
+                follow_redirects=False)
+    assert r.status_code == 302
+    assert cl.get("/auth/verify").status_code == 204          # still signed in
+
+    # ...but a same-origin click with NO token still signs out. The portal's Sign
+    # out button is static HTML with no server-rendered token; requiring one wedged
+    # sign-out entirely (regression).
+    r = cl.post("/logout", headers=HDR, follow_redirects=False)
+    assert r.status_code == 302
+    assert cl.get("/auth/verify").status_code == 401
 
 
 def test_admin_create_reset_and_forced_change(client):

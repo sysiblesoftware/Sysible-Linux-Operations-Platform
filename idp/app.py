@@ -737,12 +737,18 @@ def login_post(
 
 @app.post("/logout")
 def logout_post(request: Request, csrf: str = Form("")):
-    # Same origin + CSRF guard as every other state-changing POST. SameSite=Lax
-    # already blunts pure cross-site logout POSTs, but the account page renders a
-    # hidden CSRF field in its sign-out form, so there's no reason to leave this
-    # one route un-guarded (defense-in-depth against forced logout). On a bad/
-    # missing token we simply don't drop the session and bounce to the portal.
-    if not _origin_ok(request) or not _csrf_ok(request, csrf):
+    # SAME-ORIGIN is the gate here, not the token. With SameSite=Lax the session
+    # cookie is not sent on a cross-site POST at all, so a forged logout can't even
+    # name a session to kill — the origin check alone closes forced-logout CSRF.
+    # The double-submit token is still verified WHEN SUPPLIED (the account page and
+    # the portal both send it), but a missing token must not wedge sign-out:
+    # requiring it silently broke the portal's "Sign out" button, which is static
+    # HTML served by Caddy with no server-rendered token to embed. Fail-closed on
+    # the origin, fail-open on an absent token — logout must always work for a
+    # legitimate same-origin click.
+    if not _origin_ok(request):
+        return RedirectResponse("/", status_code=302)
+    if csrf and not _csrf_ok(request, csrf):
         return RedirectResponse("/", status_code=302)
     _drop_session(request.cookies.get(COOKIE))
     resp = RedirectResponse("/login", status_code=302)
