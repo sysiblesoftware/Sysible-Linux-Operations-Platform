@@ -1,0 +1,5 @@
+# Sysible Flashback — the standalone SLOP module runtime. Deliberately tiny:
+# everything else (sqlite3, hashlib, difflib, base64, hmac) is Python stdlib, so
+# the service stays easy to audit.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0

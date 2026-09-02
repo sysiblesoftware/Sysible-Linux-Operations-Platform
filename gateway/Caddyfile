@@ -259,11 +259,13 @@ sysible.slop {
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
-	# Flashback serves plain HTTP inside the private network (TLS is the gateway's
-	# job), so this hop is http:// — no upstream cert to skip-verify.
+	# Flashback is a SLOP-native service on this compose's internal network (built
+	# from ./flashback), reached by service name. It serves plain HTTP inside the
+	# private network (TLS is the gateway's job), so this hop is http:// — no
+	# upstream cert to skip-verify, and the port is never host-published.
 	handle /healthz/flashback {
 		rewrite * /api/health
-		reverse_proxy http://{$SLOP_FLASHBACK_UPSTREAM:host.docker.internal:8720} {
+		reverse_proxy http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080} {
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
@@ -272,8 +274,9 @@ sysible.slop {
 	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
 	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
 	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
-	# Flashback (the config time machine) — plain HTTP upstream (see /healthz/flashback).
-	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:host.docker.internal:8720}
+	# Flashback (the config time machine) — SLOP-native service, plain HTTP upstream
+	# on the internal network (see /healthz/flashback).
+	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}
 
 	# The portal itself (root) — require sign-in, then serve the static launcher.
 	handle {

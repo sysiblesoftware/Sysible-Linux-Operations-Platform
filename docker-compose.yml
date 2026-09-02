@@ -43,6 +43,7 @@ services:
     restart: unless-stopped
     depends_on:
       - idp
+      - flashback
     ports:
       - "80:80"     # HTTP → redirected to HTTPS by Caddy
       - "443:443"   # the single front door
@@ -61,8 +62,9 @@ services:
       SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
       SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}
       SLOP_CONNECT_UPSTREAM: ${SLOP_CONNECT_UPSTREAM:-host.docker.internal:8700}
-      # Flashback (the config time machine) runs as its own stack on this host port.
-      SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-host.docker.internal:8720}
+      # Flashback (the config time machine) is baked into THIS stack (below), so the
+      # gateway reaches it by service name on the internal network — no host port.
+      SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-flashback:8080}
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./portal:/srv/portal:ro
@@ -72,7 +74,32 @@ services:
       # Lets the container reach apps published on the host (Linux needs this).
       - "host.docker.internal:host-gateway"
 
+  # Flashback — the config time machine — is a SLOP-native module (like the IdP), so
+  # it's built and run here as part of the front door rather than as a separate
+  # stack. It's expose-only (no host port): the gateway proxies to it at
+  # flashback:8080 on this compose's internal network, and it trusts the gateway's
+  # asserted identity via the same shared secret.
+  flashback:
+    build: ./flashback
+    image: sysible-flashback
+    container_name: sysible-flashback
+    restart: unless-stopped
+    environment:
+      # Always behind the gateway here, so trust its asserted identity (guarded by
+      # the shared secret) and never expose an own login.
+      SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # Bearer token host agents present to the ingest/restore endpoints. Empty =
+      # open (dev only); set it and hand the same value to the agents.
+      SYSIBLE_FLASHBACK_AGENT_TOKEN: ${SYSIBLE_FLASHBACK_AGENT_TOKEN:-}
+      SYSIBLE_FLASHBACK_KEEP: ${SYSIBLE_FLASHBACK_KEEP:-50}
+    volumes:
+      - flashback-data:/data       # the version store (SQLite) — persist across restarts
+    expose:
+      - "8080"                     # internal only; the gateway is the sole front door
+
 volumes:
   slop-idp-data:
   slop-caddy-data:
   slop-caddy-config:
+  flashback-data:
