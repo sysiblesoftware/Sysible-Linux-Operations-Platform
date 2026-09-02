@@ -46,9 +46,8 @@
       var who = document.getElementById("who");
       if (who) who.textContent = me.user + (me.role ? " · " + me.role : "");
       if (me.role === "superuser") {
-        var a = document.getElementById("adminlink");
-        if (a) a.hidden = false;
-        // The Administration tile (accounts + all SLOP configuration) is superuser-only.
+        // The Administration tile (accounts + all SLOP configuration) is the superuser
+        // entry point to /admin — superuser-only, revealed here.
         var adminCard = document.getElementById("card-admin");
         if (adminCard) adminCard.hidden = false;
       }
