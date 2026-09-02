@@ -2,3 +2,7 @@
 *.log
 .DS_Store
 caddy_data/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
