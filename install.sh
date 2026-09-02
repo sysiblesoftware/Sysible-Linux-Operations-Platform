@@ -1,20 +1,20 @@
 #!/bin/sh
 # install.sh — stand up the whole CE SLOP stack from THIS repo, in one command.
 #
-# SLOP is the single front door for the three Sysible apps. This installer brings
-# up all of them so a standalone `git clone` of this repo is all you need:
+# SLOP is the single front door for the Sysible apps. This installer brings up all
+# of them so a standalone `git clone` of this repo is all you need:
 #
-#   1. Controller, SLEP and Connect are cloned to /opt/sysible-src/<repo> and
-#      brought up as containers via the suite's unified `sysible_ctl` CLI (which
+#   1. Controller, SLEP, Connect and Flashback are cloned to /opt/sysible-src/<repo>
+#      and brought up as containers via the suite's unified `sysible_ctl` CLI (which
 #      this script installs, from the Controller checkout, so you can manage
 #      everything afterward: sysible_ctl status | update all | logs …).
 #   2. The SLOP gateway (Caddy + portal) is brought up FROM THIS CHECKOUT, in
-#      front of the three apps.
+#      front of the apps.
 #
 # Usage (run from the repo root):
 #   sudo ./install.sh              # apps + gateway (the whole stack)
 #   sudo ./install.sh gateway      # ONLY the gateway (apps already running)
-#   sudo ./install.sh apps         # ONLY the three apps (no gateway)
+#   sudo ./install.sh apps         # ONLY the apps (no gateway)
 #
 # Requirements: git and Docker Engine + the compose plugin — this installer sets
 # up both automatically if they're missing (Docker via its official script, with
@@ -25,6 +25,7 @@ set -eu
 CTL_REPO="https://github.com/sysiblesoftware/sysible-controller"
 SLEP_REPO="https://github.com/sysiblesoftware/sysible-linux-engineering-platform"
 CONNECT_REPO="https://github.com/sysiblesoftware/sysible-connect"
+FLASHBACK_REPO="https://github.com/sysiblesoftware/sysible-d3lorean"
 SRC_DIR="${SYSIBLE_SRC_DIR:-/opt/sysible-src}"
 
 # This SLOP checkout (resolve through a symlinked invocation too).
@@ -261,7 +262,8 @@ if [ "$WANT_APPS" -eq 1 ]; then
   # the gateway-asserted identity (guarded by the shared secret above).
   for entry in "controller|$CTL_REPO|SYSIBLE_CONTROLLER_DIR|SYSIBLE_WEBGUI_TRUST_SSO" \
                "slep|$SLEP_REPO|SYSIBLE_SLEP_DIR|SLEP_TRUST_GATEWAY_AUTH" \
-               "connect|$CONNECT_REPO|SYSIBLE_CONNECT_DIR|SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH"; do
+               "connect|$CONNECT_REPO|SYSIBLE_CONNECT_DIR|SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH" \
+               "flashback|$FLASHBACK_REPO|SYSIBLE_FLASHBACK_DIR|SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH"; do
     p="${entry%%|*}"; r1="${entry#*|}"; repo="${r1%%|*}"; r2="${r1#*|}"
     var="${r2%%|*}"; trust="${r2#*|}"
     say
