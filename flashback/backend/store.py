@@ -293,6 +293,18 @@ def ack_restore(host_id: str, restore_id: int, ok: bool = True) -> bool:
     return bool(changed)
 
 
+def list_audit(limit: int = 100, since_id: int = 0) -> list[dict]:
+    """Read the audit trail newest-first. Same {id, ts, actor, action, detail}
+    contract the other Sysible apps expose, so one aggregator client shape works
+    across all of them."""
+    limit = max(1, min(int(limit), 500))
+    with _LOCK, _db() as c:
+        rows = c.execute(
+            "SELECT id, ts, actor, action, detail FROM audit WHERE id > ? "
+            "ORDER BY id DESC LIMIT ?", (int(since_id), limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
 def recent_restores(host_id: str, limit: int = 50) -> list[dict]:
     with _LOCK, _db() as c:
         rows = c.execute(

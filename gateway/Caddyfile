@@ -270,6 +270,13 @@ sysible.slop {
 		}
 	}
 
+	handle /healthz/visualizer {
+		rewrite * /api/health
+		reverse_proxy http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080} {
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
+		}
+	}
+
 	# The three apps, each SSO-gated and prefix-stripped (see the appsite snippet).
 	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
 	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
@@ -277,6 +284,8 @@ sysible.slop {
 	# Flashback (the config time machine) — SLOP-native service, plain HTTP upstream
 	# on the internal network (see /healthz/flashback).
 	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}
+	# Visualizer (activity & logs across every app) — SLOP-native, plain HTTP.
+	import appsite_http /visualizer http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080}
 
 	# The portal itself (root) — require sign-in, then serve the static launcher.
 	handle {

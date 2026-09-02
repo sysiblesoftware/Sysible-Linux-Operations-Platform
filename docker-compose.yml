@@ -44,6 +44,7 @@ services:
     depends_on:
       - idp
       - flashback
+      - visualizer
     ports:
       - "80:80"     # HTTP → redirected to HTTPS by Caddy
       - "443:443"   # the single front door
@@ -65,6 +66,8 @@ services:
       # Flashback (the config time machine) is baked into THIS stack (below), so the
       # gateway reaches it by service name on the internal network — no host port.
       SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-flashback:8080}
+      # Visualizer (the activity & log console) is baked into THIS stack too.
+      SLOP_VISUALIZER_UPSTREAM: ${SLOP_VISUALIZER_UPSTREAM:-visualizer:8080}
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./portal:/srv/portal:ro
@@ -97,6 +100,31 @@ services:
       - flashback-data:/data       # the version store (SQLite) — persist across restarts
     expose:
       - "8080"                     # internal only; the gateway is the sole front door
+
+  # Visualizer — the platform-wide activity & log console. Like the IdP and
+  # Flashback it is a SLOP-native service in this stack: expose-only (no host
+  # port), reached by the gateway at visualizer:8080. It is STATELESS and
+  # READ-ONLY — no volume — because it stores nothing: every record it shows is
+  # fetched live from the app that owns it, using the caller's own forwarded
+  # identity so each app applies its own role rules.
+  visualizer:
+    build: ./visualizer
+    image: sysible-visualizer
+    container_name: sysible-visualizer
+    restart: unless-stopped
+    environment:
+      SYSIBLE_VISUALIZER_TRUST_GATEWAY_AUTH: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # Where to read each app's activity/audit API. Same values the gateway uses.
+      SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
+      SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}
+      SLOP_CONNECT_UPSTREAM: ${SLOP_CONNECT_UPSTREAM:-host.docker.internal:8700}
+      SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-flashback:8080}
+    expose:
+      - "8080"                     # internal only; the gateway is the sole front door
+    extra_hosts:
+      # Reach the three apps published on the host (Linux needs this).
+      - "host.docker.internal:host-gateway"
 
 volumes:
   slop-idp-data:

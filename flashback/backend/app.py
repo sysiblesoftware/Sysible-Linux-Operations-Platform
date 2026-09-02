@@ -206,6 +206,15 @@ def api_restore(request: Request, host_id: str, body: dict = Body(...)) -> dict:
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/api/audit")
+def api_audit(request: Request, limit: int = Query(100, ge=1, le=500),
+              since_id: int = Query(0, ge=0)) -> dict:
+    """The audit trail (who restored/queued what). Readable by any signed-in
+    identity incl. auditor — it is oversight data. Consumed by Sysible Visualizer."""
+    _require_identity(request)
+    return {"entries": store.list_audit(limit, since_id)}
+
+
 @app.get("/api/hosts/{host_id}/restores")
 def api_restore_activity(request: Request, host_id: str) -> list:
     _require_identity(request)

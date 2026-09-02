@@ -1,0 +1,5 @@
+# Sysible Visualizer — the SLOP activity & log console. httpx is the only addition
+# over the other modules: it fetches each app's own activity/audit API.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
