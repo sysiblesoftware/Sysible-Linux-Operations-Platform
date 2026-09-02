@@ -152,10 +152,10 @@ def _slep(identity, limit: int) -> dict:
 def _connect(identity, limit: int) -> dict:
     data, err = _get(_url(_CONNECT, "https") + "/api/audit", identity, {"limit": limit})
     if err:
-        # Connect grew its audit trail later than the others; say so plainly rather
-        # than showing an empty panel that reads as "nothing ever happened".
-        return {"events": [], "errors": [],
-                "notes": [f"audit: {err}"]}
+        # Connect gained its audit trail later than the others, so an older Connect
+        # has no /api/audit. Say so plainly rather than showing an empty panel that
+        # reads as "nothing ever happened".
+        return {"events": [], "errors": [], "notes": [f"audit: {err}"]}
     events = [_ev(e.get("ts"), e.get("actor"), e.get("action"),
                   e.get("target"), e.get("detail"), e.get("id"))
               for e in (data or {}).get("entries", [])]
