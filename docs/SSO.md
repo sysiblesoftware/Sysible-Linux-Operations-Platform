@@ -47,6 +47,44 @@ hitting an app directly can't know the secret, so it can't spoof the headers; if
 the secret is unset the apps **fail closed** (ignore the headers). `install.sh`
 generates one strong secret and wires it into the gateway and all three apps.
 
+## Gotcha: the deny path must be verified, not assumed
+
+The gateway enforces sign-in in Caddyfile syntax, which means a config mistake can
+turn the gate into a no-op that still adapts, still starts, and logs no warning.
+
+Inside a `handle_response` block, the first argument of `redir` is an **optional
+matcher**, so this silently does nothing:
+
+```
+handle_response @sso_bad {
+    redir /login?next={uri} 302        # WRONG: matcher=/login?..., destination="302"
+}
+```
+
+The 401 branch then matches no request, and forward_auth **falls through as though
+the user were signed in** — the portal is served to anyone, and every app is
+proxied with the shared secret attached but no identity, so the apps show their own
+login again or refuse with "Not signed in.". Always write the explicit `*`:
+
+```
+handle_response @sso_bad {
+    redir * /login?next={uri} 302
+}
+```
+
+`gateway/tests/` pins this: a lint that requires an explicit matcher on every
+directive inside `handle_response`, plus (when a `caddy` binary is present)
+assertions on the adapted JSON that each 401 branch has no matcher and really does
+redirect to `/login`. The one check worth doing by hand after any gateway change is
+the simplest one:
+
+```sh
+curl -skS -o /dev/null -w '%{http_code} %{redirect_url}
+' https://<server>/
+```
+
+with no session cookie. It must be `302 …/login?next=/`, never `200`.
+
 ## Per-app trust mode (all default OFF → standalone apps are unchanged)
 
 | App | Trust flag | Role mapping | Notes |

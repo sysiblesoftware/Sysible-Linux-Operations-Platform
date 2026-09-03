@@ -72,7 +72,13 @@
 				copy_headers X-Sysible-User X-Sysible-Role
 				@sso_bad status 401 403
 				handle_response @sso_bad {
-					redir /login?next={uri} 302
+					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's
+					# first argument is an optional MATCHER, so `redir /login?... 302`
+					# parses as matcher=/login?... and destination="302": the route
+					# then matches nothing, the 401 branch does nothing, and the request
+					# FALLS THROUGH as if auth had succeeded. That is an auth bypass, and
+					# it adapts and starts without a single warning. Never drop the `*`.
+					redir * /login?next={uri} 302
 				}
 			}
 
@@ -134,7 +140,13 @@
 				copy_headers X-Sysible-User X-Sysible-Role
 				@sso_bad status 401 403
 				handle_response @sso_bad {
-					redir /login?next={uri} 302
+					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's
+					# first argument is an optional MATCHER, so `redir /login?... 302`
+					# parses as matcher=/login?... and destination="302": the route
+					# then matches nothing, the 401 branch does nothing, and the request
+					# FALLS THROUGH as if auth had succeeded. That is an auth bypass, and
+					# it adapts and starts without a single warning. Never drop the `*`.
+					redir * /login?next={uri} 302
 				}
 			}
 			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
@@ -304,7 +316,13 @@ sysible.slop {
 				uri /auth/verify
 				@portal_bad status 401 403
 				handle_response @portal_bad {
-					redir /login?next={uri} 302
+					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's
+					# first argument is an optional MATCHER, so `redir /login?... 302`
+					# parses as matcher=/login?... and destination="302": the route
+					# then matches nothing, the 401 branch does nothing, and the request
+					# FALLS THROUGH as if auth had succeeded. That is an auth bypass, and
+					# it adapts and starts without a single warning. Never drop the `*`.
+					redir * /login?next={uri} 302
 				}
 			}
 			root * /srv/portal
