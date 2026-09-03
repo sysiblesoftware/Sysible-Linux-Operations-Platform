@@ -530,6 +530,7 @@ font-family:inherit;text-decoration:none}
 /* Hosted app administration. The frame is the app's REAL settings UI on the same
    origin — sized generously because it contains a full console, not a widget. */
 .prodtabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0 .5rem}
+.chip.prod{font-size:13px;padding:.3rem .8rem;font-weight:600}
 .subtabs{display:flex;gap:.35rem;flex-wrap:wrap;margin:.2rem 0 .7rem}
 .chip{display:inline-block;padding:.2rem .65rem;border:1px solid var(--line);
 border-radius:20px;font-size:12.5px;color:var(--muted);text-decoration:none}
@@ -1300,9 +1301,11 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
     if tabs and tab not in {t for t, _, _ in tabs}:
         tab = tabs[0][0]
 
+    # The IdP styles .chip, not .btn — a .btn here rendered as a bare blue link
+    # and the tab strip read as unfinished.
     prod = "".join(
-        f"<a class='btn{'' if k == app_key else ' ghost'}' "
-        f"href='/admin/apps?app={k}'>{escape(_APP_ADMIN[k][0])}</a> "
+        f"<a class='chip prod{' on' if k == app_key else ''}' "
+        f"href='/admin/apps?app={k}'>{escape(_APP_ADMIN[k][0])}</a>"
         for k in _APP_ADMIN)
 
     if tabs:
