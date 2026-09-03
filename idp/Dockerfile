@@ -8,7 +8,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+# EVERY top-level module, not just app.py. Copying one file by name meant that
+# adding updates.py shipped an image whose `import updates` raised ImportError:
+# uvicorn never started, the gateway's forward_auth had nothing to ask, and the
+# whole site answered 502. tests/test_image_ships_every_module.py pins this.
+COPY *.py ./
 
 ENV SLOP_DATA_DIR=/data PORT=8080
 RUN mkdir -p /data && chown slop:slop /data
