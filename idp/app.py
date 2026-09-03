@@ -45,6 +45,8 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+import updates
+
 # ---------------------------------------------------------------------------
 # Configuration (env-driven; every value has a working single-host default).
 # ---------------------------------------------------------------------------
@@ -503,6 +505,32 @@ th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:500;font-size:12px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4em}
 .pill{font-size:11.5px;color:var(--muted)}
+/* Toast stack — same shape and behaviour as the Controller console's, so the
+   two feel like one product. Fixed to the corner, auto-dismissed by JS. */
+.toast-stack{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;
+gap:8px;z-index:60;width:min(380px,90vw)}
+.toast{display:flex;gap:10px;align-items:flex-start;padding:.65rem .8rem;border-radius:10px;
+border:1px solid var(--line);background:var(--panel);box-shadow:0 8px 24px rgba(0,0,0,.35);
+font-size:13px;animation:toast-in .18s ease-out}
+@keyframes toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.toast.success{border-color:#4ec07a}.toast.error{border-color:#e5534b}
+.toast.warn{border-color:#e0a83a}
+.toast-title{font-weight:600;margin-bottom:2px;white-space:nowrap}
+.toast-msg{color:var(--muted);line-height:1.45;word-break:break-word}
+.toast-x{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;
+font-size:16px;line-height:1;padding:0 2px}
+.toast-x:hover{color:var(--text)}
+/* "Updates available" pill — shown only when something is actually behind. */
+.upd-pill{display:none;align-items:center;gap:6px;border:1px solid #e0a83a;color:#e0a83a;
+background:none;border-radius:20px;padding:.15rem .6rem;font-size:12px;cursor:pointer;
+font-family:inherit;text-decoration:none}
+.upd-pill.on{display:inline-flex}
+.upd-pill b{background:#e0a83a;color:#0d1117;border-radius:9px;padding:0 6px;font-size:11px}
+.upd-row td{vertical-align:middle}
+.upd-log{margin:.6rem 0 0;padding:.6rem .8rem;background:var(--field,#0d1320);
+border:1px solid var(--line);border-radius:8px;max-height:40vh;overflow:auto;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
+line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .back{display:inline-flex;align-items:center;gap:5px;margin-bottom:10px;padding:5px 11px;
   border:1px solid var(--line);border-radius:8px;font-size:13px;color:var(--muted)}
 .back:hover{color:var(--accent2);border-color:var(--accent2)}
@@ -529,6 +557,41 @@ _MARK = (
 )
 
 
+# Transient notifications, mirroring the Controller console's: a small stack in
+# the corner, auto-dismissed, dismissable by hand. Defined once here so every
+# admin page can call pushToast(msg, {title, kind}) without repeating it.
+# RAW string: this is JavaScript, and its escapes are JS escapes. In a normal
+# Python string "\n" becomes a real newline, which lands INSIDE a JS string
+# literal and makes the whole file a syntax error that only shows up in the
+# browser console.
+_TOAST_JS = r"""
+window.pushToast=function(msg,opts){
+  opts=opts||{};
+  var stack=document.getElementById('toasts'); if(!stack)return;
+  var el=document.createElement('div');
+  el.className='toast '+(opts.kind||'info');
+  var body=document.createElement('div');
+  if(opts.title){var t=document.createElement('div');t.className='toast-title';
+    t.textContent=opts.title;body.appendChild(t);}
+  var m=document.createElement('div');m.className='toast-msg';m.textContent=msg;
+  body.appendChild(m); el.appendChild(body);
+  var x=document.createElement('button');x.className='toast-x';x.type='button';
+  x.setAttribute('aria-label','Dismiss');x.textContent='\u00d7';
+  x.onclick=function(){el.remove();};
+  el.appendChild(x); stack.appendChild(el);
+  // Sticky on request: an update that failed should stay put until it is read.
+  if(opts.ttl!==0)setTimeout(function(){el.remove();},opts.ttl||9000);
+};
+"""
+
+
+# The "Updates available" pill. Hidden by default and revealed by the poll
+# below only when a product is genuinely behind, so a current platform shows
+# nothing — a permanently-lit badge is noise, not information.
+_PILL = "<a class=upd-pill id=updpill href='/admin/updates' title='A product has an update available'>&#11014; Updates available <b>0</b></a> "
+_PILL_POLL = "<script>fetch('/admin/updates/status',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d.apps)return;var n=d.apps.filter(function(a){return a.available;}).length;var p=document.getElementById('updpill');if(p&&n>0){p.classList.add('on');p.querySelector('b').textContent=n;}}).catch(function(){});</script>"
+
+
 def _page(title: str, body: str, wide: bool = False) -> str:
     # The pre-paint script picks up the theme the operator chose on the portal
     # (shared 'slop-theme' key), falling back to the OS preference, so the login
@@ -548,6 +611,10 @@ def _page(title: str, body: str, wide: bool = False) -> str:
         f"{body}"
         f"<div class=foot>Sysible Linux Operations Platform · Community Edition</div>"
         f"</div>"
+        # Toast stack: one per page, outside the card so it can sit in the corner.
+        # Pages that have nothing to say simply never call pushToast.
+        f"<div class=toast-stack id=toasts></div>"
+        f"<script>{_TOAST_JS}</script>"
         f"<script>(function(){{var b=document.getElementById('theme'),r=document.documentElement;"
         f"function s(){{b.textContent=r.getAttribute('data-theme')==='light'?'\\u263e':'\\u2600'}}s();"
         f"b.addEventListener('click',function(){{var n=r.getAttribute('data-theme')==='light'?'dark':'light';"
@@ -875,7 +942,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub><a href='/admin/settings'>Configuration</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
         f"{_msg(msg, kind)}"
         "<table><tr><th>User</th><th>Role</th><th>Password</th><th></th></tr>"
@@ -890,7 +957,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
         "<input type=password name=password required>"
         "<button type=submit>Create user</button></form></fieldset>"
     )
-    return _page("Accounts · SLOP", body, wide=True)
+    return _page("Accounts · SLOP", body + _PILL_POLL, wide=True)
 
 
 def _require_super(request: Request):
@@ -1155,7 +1222,7 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Configuration</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        "<p class=sub><a href='/admin'>Accounts</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal &rarr;</a></p>"
         "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
@@ -1183,7 +1250,220 @@ def _config_page(sess: sqlite3.Row) -> str:
         f"<fieldset><legend>Per-app SSO (set in each app's .env)</legend>{apps}</fieldset>"
         f"<fieldset><legend>Data store</legend>{store}</fieldset>"
     )
-    return _page("Configuration · SLOP", body, wide=True)
+    return _page("Configuration · SLOP", body + _PILL_POLL, wide=True)
+
+
+# ---------------------------------------------------------------------------
+# Administration → Software updates
+# ---------------------------------------------------------------------------
+# The IdP holds no Docker socket. It asks the updater sidecar what is behind and,
+# on a superuser's click, to update ONE allowlisted product. Everything here is
+# superuser-gated, and the apply route carries the same origin + CSRF guard as
+# every other admin mutation.
+_UPDATES_JS = r"""
+(function(){
+  var rows={}, polling=null;
+  function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;
+    if(x!=null)e.textContent=x;return e;}
+  function fmtRow(a){
+    var td=document.getElementById('u-'+a.key); if(!td)return;
+    td.innerHTML='';
+    if(!a.installed){ td.appendChild(el('span','sub','not installed on this host')); return; }
+    if(a.checked===false){
+      td.appendChild(el('span','sub', "couldn't check" + (a.reason?(' \u2014 '+a.reason):'')));
+      return;
+    }
+    if(a.available){
+      var s=el('span',null,'update available');
+      s.style.color='#e0a83a';
+      td.appendChild(s);
+      if(a.current&&a.latest)td.appendChild(el('span','sub','  '+a.current+' \u2192 '+a.latest));
+    } else {
+      var ok=el('span',null,'\u2713 up to date'); ok.style.color='#4ec07a'; td.appendChild(ok);
+      if(a.current)td.appendChild(el('span','sub','  ('+a.current+')'));
+    }
+    var btn=document.getElementById('b-'+a.key);
+    if(btn){
+      btn.hidden=!a.can_update;
+      btn.disabled=!a.can_update;
+    }
+    if(a.reason && a.checked!==false){
+      td.appendChild(document.createElement('br'));
+      td.appendChild(el('span','sub',a.reason));
+    }
+  }
+  function paint(d){
+    (d.apps||[]).forEach(fmtRow);
+    var n=(d.apps||[]).filter(function(a){return a.available;}).length;
+    var pill=document.getElementById('updpill');
+    if(pill){pill.classList.toggle('on',n>0);
+      var b=pill.querySelector('b'); if(b)b.textContent=n;}
+    if(d.job)showJob(d.job);
+  }
+  function showJob(j){
+    var box=document.getElementById('joblog');
+    if(!box||!j)return;
+    box.hidden=false;
+    document.getElementById('jobtitle').textContent =
+      'Update of '+j.app+' \u2014 '+j.state;
+    box.textContent=(j.log||[]).join('\n');
+    box.scrollTop=box.scrollHeight;
+  }
+  function load(){
+    fetch('/admin/updates/status',{cache:'no-store'})
+      .then(function(r){return r.ok?r.json():Promise.reject(new Error('HTTP '+r.status));})
+      .then(function(d){
+        if(d.error){pushToast(d.error,{title:'Software updates',kind:'warn',ttl:0});return;}
+        paint(d);
+      })
+      .catch(function(e){pushToast(String(e.message||e),{title:'Software updates',kind:'error'});});
+  }
+  function poll(selfUpdate){
+    if(polling)return;
+    polling=setInterval(function(){
+      fetch('/admin/updates/job',{cache:'no-store'})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          var j=d.job; if(!j)return;
+          showJob(j);
+          if(j.state!=='running'){
+            clearInterval(polling); polling=null;
+            pushToast(j.message||('Update '+j.state),
+                      {title:'Software updates',
+                       kind:j.state==='succeeded'?'success':'error',
+                       ttl:j.state==='succeeded'?9000:0});
+            load();
+          }
+        })
+        .catch(function(){
+          // SLOP updating ITSELF recreates this container mid-job, so losing the
+          // connection here is the expected outcome, not a failure.
+          if(selfUpdate){
+            clearInterval(polling); polling=null;
+            pushToast('SLOP is rebuilding and will restart \u2014 reload this page in a moment.',
+                      {title:'Software updates',kind:'warn',ttl:0});
+          }
+        });
+    },2000);
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    load();
+    document.querySelectorAll('button[data-app]').forEach(function(b){
+      b.addEventListener('click',function(){
+        var key=b.getAttribute('data-app');
+        if(key==='slop' && !confirm('Updating SLOP rebuilds the gateway and this console. '
+            +'You will be signed out briefly. Continue?'))return;
+        b.disabled=true;
+        var fd=new FormData();
+        fd.append('csrf',document.getElementById('csrf').value);
+        fd.append('app',key);
+        fetch('/admin/updates/apply',{method:'POST',body:fd})
+          .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+          .then(function(res){
+            if(!res.ok){pushToast(res.d.detail||'Could not start the update',
+                                  {title:'Software updates',kind:'error',ttl:0});
+              b.disabled=false; return;}
+            pushToast(res.d.message||('Updating '+key),{title:'Software updates'});
+            poll(key==='slop');
+          })
+          .catch(function(e){pushToast(String(e.message||e),
+                {title:'Software updates',kind:'error',ttl:0}); b.disabled=false;});
+      });
+    });
+  });
+})();
+"""
+
+
+def _updates_page(sess: sqlite3.Row, tok: str) -> str:
+    rows = []
+    for key, lbl in (("controller", "Sysible Controller"),
+                     ("slep", "Sysible Linux Engineering Platform"),
+                     ("connect", "Sysible Connect"),
+                     ("slop", "Sysible Linux Operations Platform (gateway, sign-in, "
+                              "Flashback, Visualizer)")):
+        rows.append(
+            f"<tr class=upd-row><td><b>{escape(lbl)}</b></td>"
+            f"<td id='u-{key}' class=sub>checking&hellip;</td>"
+            f"<td style='text-align:right'>"
+            f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>"
+            f"Update now</button></td></tr>")
+    table = ("<table><tr><th>Product</th><th>Status</th><th></th></tr>"
+             + "".join(rows) + "</table>")
+
+    note = (
+        "<p class=sub>Each product is a git checkout on this host. "
+        "&ldquo;Update now&rdquo; pulls it and rebuilds its containers &mdash; the same thing "
+        "<code>sysible_ctl &lt;product&gt; update</code> does on the command line. "
+        "A checkout with local changes is reported and refused rather than overwritten.</p>")
+    if not updates.configured():
+        note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
+                 "updates can only be applied on the host with "
+                 "<code>sysible_ctl &lt;product&gt; update</code>.</p>")
+
+    body = (
+        "<a class=back href='/'>&larr; Portal</a>"
+        f"<div class=top><h1>Administration · Software updates</h1>"
+        f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
+        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/settings'>Configuration</a> · "
+        "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
+        f"{note}"
+        f"<input type=hidden id=csrf value='{escape(tok)}'>"
+        f"{table}"
+        "<div id=joblog-wrap>"
+        "<div id=jobtitle class=sub style='margin-top:1rem'></div>"
+        "<pre class=upd-log id=joblog hidden></pre>"
+        "</div>"
+        f"<script>{_UPDATES_JS}</script>"
+    )
+    return _page("Software updates · SLOP", body, wide=True)
+
+
+@app.get("/admin/updates", response_class=HTMLResponse)
+def admin_updates(request: Request):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    tok = _csrf_token(request)
+    return _csrf_html(_updates_page(sess, tok), tok)
+
+
+@app.get("/admin/updates/status")
+def admin_updates_status(request: Request):
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"error": "Superuser access required."}, status_code=403)
+    data, error = updates.status(sess["username"], "superuser")
+    if error:
+        return JSONResponse({"error": error, "apps": []})
+    return JSONResponse(data)
+
+
+@app.get("/admin/updates/job")
+def admin_updates_job(request: Request):
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"error": "Superuser access required."}, status_code=403)
+    data, error = updates.job(sess["username"], "superuser")
+    if error:
+        return JSONResponse({"error": error, "job": None})
+    return JSONResponse(data)
+
+
+@app.post("/admin/updates/apply")
+def admin_updates_apply(request: Request, csrf: str = Form(""), app: str = Form("")):
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    tok = _csrf_token(request)
+    guard = _admin_guard(request, sess, csrf, tok)
+    if guard is not None:
+        return JSONResponse({"detail": "Request blocked (bad origin or token)."},
+                            status_code=403)
+    data, error = updates.apply(app, sess["username"], "superuser")
+    if error:
+        return JSONResponse({"detail": error}, status_code=409)
+    return JSONResponse(data)
 
 
 @app.get("/admin/settings", response_class=HTMLResponse)

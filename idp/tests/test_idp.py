@@ -439,3 +439,84 @@ def test_second_superuser_can_be_demoted(cl):
     # now super2 is demoted, admin is the only superuser again → guard re-engages
     assert cl.post("/admin/users/admin/role", data={"role": "operator", "csrf": _tok(cl)},
                    headers=HDR).status_code == 400
+
+
+# ---- Administration → Software updates ------------------------------------
+# The IdP holds no Docker socket: it asks the updater sidecar. What must hold
+# here is that only a superuser can see or trigger anything, that the apply route
+# carries the same origin+CSRF guard as every other admin mutation, and that a
+# missing updater degrades to a readable message instead of an error page.
+def test_updates_page_is_superuser_only(cl):
+    import app as m
+    _login(cl, "admin", ADMIN_PW)
+    cl.post("/admin/users", data={"username": "op", "role": "operator",
+            "password": "operatorpass123", "csrf": _tok(cl)}, headers=HDR)
+    cl.post("/logout", headers=HDR)
+
+    _login(cl, "op", "operatorpass123")
+    assert cl.get("/admin/updates", follow_redirects=False).status_code == 403
+    assert cl.get("/admin/updates/status").status_code == 403
+    assert cl.get("/admin/updates/job").status_code == 403
+    r = cl.post("/admin/updates/apply", data={"app": "controller", "csrf": _tok(cl)},
+                headers=HDR)
+    assert r.status_code == 403
+
+
+def test_updates_page_renders_for_a_superuser(cl):
+    _login(cl, "admin", ADMIN_PW)
+    r = cl.get("/admin/updates")
+    assert r.status_code == 200
+    for key in ("controller", "slep", "connect", "slop"):
+        assert f"data-app='{key}'" in r.text
+    assert "Update now" in r.text
+
+
+def test_apply_requires_the_csrf_token_and_origin(cl, monkeypatch):
+    import app as m
+    called = []
+    monkeypatch.setattr(m.updates, "apply",
+                        lambda k, u, r: (called.append(k), ({"started": True}, None))[1])
+    _login(cl, "admin", ADMIN_PW)
+    # No token.
+    assert cl.post("/admin/updates/apply", data={"app": "controller"},
+                   headers=HDR).status_code == 403
+    # Wrong token.
+    assert cl.post("/admin/updates/apply", data={"app": "controller", "csrf": "nope"},
+                   headers=HDR).status_code == 403
+    # Right token but cross-site.
+    assert cl.post("/admin/updates/apply",
+                   data={"app": "controller", "csrf": _tok(cl)},
+                   headers={"origin": "http://evil.example"}).status_code == 403
+    assert called == [], "no update may start without origin AND token"
+    # Same-origin with the token: through.
+    assert cl.post("/admin/updates/apply",
+                   data={"app": "controller", "csrf": _tok(cl)},
+                   headers=HDR).status_code == 200
+    assert called == ["controller"]
+
+
+def test_a_missing_updater_is_a_message_not_a_crash(cl, monkeypatch):
+    import app as m
+    monkeypatch.setattr(m.updates, "status",
+                        lambda u, r: (None, "the updater service is not deployed"))
+    _login(cl, "admin", ADMIN_PW)
+    d = cl.get("/admin/updates/status").json()
+    assert d["apps"] == [] and "not deployed" in d["error"]
+    # …and the page still renders, telling the operator what to run instead.
+    assert cl.get("/admin/updates").status_code == 200
+
+
+def test_the_updater_is_always_called_as_a_superuser(cl, monkeypatch):
+    """The updater enforces the superuser rule on its own side; the IdP must
+    assert the REAL signed-in user, never let a role ride in from the client."""
+    import app as m
+    seen = {}
+
+    def fake(u, r):
+        seen["user"], seen["role"] = u, r
+        return {"apps": []}, None
+
+    monkeypatch.setattr(m.updates, "status", fake)
+    _login(cl, "admin", ADMIN_PW)
+    cl.get("/admin/updates/status", headers={"X-Sysible-Role": "auditor"})
+    assert seen == {"user": "admin", "role": "superuser"}

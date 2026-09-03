@@ -32,6 +32,11 @@ services:
       # idp logs once (docker logs sysible-slop-idp).
       SLOP_ADMIN_USER: ${SLOP_ADMIN_USER:-admin}
       SLOP_ADMIN_PASSWORD: ${SLOP_ADMIN_PASSWORD:-}
+      # Administration -> Software updates talks to the updater sidecar over the
+      # internal network, proving itself with the platform shared secret. The IdP
+      # deliberately has NO Docker socket of its own.
+      SLOP_UPDATER_UPSTREAM: ${SLOP_UPDATER_UPSTREAM:-updater:8080}
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
     volumes:
       - slop-idp-data:/data     # the user store (SQLite) — persist across restarts
     expose:
@@ -125,6 +130,36 @@ services:
     extra_hosts:
       # Reach the three apps published on the host (Linux needs this).
       - "host.docker.internal:host-gateway"
+
+  # The updater — SLOP Administration's "Update now" button. It is the ONLY
+  # component given the host's Docker socket, which is root-equivalent on the
+  # host. That is why it is a separate service rather than a capability of the
+  # IdP: the IdP terminates browser sessions and is what an attacker reaches
+  # first, so a flaw there must not be a root shell on the host. The updater's
+  # whole API is "update product <key>" against a fixed allowlist — it accepts no
+  # path, repo, branch, image or command (see updater/backend/apps.py).
+  #
+  # Remove this service if you would rather run `sysible_ctl <app> update` on the
+  # host: Administration then simply shows the update state and the command,
+  # which needs no socket at all.
+  updater:
+    build: ./updater
+    image: sysible-slop-updater
+    container_name: sysible-slop-updater
+    restart: unless-stopped
+    environment:
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # Where install.sh cloned the products. Bind-mounted at the SAME path below
+      # so a build context resolves identically inside the container and on the
+      # host daemon.
+      SYSIBLE_SRC_DIR: ${SYSIBLE_SRC_DIR:-/opt/sysible-src}
+      SYSIBLE_SLOP_DIR: ${SYSIBLE_SLOP_DIR:-/opt/sysible-src/sysible-linux-operations-platform}
+    volumes:
+      # Root-equivalent on the host. See the note above before adding anything here.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SYSIBLE_SRC_DIR:-/opt/sysible-src}:${SYSIBLE_SRC_DIR:-/opt/sysible-src}
+    expose:
+      - "8080"                     # internal only; never published
 
 volumes:
   slop-idp-data:
