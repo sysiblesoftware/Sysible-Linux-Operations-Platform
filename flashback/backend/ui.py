@@ -224,7 +224,7 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
         f"<h1>{escape(head)}</h1>"
         f"<div class=why>{escape(reason)}</div>"
         "<p>Flashback has no login of its own — it takes your identity from the "
-        "Sysible Operations Platform gateway. Open it from the portal tile at "
+        "Sysible Linux Operations Platform gateway. Open it from the portal tile at "
         "<code>/flashback/</code> after signing in at <a href='/login'>/login</a>.</p>"
         f"<p><code>{escape(code)}</code></p>"
         "</div></body></html>"

@@ -1,4 +1,4 @@
-// Sysible Operations Platform — portal behaviour: wire each app card to its
+// Sysible Linux Operations Platform — portal behaviour: wire each app card to its
 // subdomain, poll live health through the gateway, and remember the theme.
 (function () {
   "use strict";

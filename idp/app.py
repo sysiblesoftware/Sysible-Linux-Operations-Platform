@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sysible Operations Platform — the SLOP Identity Provider (CE).
+"""Sysible Linux Operations Platform — the SLOP Identity Provider (CE).
 
 SLOP is the single front door for the three Sysible apps (Controller, SLEP,
 Connect). This service is the ONE place a user signs in: it owns the user
@@ -544,7 +544,7 @@ def _page(title: str, body: str, wide: bool = False) -> str:
         f"<div class=bg></div>"
         f"<button class=theme-btn id=theme title='Toggle light / dark' aria-label='Toggle theme'>&#9728;</button>"
         f"<div class='card{' wide' if wide else ''}'>"
-        f"<div class=brand>{_MARK}<div class=brand-text>Sysible <b>Operations Platform</b></div></div>"
+        f"<div class=brand>{_MARK}<div class=brand-text>Sysible <b>Linux Operations Platform</b></div></div>"
         f"{body}"
         f"<div class=foot>Sysible Linux Operations Platform · Community Edition</div>"
         f"</div>"
