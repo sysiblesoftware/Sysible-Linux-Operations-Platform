@@ -70,6 +70,21 @@
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
 				copy_headers X-Sysible-User X-Sysible-Role
+				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
+				# subrequest, so a websocket upgrade sent `Connection: Upgrade` and
+				# `Upgrade: websocket` to the IdP's plain /auth/verify route. uvicorn
+				# answers 403 to an upgrade on a non-websocket route, @sso_bad matches
+				# 401/403, and the browser's handshake got a 302 to /login instead of a
+				# 101 — so EVERY terminal in Sysible Connect died at the gateway and never
+				# reached the app at all. Nothing named it: Connect never saw the request,
+				# and a failed handshake gives the browser close code 1006 with no reason,
+				# i.e. a blank terminal with a cursor.
+				# Verified against a real caddy: without these the upgrade gets 302, with
+				# them 101 and the app's first frame arrives. This affects ONLY the auth
+				# subrequest — the proxied request keeps its upgrade headers, which is what
+				# makes the websocket work.
+				header_up -Connection
+				header_up -Upgrade
 				@sso_bad status 401 403
 				handle_response @sso_bad {
 					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's
@@ -138,6 +153,21 @@
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
 				copy_headers X-Sysible-User X-Sysible-Role
+				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
+				# subrequest, so a websocket upgrade sent `Connection: Upgrade` and
+				# `Upgrade: websocket` to the IdP's plain /auth/verify route. uvicorn
+				# answers 403 to an upgrade on a non-websocket route, @sso_bad matches
+				# 401/403, and the browser's handshake got a 302 to /login instead of a
+				# 101 — so EVERY terminal in Sysible Connect died at the gateway and never
+				# reached the app at all. Nothing named it: Connect never saw the request,
+				# and a failed handshake gives the browser close code 1006 with no reason,
+				# i.e. a blank terminal with a cursor.
+				# Verified against a real caddy: without these the upgrade gets 302, with
+				# them 101 and the app's first frame arrives. This affects ONLY the auth
+				# subrequest — the proxied request keeps its upgrade headers, which is what
+				# makes the websocket work.
+				header_up -Connection
+				header_up -Upgrade
 				@sso_bad status 401 403
 				handle_response @sso_bad {
 					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's
@@ -316,6 +346,21 @@ sysible.slop {
 			request_header -X-Sysible-Auth
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
+				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
+				# subrequest, so a websocket upgrade sent `Connection: Upgrade` and
+				# `Upgrade: websocket` to the IdP's plain /auth/verify route. uvicorn
+				# answers 403 to an upgrade on a non-websocket route, @sso_bad matches
+				# 401/403, and the browser's handshake got a 302 to /login instead of a
+				# 101 — so EVERY terminal in Sysible Connect died at the gateway and never
+				# reached the app at all. Nothing named it: Connect never saw the request,
+				# and a failed handshake gives the browser close code 1006 with no reason,
+				# i.e. a blank terminal with a cursor.
+				# Verified against a real caddy: without these the upgrade gets 302, with
+				# them 101 and the app's first frame arrives. This affects ONLY the auth
+				# subrequest — the proxied request keeps its upgrade headers, which is what
+				# makes the websocket work.
+				header_up -Connection
+				header_up -Upgrade
 				@portal_bad status 401 403
 				handle_response @portal_bad {
 					# The `*` matcher is LOAD-BEARING. Inside handle_response, redir's

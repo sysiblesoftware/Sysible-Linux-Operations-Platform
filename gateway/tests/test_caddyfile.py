@@ -230,3 +230,154 @@ def test_the_adapted_config_serves_same_origin_framing(adapted):
     xfo = [v for k, v in found if k == "x-frame-options"]
     assert csp and all("frame-ancestors 'self'" in c for c in csp), csp
     assert xfo and all(x == "SAMEORIGIN" for x in xfo), xfo
+
+
+# ---- websockets must survive forward_auth ---------------------------------
+# The second silent failure this file has shipped. forward_auth copies the
+# CLIENT's headers onto its auth subrequest, so a websocket upgrade sent
+# `Connection: Upgrade` and `Upgrade: websocket` to the IdP's plain /auth/verify
+# route. uvicorn answers 403 to an upgrade on a non-websocket route, @sso_bad
+# matches 401/403, and the browser's handshake received a 302 to /login instead
+# of a 101. Every terminal in Sysible Connect failed AT THE GATEWAY and never
+# reached the app, and nothing named it: Connect never saw the request, and a
+# failed handshake gives the browser close code 1006 with no reason — a blank
+# terminal with a blinking cursor.
+def test_every_forward_auth_strips_the_upgrade_headers(text):
+    """The auth subrequest must be a plain GET. Only the PROXIED request keeps
+    its upgrade headers — that is what makes the websocket work."""
+    blocks, depth, cur = [], None, []
+    for raw in text.splitlines():
+        line = _strip_comments(raw)
+        if depth is not None:
+            cur.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                blocks.append(cur)
+                depth, cur = None, []
+        elif line.startswith("forward_auth "):
+            cur = [line]
+            depth = line.count("{") - line.count("}")
+            if depth <= 0:
+                blocks.append(cur)
+                depth, cur = None, []
+    assert len(blocks) == 3, f"expected 3 forward_auth blocks, found {len(blocks)}"
+    for b in blocks:
+        body = "\n".join(b)
+        assert "header_up -Connection" in body, (
+            "a forward_auth that forwards Connection: Upgrade to the IdP turns every "
+            f"websocket into a 302 to /login:\n{body}")
+        assert "header_up -Upgrade" in body, body
+
+
+@needs_caddy
+def test_a_websocket_really_upgrades_through_the_shipping_appsite_snippet(tmp_path):
+    """End to end against a real caddy: run the SHIPPING (appsite) snippet in
+    front of a stub IdP and a stub websocket app, and assert the handshake
+    reaches 101 — and that the auth subrequest arrived WITHOUT the upgrade
+    headers. Lint alone cannot catch this; the broken config adapted cleanly."""
+    import base64
+    import hashlib
+    import http.server
+    import re
+    import socket
+    import threading
+    import time
+
+    seen_auth_headers = []
+
+    class IdP(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                                     # noqa: N802
+            seen_auth_headers.append({k.lower(): v for k, v in self.headers.items()})
+            self.send_response(200)
+            self.send_header("X-Sysible-User", "alice")
+            self.send_header("X-Sysible-Role", "operator")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):                            # quiet
+            pass
+
+    idp = http.server.ThreadingHTTPServer(("127.0.0.1", 0), IdP)
+    threading.Thread(target=idp.serve_forever, daemon=True).start()
+
+    GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    app_sock = socket.socket()
+    app_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    app_sock.bind(("127.0.0.1", 0))
+    app_sock.listen(4)
+
+    def app_server():
+        while True:
+            try:
+                c, _ = app_sock.accept()
+            except OSError:
+                return
+            req = c.recv(65536).decode("utf-8", "replace")
+            m = re.search(r"Sec-WebSocket-Key:\s*(\S+)", req, re.I)
+            if m:
+                acc = base64.b64encode(
+                    hashlib.sha1((m.group(1) + GUID).encode()).digest()).decode()
+                c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                           f"Connection: Upgrade\r\nSec-WebSocket-Accept: {acc}\r\n\r\n"
+                           ).encode())
+            else:
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            time.sleep(0.2)
+            c.close()
+
+    threading.Thread(target=app_server, daemon=True).start()
+
+    # Build a runnable config around the SHIPPING snippet (plain-HTTP stubs, so
+    # the https-upstream transport block is dropped; the forward_auth under test
+    # is used verbatim).
+    src = open(CADDYFILE, encoding="utf-8").read()
+    snippet = src[src.index("(appsite)"):src.index("# ---- same as (appsite)")]
+    snippet = snippet.replace("{$SLOP_IDP_UPSTREAM:idp:8080}",
+                              f"127.0.0.1:{idp.server_address[1]}")
+    snippet = snippet.replace("{$SYSIBLE_SSO_SHARED_SECRET}", "test-secret")
+    snippet = re.sub(r"transport http \{.*?\n\t*\}\n", "", snippet, flags=re.S)
+
+    gw = socket.socket()
+    gw.bind(("127.0.0.1", 0))
+    port = gw.getsockname()[1]
+    gw.close()
+    cfg = tmp_path / "Caddyfile"
+    cfg.write_text("{\n\tadmin off\n\tauto_https off\n}\n\n" + snippet +
+                   f"\n:{port} {{\n\timport appsite /connect "
+                   f"127.0.0.1:{app_sock.getsockname()[1]}\n}}\n")
+
+    proc = subprocess.Popen([caddy_bin, "run", "--config", str(cfg),
+                             "--adapter", "caddyfile"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):                       # wait for the listener
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode()
+        s.sendall((f"GET /connect/api/terminal/ws HTTP/1.1\r\n"
+                   f"Host: 127.0.0.1:{port}\r\n"
+                   "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                   ).encode())
+        status = s.recv(4096).decode("utf-8", "replace").split("\r\n")[0]
+        s.close()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        idp.shutdown()
+        app_sock.close()
+
+    assert "101" in status, (
+        f"the websocket handshake did not upgrade: {status!r}. A 302 here is the "
+        "gateway bouncing the upgrade to /login, which is what a blank terminal in "
+        "Sysible Connect actually was.")
+    assert seen_auth_headers, "forward_auth never reached the IdP"
+    auth = seen_auth_headers[-1]
+    assert "upgrade" not in auth, f"the auth subrequest still carries Upgrade: {auth}"
+    assert "upgrade" not in (auth.get("connection", "").lower()), \
+        f"the auth subrequest still carries Connection: Upgrade: {auth}"
