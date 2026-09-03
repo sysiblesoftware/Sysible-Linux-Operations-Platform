@@ -77,9 +77,9 @@ app.add_middleware(_BodyLimitASGI, max_bytes=_MAX_REQUEST_BYTES)
 async def _security_headers(request: Request, call_next):
     resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
-    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
     # Everything here is another user's audit data — never let it sit in a cache.
     resp.headers.setdefault("Cache-Control", "no-store")
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https":

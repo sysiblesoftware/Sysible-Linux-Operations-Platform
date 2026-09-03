@@ -184,3 +184,49 @@ def test_the_shared_secret_is_only_stamped_on_gated_routes(adapted):
     walk(adapted, False)
     # One per fronted app (3 https + 2 plain-http); the portal never stamps it.
     assert len(stamped) == 5, f"unexpected number of X-Sysible-Auth stamps: {len(stamped)}"
+
+
+# ---- framing: exactly 'self', not looser and not tighter --------------------
+# Two failure modes, opposite directions, both real:
+#   * back to 'none'  -> SLOP Administration can no longer host each app's own
+#     settings UI, and the consolidation silently becomes a blank panel;
+#   * anything wider  -> a foreign site can frame the destructive admin forms,
+#     which is the clickjacking this header exists to stop.
+# Verified in a real Chromium: same-origin embeds render, and a page on another
+# origin is refused with 'because an ancestor violates ... frame-ancestors self'.
+def test_framing_is_same_origin_exactly(text):
+    directives = [_strip_comments(l) for l in text.splitlines()]
+    csp = [l for l in directives if l.startswith("Content-Security-Policy")]
+    assert csp, "the site-wide CSP header is gone"
+    assert any("frame-ancestors 'self'" in l for l in csp), csp
+    assert not any("frame-ancestors 'none'" in l for l in csp), \
+        "'none' breaks Administration hosting each app's settings UI"
+    assert not any("frame-ancestors *" in l or "frame-ancestors 'unsafe" in l for l in csp), \
+        "a wildcard here reopens clickjacking of the admin forms"
+    xfo = [l for l in directives if l.startswith("X-Frame-Options")]
+    assert xfo and all("SAMEORIGIN" in l for l in xfo), xfo
+    assert not any("DENY" in l for l in xfo)
+
+
+@needs_caddy
+def test_the_adapted_config_serves_same_origin_framing(adapted):
+    found = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("handler") == "headers":
+                st = ((o.get("response") or {}).get("set") or {})
+                for k, v in st.items():
+                    if k.lower() in ("content-security-policy", "x-frame-options"):
+                        found.append((k.lower(), " ".join(v)))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(adapted)
+    csp = [v for k, v in found if k == "content-security-policy"]
+    xfo = [v for k, v in found if k == "x-frame-options"]
+    assert csp and all("frame-ancestors 'self'" in c for c in csp), csp
+    assert xfo and all(x == "SAMEORIGIN" for x in xfo), xfo

@@ -190,9 +190,11 @@ sysible.slop {
 	# Security headers on EVERY response from this origin. The single-origin SLOP
 	# model collapses isolation between the portal, the three apps, and the admin
 	# IdP, so these platform-wide defenses matter more here than usual:
-	#   - frame-ancestors 'none' + X-Frame-Options: nothing may frame any SLOP page,
-	#     so the destructive IdP admin forms can't be clickjacked. The apps open in
-	#     new tabs (never iframes), so this breaks nothing.
+	#   - frame-ancestors 'self' + X-Frame-Options SAMEORIGIN: no OTHER site may
+	#     frame a SLOP page, so the destructive IdP admin forms still can't be
+	#     clickjacked. 'self' (not 'none') because SLOP Administration hosts each
+	#     app's own settings UI in-page; everything is one origin, so that is a
+	#     same-origin embed. Widening this beyond 'self' would reopen clickjacking.
 	#   - nosniff: no MIME-sniffing an upload/response into executable script.
 	#   - Referrer-Policy: never leak the path (which app / which account) off-site.
 	#     It is 'same-origin', NOT 'no-referrer'. Chromium derives a navigation's
@@ -209,8 +211,8 @@ sysible.slop {
 	# IdP adds a strict one to its own pages. Multiple CSP headers intersect, so the
 	# frame-ancestors below is enforced regardless of an app's own policy.
 	header {
-		Content-Security-Policy "frame-ancestors 'none'"
-		X-Frame-Options DENY
+		Content-Security-Policy "frame-ancestors 'self'"
+		X-Frame-Options SAMEORIGIN
 		X-Content-Type-Options nosniff
 		Referrer-Policy same-origin
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

@@ -133,9 +133,11 @@ def test_unknown_app_404s(client):
 # ---- hardening -------------------------------------------------------------
 def test_security_headers_and_no_store(client):
     r = client.get("/api/health")
-    assert r.headers["X-Frame-Options"] == "DENY"
+    # SAMEORIGIN: SLOP is one origin and Administration hosts app settings
+    # in-page. Every other site is still refused.
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"
     assert r.headers["X-Content-Type-Options"] == "nosniff"
-    assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
+    assert "frame-ancestors 'self'" in r.headers["Content-Security-Policy"]
     assert r.headers["Cache-Control"] == "no-store"   # it's other people's audit data
 
 

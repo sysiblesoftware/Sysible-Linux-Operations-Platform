@@ -402,9 +402,14 @@ def test_admin_add_rejects_bad_username(cl):
 
 def test_security_headers_present(cl):
     r = cl.get("/login", follow_redirects=False)
-    assert r.headers.get("X-Frame-Options") == "DENY"
+    # SAMEORIGIN, not DENY: SLOP is one origin and Administration hosts each app's
+    # settings UI in-page. Every OTHER site is still refused, which is what the
+    # clickjacking protection on the destructive admin forms actually needs.
+    assert r.headers.get("X-Frame-Options") == "SAMEORIGIN"
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
-    assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+    csp = r.headers.get("Content-Security-Policy", "")
+    assert "frame-ancestors 'self'" in csp
+    assert "frame-ancestors 'none'" not in csp
     assert r.headers.get("Cache-Control") == "no-store"
 
 

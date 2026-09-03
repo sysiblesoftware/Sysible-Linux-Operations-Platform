@@ -527,6 +527,16 @@ font-family:inherit;text-decoration:none}
 .upd-pill.on{display:inline-flex}
 .upd-pill b{background:#e0a83a;color:#0d1117;border-radius:9px;padding:0 6px;font-size:11px}
 .upd-row td{vertical-align:middle}
+/* Hosted app administration. The frame is the app's REAL settings UI on the same
+   origin — sized generously because it contains a full console, not a widget. */
+.prodtabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0 .5rem}
+.subtabs{display:flex;gap:.35rem;flex-wrap:wrap;margin:.2rem 0 .7rem}
+.chip{display:inline-block;padding:.2rem .65rem;border:1px solid var(--line);
+border-radius:20px;font-size:12.5px;color:var(--muted);text-decoration:none}
+.chip:hover{color:var(--text);border-color:var(--accent)}
+.chip.on{color:var(--text);border-color:var(--accent);background:var(--panel2)}
+.appframe{width:100%;height:min(72vh,900px);border:1px solid var(--line);
+border-radius:12px;background:var(--panel);display:block}
 .upd-log{margin:.6rem 0 0;padding:.6rem .8rem;background:var(--field,#0d1320);
 border:1px solid var(--line);border-radius:8px;max-height:40vh;overflow:auto;
 font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
@@ -645,7 +655,7 @@ app = FastAPI(title="SLOP IdP", docs_url=None, redoc_url=None, openapi_url=None)
 _CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'self'; object-src 'none'"
 )
 
 
@@ -654,7 +664,7 @@ async def _security_headers(request: Request, call_next):
     resp = await call_next(request)
     resp.headers.setdefault("Content-Security-Policy", _CSP)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     # same-origin, NOT no-referrer: Chromium derives a navigation's Origin header
     # from the referrer policy, so no-referrer turns every HTML form POST here
     # (login, /account/password, the admin forms, sign out) into `Origin: null`
@@ -942,7 +952,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
         f"{_msg(msg, kind)}"
         "<table><tr><th>User</th><th>Role</th><th>Password</th><th></th></tr>"
@@ -1188,10 +1198,14 @@ def _config_page(sess: sqlite3.Row) -> str:
     # SSO carries the operator's identity, so each opens the exact settings tab with
     # no second login.
     def _clink(tab, label, desc):
-        href = f"/controller/?view=settings&amp;tab={tab}"
-        return (f"<tr><td><a href='{href}' target=_blank rel=noopener>{escape(label)} &rarr;</a></td>"
+        # Points at the HOSTED panel, not the app in a new tab.
+        href = f"/admin/apps?app=controller&amp;tab={tab}"
+        return (f"<tr><td><a href='{href}'>{escape(label)} &rarr;</a></td>"
                 f"<td class=sub style='margin:0'>{escape(desc)}</td></tr>")
 
+    # Superseded by /admin/apps, which HOSTS these panels instead of linking out.
+    # Kept as a compact index so the Configuration page still documents what each
+    # one manages.
     controller_rbac = (
         "<table><tr><th>Controller setting</th><th>What it manages</th></tr>"
         + _clink("admins", "Administrators (RBAC)",
@@ -1222,7 +1236,7 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Configuration</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal &rarr;</a></p>"
         "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
@@ -1251,6 +1265,86 @@ def _config_page(sess: sqlite3.Row) -> str:
         f"<fieldset><legend>Data store</legend>{store}</fieldset>"
     )
     return _page("Configuration · SLOP", body + _PILL_POLL, wide=True)
+
+
+# ---------------------------------------------------------------------------
+# Administration → Apps: each app's administration, HOSTED HERE
+# ---------------------------------------------------------------------------
+# Administration used to LINK OUT to each app's settings in a new tab, which is
+# not consolidation — it is a bookmark. These pages host the real thing: SLOP is
+# one origin, so the app's own settings UI is embedded in-page (frame-ancestors
+# 'self'). You stay in Administration, and there is no second copy of eight
+# panels to drift out of step with the app that owns them.
+#
+# Accounts are the exception: they are NOT hosted, they are GONE from the apps.
+# SLOP is the identity authority, so "Administrators" and "My Account" would be a
+# second account store — which is the very thing single sign-on removes.
+_APP_ADMIN = {
+    "controller": ("Sysible Controller", "/controller/?view=settings", [
+        ("controller", "Controller", "Software updates, address and port, restart."),
+        ("policy", "Password policy", "Length and character classes."),
+        ("enrollacl", "Enrollment access", "Which networks may enroll agents; the kill-switch."),
+        ("tls", "TLS / certificates", "The console's certificate."),
+        ("license", "License", "Edition and license key."),
+        ("audit", "Audit log", "Privileged Controller actions."),
+    ]),
+    "slep": ("Sysible Linux Engineering Platform", "/slep/", []),
+    "connect": ("Sysible Connect", "/connect/", []),
+}
+
+
+def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
+    if app_key not in _APP_ADMIN:
+        app_key = "controller"
+    label, base, tabs = _APP_ADMIN[app_key]
+    if tabs and tab not in {t for t, _, _ in tabs}:
+        tab = tabs[0][0]
+
+    prod = "".join(
+        f"<a class='btn{'' if k == app_key else ' ghost'}' "
+        f"href='/admin/apps?app={k}'>{escape(_APP_ADMIN[k][0])}</a> "
+        for k in _APP_ADMIN)
+
+    if tabs:
+        sub = "<div class=subtabs>" + "".join(
+            f"<a class='chip{' on' if t == tab else ''}' "
+            f"href='/admin/apps?app={escape(app_key)}&amp;tab={escape(t)}' "
+            f"title='{escape(desc)}'>{escape(lbl)}</a>"
+            for t, lbl, desc in tabs) + "</div>"
+        src = f"{base}&tab={tab}"
+    else:
+        sub = ""
+        src = base
+
+    body = (
+        "<a class=back href='/'>&larr; Portal</a>"
+        f"<div class=top><h1>Administration · Apps</h1>"
+        f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
+        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · "
+        "<a href='/admin/settings'>Configuration</a> · "
+        "<a href='/admin/updates'>Software updates</a> · "
+        "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
+        "<p class=sub>Each app&rsquo;s own administration, hosted here &mdash; you are signed "
+        "in once and stay in Administration. Accounts and password resets are NOT here per "
+        "app: SLOP owns identity, so they live under "
+        "<a href='/admin'>Accounts</a> for every app at once.</p>"
+        f"<div class=prodtabs>{prod}</div>"
+        f"{sub}"
+        f"<iframe class=appframe id=appframe src='{escape(src)}' "
+        f"title='{escape(label)} administration'></iframe>"
+        f"<p class=sub>If the panel below is blank, open "
+        f"<a href='{escape(src)}' target=_blank rel=noopener>{escape(label)} &rarr;</a> "
+        f"directly &mdash; the app may still be starting.</p>"
+    )
+    return _page("Apps · SLOP", body, wide=True)
+
+
+@app.get("/admin/apps", response_class=HTMLResponse)
+def admin_apps(request: Request, app: str = "controller", tab: str = ""):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    return HTMLResponse(_apps_page(sess, app, tab))
 
 
 # ---------------------------------------------------------------------------
