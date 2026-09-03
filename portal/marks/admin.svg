@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SLOP Administration — family tile; the glyph is a shield (this is the identity
+  and configuration authority for the whole platform) with a green key inside.
+  Not an app of its own, so it is drawn a shade quieter than the app marks.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Administration">
+  <defs>
+    <linearGradient id="ad-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#ad-tile)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <path d="M64 30 L94 41 V66 c0 18-12 28-30 34 -18-6-30-16-30-34 V41 Z"
+        fill="none" stroke="#7aa2ff" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="64" cy="60" r="9" fill="none" stroke="#6ddb73" stroke-width="6"/>
+  <line x1="64" y1="69" x2="64" y2="86" stroke="#6ddb73" stroke-width="6" stroke-linecap="round"/>
+  <line x1="64" y1="79" x2="73" y2="79" stroke="#6ddb73" stroke-width="6" stroke-linecap="round"/>
+</svg>

@@ -41,8 +41,13 @@ body { background: var(--bg); color: var(--text); font-family: var(--font);
   box-shadow: var(--shadow); transition: transform .12s ease, border-color .12s ease; }
 .card:hover { transform: translateY(-2px); border-color: var(--accent); }
 .card-top { display: flex; align-items: center; justify-content: space-between; }
+/* The tile now holds each app's REAL mark (portal/marks/*.svg), which is a
+   self-contained dark tile with its own brand ring — so the wrapper drops the
+   panel background and border it used to draw behind a line glyph, which would
+   otherwise read as a second box around the logo. */
 .ico { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px;
-  border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); color: var(--accent); }
+  border-radius: 11px; overflow: hidden; }
+.ico img { display: block; width: 40px; height: 40px; border-radius: 11px; }
 .card h2 { margin: 6px 0 0; font-size: 17px; }
 .card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; flex: 1; }
 .go { color: var(--accent); font-weight: 600; font-size: 13.5px; margin-top: 6px; }

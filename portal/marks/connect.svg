@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sysible Connect — portal mark. GLYPH is Connect's own (webgui/frontend/public/
+  favicon.svg): a terminal prompt chevron with a blue cursor bar. The TILE is the
+  canonical family geometry (see controller.svg) rather than Connect's own
+  heavier 4px ring, so the portal row reads as one set at 40px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Connect">
+  <defs>
+    <linearGradient id="cn-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#cn-tile)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <path d="M38 44 L62 64 L38 84" fill="none" stroke="#6ddb73" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="70" y="75" width="22" height="9" rx="2.5" fill="#7aa2ff"/>
+</svg>

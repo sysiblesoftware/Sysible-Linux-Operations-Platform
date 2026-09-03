@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sysible Flashback — canonical mark. Family tile (dark rounded square + thin
+  brand-green ring, see controller.svg); the glyph says what Flashback IS: a
+  time machine for config. A brand-green clock face whose hand points BACK,
+  wrapped by a blue counter-clockwise arrow — rewind, not just history.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Flashback">
+  <defs>
+    <linearGradient id="fb-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#fb-tile)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <!-- Counter-clockwise rewind arc (blue), open at the top-left. -->
+  <path d="M40 47 A 30 30 0 1 1 34 64" fill="none" stroke="#7aa2ff" stroke-width="6.5"
+        stroke-linecap="round"/>
+  <path d="M24 50 L34 64 L48 55" fill="none" stroke="#7aa2ff" stroke-width="6.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Clock hands (green): pointing back. -->
+  <g stroke="#6ddb73" stroke-width="6" stroke-linecap="round">
+    <line x1="64" y1="64" x2="64" y2="48"/>
+    <line x1="64" y1="64" x2="79" y2="70"/>
+  </g>
+  <circle cx="64" cy="64" r="4.5" fill="#6ddb73"/>
+</svg>
