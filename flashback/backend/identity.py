@@ -59,12 +59,24 @@ def gateway_configured() -> bool:
     return bool(_TRUST_GATEWAY and _SSO_SECRET)
 
 
+def agent_configured() -> bool:
+    """Whether an agent token is set at all. Callers use this to tell 'wrong
+    token' from 'this deployment never configured one'."""
+    return bool(_AGENT_TOKEN)
+
+
 def agent_auth_ok(request) -> bool:
-    """True if the request carries the correct agent bearer token. When no agent
-    token is configured (dev), agent endpoints are open — same posture as the local
-    fallback identity below."""
+    """True if the request carries the correct agent bearer token.
+
+    FAILS CLOSED when no token is configured. This used to return True, on the
+    reasoning that an unconfigured deployment is a dev one — but the agent
+    endpoints take host_id from the CALLER, so "open" meant anyone who could
+    reach the service could read any host's stored configuration and queue a
+    restore that overwrites a file on it. A missing token is a misconfiguration,
+    never a grant.
+    """
     if not _AGENT_TOKEN:
-        return True
+        return False
     sent = request.headers.get("authorization", "")
     if sent.lower().startswith("bearer "):
         sent = sent[7:].strip()

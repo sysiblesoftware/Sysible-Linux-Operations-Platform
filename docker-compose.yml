@@ -104,7 +104,16 @@ services:
     volumes:
       - flashback-data:/data       # the version store (SQLite) — persist across restarts
     expose:
-      - "8080"                     # internal only; the gateway is the sole front door
+      - "8080"                     # the gateway's front door for the browser console
+    ports:
+      # The AGENT api (snapshot ingest + restore delivery) has to be reachable by
+      # the Controller, which runs on the host and is not on this network. Bound to
+      # LOOPBACK only: it is not reachable off this machine, so this adds no public
+      # surface and needs no hole in the gateway's SSO. The Controller is the only
+      # client — host agents never talk to Flashback directly, so the bearer token
+      # lives in one place instead of on every host, and the Controller stamps
+      # host_id from the agent it just authenticated (a host cannot name another).
+      - "127.0.0.1:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}:8080"
 
   # Visualizer — the platform-wide activity & log console. Like the IdP and
   # Flashback it is a SLOP-native service in this stack: expose-only (no host

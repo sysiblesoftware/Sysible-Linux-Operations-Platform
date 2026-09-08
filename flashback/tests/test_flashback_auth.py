@@ -159,3 +159,38 @@ def test_the_icon_needs_no_identity(cl):
     yet. Gating it would leave exactly that tab blank. An icon is not a secret."""
     r = cl.get("/favicon.svg")                     # no GOOD headers at all
     assert r.status_code == 200
+
+
+# ---- the agent API fails closed -------------------------------------------
+# agent_auth_ok() used to return True when no token was configured, on the
+# reasoning that an unconfigured deployment is a dev one. But these endpoints take
+# host_id from the CALLER: "open" meant anyone who could reach the service could
+# read any host's stored configuration and queue a restore that overwrites a file
+# on it. A missing token is a misconfiguration, never a grant.
+def test_agent_endpoints_are_closed_when_no_token_is_configured(cl, monkeypatch):
+    import backend.identity as ident
+    monkeypatch.setattr(ident, "_AGENT_TOKEN", "")
+    r = cl.post("/api/agent/snapshot", json={"host_id": "h", "files": []})
+    assert r.status_code == 503
+    # ...and it says WHICH fault, so a blank token is diagnosable rather than
+    # looking identical to a wrong one.
+    assert "SYSIBLE_FLASHBACK_AGENT_TOKEN" in r.json()["detail"]
+    assert cl.get("/api/agent/restores", params={"host_id": "h"}).status_code == 503
+
+
+def test_a_wrong_token_is_refused_when_one_is_configured(cl, monkeypatch):
+    import backend.identity as ident
+    monkeypatch.setattr(ident, "_AGENT_TOKEN", "the-real-token")
+    r = cl.post("/api/agent/snapshot", headers={"Authorization": "Bearer wrong"},
+                json={"host_id": "h", "files": []})
+    assert r.status_code == 401
+
+
+def test_the_right_token_is_accepted(cl, monkeypatch):
+    """The other half: fail-closed must not mean fail-always."""
+    import backend.identity as ident
+    monkeypatch.setattr(ident, "_AGENT_TOKEN", "the-real-token")
+    r = cl.post("/api/agent/snapshot", headers={"Authorization": "Bearer the-real-token"},
+                json={"host_id": "h", "files": [{"path": "/etc/hosts", "content": "x"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["changed"] == 1

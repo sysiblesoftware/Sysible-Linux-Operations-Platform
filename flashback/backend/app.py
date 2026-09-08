@@ -151,8 +151,18 @@ def _require_writer(request: Request) -> identity.Identity:
 
 
 def _require_agent(request: Request) -> None:
-    if not identity.agent_auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+    if identity.agent_auth_ok(request):
+        return
+    if not identity.agent_configured():
+        # Distinguish the two faults. Silently refusing an unconfigured install
+        # looks identical to a wrong token, and this is exactly the wiring an
+        # operator gets wrong when nothing ever appears in the console.
+        raise HTTPException(
+            status_code=503,
+            detail="Flashback has no agent token configured, so it cannot accept "
+                   "snapshots. Set SYSIBLE_FLASHBACK_AGENT_TOKEN on this service "
+                   "and give the same value to the Controller.")
+    raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
 
 # --------------------------------------------------------------------------- #

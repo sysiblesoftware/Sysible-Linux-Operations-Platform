@@ -251,6 +251,35 @@ if [ -z "$SSO_SECRET" ]; then
 fi
 export SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET"
 
+# ---- Flashback agent token (one per install; persisted in this repo's .env) ----
+# Flashback's snapshot-ingest and restore endpoints are authenticated by a bearer
+# token, and they FAIL CLOSED when it is unset — so without this, config backups
+# silently never happen and the console stays on "No host has reported a config
+# backup yet". Minted here exactly like the SSO secret, and handed to the
+# Controller below, which is the only thing that talks to those endpoints.
+_fb_token_from_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^SYSIBLE_FLASHBACK_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+}
+FB_TOKEN="${SYSIBLE_FLASHBACK_AGENT_TOKEN:-$(_fb_token_from_env || true)}"
+if [ -z "$FB_TOKEN" ]; then
+  FB_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # Same reasoning as the SSO secret: /bin/sh has no pipefail, so a partial
+  # failure in the /dev/urandom fallback pipe is masked. This token guards read
+  # AND write access to every host's stored configuration, so refuse anything
+  # that is not the full 64 hex chars rather than shipping a weak one.
+  case "$FB_TOKEN" in
+    *[!0-9a-f]* | "") die "failed to generate a valid Flashback agent token (need 64 hex chars)." ;;
+  esac
+  [ "${#FB_TOKEN}" -eq 64 ] || die "generated Flashback agent token is not 64 hex chars (got ${#FB_TOKEN})."
+  _upsert_env SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+  say "Generated a Flashback agent token into $ENV_FILE"
+fi
+export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"
+# Where the Controller reaches Flashback's agent API: the loopback port the
+# compose file publishes (see docker-compose.yml). Overridable for a split host.
+FB_URL="${SYSIBLE_FLASHBACK_URL:-http://127.0.0.1:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}"
+
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then
@@ -292,6 +321,14 @@ if [ "$WANT_APPS" -eq 1 ]; then
       _upsert_kv "$_aenv" SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
       _upsert_kv "$_aenv" "$trust" 1
       _upsert_kv "$_aenv" SYSIBLE_BASE_PATH "/$p/"
+      # The Controller relays its agents' config snapshots to Flashback, so it —
+      # and only it — needs the agent token. Persisted here for the same reason
+      # as the SSO secret: otherwise it lives only in this run's ambient env and
+      # the next `docker compose up -d` brings the Controller back without it.
+      if [ "$p" = "controller" ]; then
+        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_URL "$FB_URL"
+        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+      fi
       if [ "$p" = "connect" ] && [ -n "$HOST_ADDR" ]; then
         _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
       fi
