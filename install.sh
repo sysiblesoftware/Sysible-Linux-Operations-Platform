@@ -278,7 +278,10 @@ fi
 export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"
 # Where the Controller reaches Flashback's agent API: the loopback port the
 # compose file publishes (see docker-compose.yml). Overridable for a split host.
-FB_URL="${SYSIBLE_FLASHBACK_URL:-http://127.0.0.1:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}"
+# host.docker.internal, NOT 127.0.0.1: the Controller runs in a container here,
+# and inside it loopback is the container itself. Its compose maps that name to
+# the host gateway. Override for a Controller on a different machine.
+FB_URL="${SYSIBLE_FLASHBACK_URL:-http://host.docker.internal:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}"
 
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
