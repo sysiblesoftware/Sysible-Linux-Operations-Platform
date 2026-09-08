@@ -32,7 +32,7 @@ import os
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import identity, store, ui
+from . import controller, identity, store, ui
 
 app = FastAPI(title="Sysible Flashback", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -203,9 +203,23 @@ def whoami(request: Request) -> dict:
 # Browse / diff / download / restore  (SSO identity)
 # --------------------------------------------------------------------------- #
 @app.get("/api/hosts")
-def api_hosts(request: Request) -> list:
-    _require_identity(request)
-    return store.list_hosts()
+def api_hosts(request: Request) -> dict:
+    """Hosts with stored history, PLUS the Controller's enrolled agent hosts that
+    have not reported one yet. Showing only the former made a fleet that is wired
+    correctly but has not captured yet look identical to one that is broken."""
+    who = _require_identity(request)
+    hosts = store.list_hosts()
+    for h in hosts:
+        h["backed_up"] = True
+    known = {h["host_id"] for h in hosts}
+    fleet, note = controller.list_hosts(who)
+    for h in fleet:
+        if h["host_id"] in known:
+            continue
+        hosts.append({"host_id": h["host_id"], "label": h["label"], "last_ts": None,
+                      "files": 0, "versions": 0, "backed_up": False})
+    hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
+    return {"hosts": hosts, "note": note}
 
 
 @app.get("/api/hosts/{host_id}/files")

@@ -62,6 +62,12 @@ pre.diff .a{color:var(--err)}pre.diff .d{color:var(--ok)}pre.diff .h{color:var(-
 
 # The interactive layer: plain fetch() against /api/*. No framework. XSS-safe —
 # every dynamic string is inserted with textContent, never innerHTML.
+_CSS += """
+.item.pending .sub{color:var(--faint);font-style:italic}
+.note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
+  color:var(--muted);font-size:12px}
+"""
+
 _JS = r"""
 const $=s=>document.querySelector(s);
 const CAN_WRITE = document.body.dataset.canWrite === '1';
@@ -79,12 +85,23 @@ function setMsg(t,kind){const m=$('#msg');m.textContent=t||'';m.className='msg '
 
 async function loadHosts(){
   const col=$('#hosts');col.innerHTML='';col.appendChild(el('h3',null,'Hosts'));
-  let hosts;try{hosts=await jget(U('/api/hosts'));}catch(e){col.appendChild(el('div','empty','Failed to load.'));return;}
-  if(!hosts.length){col.appendChild(el('div','empty','No host has reported a config backup yet.'));return;}
+  let d;try{d=await jget(U('/api/hosts'));}catch(e){col.appendChild(el('div','empty','Failed to load.'));return;}
+  const hosts=(d&&d.hosts)||[];
+  // Why the fleet might be missing, when it is. Without this the empty state
+  // could not distinguish "not wired up" from "nothing captured yet".
+  if(d&&d.note){const n=el('div','note',d.note);col.appendChild(n);}
+  if(!hosts.length){col.appendChild(el('div','empty',
+    'No hosts. Enrolled agent hosts appear here as soon as the Controller lists them.'));return;}
   hosts.forEach(h=>{
     const b=el('button','item');
     b.appendChild(el('div','', h.label||h.host_id));
-    b.appendChild(el('div','sub', h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts)));
+    // A host with no history yet says so plainly, rather than "0 files · never",
+    // which reads like a fault. It is still clickable — the empty file list then
+    // explains that capture has not run.
+    b.appendChild(el('div','sub', h.backed_up
+      ? (h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts))
+      : 'enrolled — no backup captured yet'));
+    if(!h.backed_up) b.classList.add('pending');
     b.onclick=()=>{state.host=h.host_id;state.path=null;state.a=null;state.b=null;
       [...col.children].forEach(c=>c.classList&&c.classList.remove('sel'));b.classList.add('sel');
       loadFiles();$('#diff').innerHTML='';};

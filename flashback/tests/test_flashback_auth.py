@@ -194,3 +194,51 @@ def test_the_right_token_is_accepted(cl, monkeypatch):
                 json={"host_id": "h", "files": [{"path": "/etc/hosts", "content": "x"}]})
     assert r.status_code == 200, r.text
     assert r.json()["changed"] == 1
+
+
+# ---- enrolled hosts appear before they have backed anything up -------------
+# Listing only hosts WITH history made a correctly-wired fleet that had not
+# captured yet look identical to a broken one — both rendered "No host has
+# reported a config backup yet", which covered four different faults at once.
+def _fake_fleet(monkeypatch, hosts, note=None):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "list_hosts", lambda identity: (hosts, note))
+
+
+def test_enrolled_hosts_show_with_no_history_yet(cl, monkeypatch):
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "web1"}])
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert [h["host_id"] for h in d["hosts"]] == ["h1"]
+    h = d["hosts"][0]
+    assert h["backed_up"] is False and h["files"] == 0 and h["last_ts"] is None
+    assert h["label"] == "web1"
+
+
+def test_a_host_with_history_is_not_duplicated_by_the_import(cl, monkeypatch):
+    import backend.identity as ident
+    monkeypatch.setattr(ident, "_AGENT_TOKEN", "t")
+    cl.post("/api/agent/snapshot", headers={"Authorization": "Bearer t"},
+            json={"host_id": "h1", "files": [{"path": "/etc/hosts", "content": "x"}]})
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "web1"}, {"host_id": "h2", "label": "web2"}])
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    by_id = {h["host_id"]: h for h in d["hosts"]}
+    assert len(d["hosts"]) == 2, d["hosts"]
+    assert by_id["h1"]["backed_up"] is True and by_id["h1"]["files"] == 1
+    assert by_id["h2"]["backed_up"] is False
+    # Hosts WITH history sort first — the ones you can actually act on.
+    assert d["hosts"][0]["host_id"] == "h1"
+
+
+def test_an_unreachable_controller_costs_a_note_not_the_page(cl, monkeypatch):
+    import backend.identity as ident
+    monkeypatch.setattr(ident, "_AGENT_TOKEN", "t")
+    cl.post("/api/agent/snapshot", headers={"Authorization": "Bearer t"},
+            json={"host_id": "h1", "files": [{"path": "/etc/hosts", "content": "x"}]})
+    _fake_fleet(monkeypatch, [], note="could not reach the Controller for its host list")
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert [h["host_id"] for h in d["hosts"]] == ["h1"]     # stored history survives
+    assert "could not reach the Controller" in d["note"]
+
+
+def test_the_host_list_still_needs_an_identity(cl):
+    assert cl.get("/api/hosts").status_code == 401
