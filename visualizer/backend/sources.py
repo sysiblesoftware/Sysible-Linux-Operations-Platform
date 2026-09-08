@@ -85,7 +85,30 @@ def _get(url: str, identity, params: dict | None = None, want_json: bool = True)
         return None, "malformed JSON from upstream"
 
 
-def _ev(ts, actor, action, target="", detail="", _id=None) -> dict:
+# Every event carries WHO KIND OF ACTOR produced it, so the console can separate a
+# person's work from the controller's own background sweeps and from key-only API
+# callers. The Controller classifies its own rows and reports a `source`; the other
+# apps don't, so we infer it from the actor name. Vocabulary is shared with the
+# Controller's activity feed: "user" | "api" | "automation".
+SOURCES = ("user", "api", "automation")
+
+# Actor names that are a SERVICE, not a person. These are the identities the apps
+# stamp on their own background work (health sweeps, agent check-ins, schedulers).
+_SERVICE_ACTORS = {"", "-", "controller", "agent", "system", "systemd",
+                   "scheduler", "cron", "sysible", "slep", "flashback"}
+
+
+def _source_for(actor, given=None) -> str:
+    """Normalise an event's source. An explicit upstream value wins when it is one
+    we know; otherwise classify by actor — a named human is "user", a service
+    identity (or no actor at all) is "automation"."""
+    g = str(given or "").strip().lower()
+    if g in SOURCES:
+        return g
+    return "automation" if str(actor or "").strip().lower() in _SERVICE_ACTORS else "user"
+
+
+def _ev(ts, actor, action, target="", detail="", _id=None, source=None) -> dict:
     return {
         "id": _id,
         "ts": float(ts or 0),
@@ -93,6 +116,7 @@ def _ev(ts, actor, action, target="", detail="", _id=None) -> dict:
         "action": str(action or ""),
         "target": str(target or ""),
         "detail": str(detail or ""),
+        "source": _source_for(actor, source),
     }
 
 
@@ -109,9 +133,12 @@ def _controller(identity, limit: int) -> dict:
         errors.append(f"activity: {err}")
     else:
         for e in (data or {}).get("activity", []):
+            # The Controller classifies its own rows (person / API key / its own
+            # background sweeps), so take its word rather than guessing.
             events.append(_ev(e.get("timestamp"), e.get("username"),
                               e.get("description"), e.get("host"),
-                              e.get("command"), e.get("id")))
+                              e.get("command"), e.get("id"),
+                              source=e.get("source")))
 
     # The admin audit trail (logins, role changes…) — superuser-only upstream.
     data, err = _get(f"{base}/api/audit-log", identity, {"limit": limit})

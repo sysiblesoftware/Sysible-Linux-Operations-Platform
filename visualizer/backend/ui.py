@@ -81,6 +81,8 @@ border-radius:10px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-h
 .tab.topo{margin-left:auto}
 .bar .seg{display:flex;gap:2px}
 .bar .seg button.on{border-color:var(--accent);color:var(--text)}
+.bar .seg .n{color:var(--faint);font-size:11px;margin-left:.3em}
+td.src{color:var(--muted);white-space:nowrap}
 .bar label.chk{display:flex;align-items:center;gap:.35em;color:var(--muted);font-size:12.5px;cursor:pointer}
 .topo-card{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
 .topo-card svg{display:block;width:100%;max-height:74vh;cursor:grab;touch-action:none}
@@ -101,6 +103,12 @@ const $=s=>document.querySelector(s);
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const U = p => BASE + String(p).replace(/^\//,'');
 let APPS=[], cur=null, rows=[], limit=100, lastFailed=false;
+// Which kinds of actor to show. Every event carries a source: a person, a
+// key-only API caller, or an app's own background work. This console is the
+// forensic view, so it starts on 'all' — nothing is hidden unless asked — but
+// the chips let an operator drop the sweeps and read just what people did.
+let srcFilter='all';
+const SRC_LABEL={user:'Person',api:'API',automation:'Automation'};
 const TOPO='__topology__';
 // The Controller console is a sibling of this one behind the SLOP gateway
 // (/controller/ next to /visualizer/), so a node click can open that host's
@@ -167,20 +175,40 @@ function detailCell(text){
   }
   return td;
 }
+// Chip counts are of what the TEXT filter left, so the numbers always add up to
+// what the table would show — a chip reading 0 means "nothing of that kind here",
+// not "your search hid it".
+function srcCounts(list){
+  const c={all:list.length,user:0,api:0,automation:0};
+  list.forEach(r=>{const k=r.source||'api'; if(k in c)c[k]++;});
+  return c;
+}
+function paintChips(counts){
+  [...document.querySelectorAll('#srcf button')].forEach(b=>{
+    const k=b.dataset.src;
+    b.classList.toggle('on',k===srcFilter);
+    b.setAttribute('aria-pressed',String(k===srcFilter));
+    b.querySelector('.n').textContent=counts[k]==null?'':counts[k];
+  });
+}
 function render(){
   const q=($('#q').value||'').toLowerCase();
   const body=$('#body'); body.innerHTML='';
-  const list=rows.filter(r=>!q || (r.actor+' '+r.action+' '+r.target+' '+r.detail).toLowerCase().includes(q));
+  const matched=rows.filter(r=>!q || (r.actor+' '+r.action+' '+r.target+' '+r.detail).toLowerCase().includes(q));
+  paintChips(srcCounts(matched));
+  const list=matched.filter(r=>srcFilter==='all' || (r.source||'api')===srcFilter);
   if(!list.length){
     // Distinguish "this app has recorded nothing" from "we could not read it" —
-    // the same blank table otherwise reads as a quiet, healthy fleet.
-    const why = rows.length ? 'No rows match that filter.'
+    // the same blank table otherwise reads as a quiet, healthy fleet. And say so
+    // when it is our own source chip doing the hiding, not the upstream.
+    const why = matched.length ? 'No '+(SRC_LABEL[srcFilter]||srcFilter).toLowerCase()+' rows — try another filter.'
+              : rows.length ? 'No rows match that filter.'
               : lastFailed  ? 'Could not read this app’s activity — see the message above.'
                             : 'No activity recorded yet.';
     body.appendChild(el('div','empty', why)); return;
   }
   const t=el('table'); const thead=el('thead'); const tr=el('tr');
-  [['When','ts'],['Who','actor'],['Action','act'],['Target','tgt'],['Detail','detail']]
+  [['When','ts'],['Who','actor'],['Source','src'],['Action','act'],['Target','tgt'],['Detail','detail']]
     .forEach(([h,c])=>tr.appendChild(el('th',c,h)));
   thead.appendChild(tr); t.appendChild(thead);
   const tb=el('tbody');
@@ -188,6 +216,7 @@ function render(){
     const row=el('tr');
     row.appendChild(el('td','ts',fmt(r.ts)));
     row.appendChild(el('td','actor',r.actor||'—'));
+    row.appendChild(el('td','src',SRC_LABEL[r.source]||'API'));
     row.appendChild(el('td','act',r.action||'—'));
     row.appendChild(el('td','tgt',r.target||''));
     row.appendChild(detailCell(r.detail||''));
@@ -535,6 +564,8 @@ function topoSetLens(l){
 
 document.addEventListener('DOMContentLoaded',()=>{
   $('#q').addEventListener('input',render);
+  [...document.querySelectorAll('#srcf button')].forEach(b=>
+    b.addEventListener('click',()=>{srcFilter=b.dataset.src;render();}));
   $('#refresh').addEventListener('click',load);
   $('#logbtn').addEventListener('click',showLog);
   $('#limit').addEventListener('change',e=>{limit=parseInt(e.target.value,10)||100;load();});
@@ -570,6 +601,12 @@ def page(user: str, role: str) -> str:
         "<input type=search id=q placeholder='Filter this app&rsquo;s activity…'>"
         "<select id=limit><option value=100>100 rows</option>"
         "<option value=250>250 rows</option><option value=500>500 rows</option></select>"
+        "<span class=seg id=srcf>"
+        "<button data-src=all class=on aria-pressed=true>All <span class=n></span></button>"
+        "<button data-src=user aria-pressed=false>People <span class=n></span></button>"
+        "<button data-src=api aria-pressed=false>API <span class=n></span></button>"
+        "<button data-src=automation aria-pressed=false>Automation <span class=n></span></button>"
+        "</span>"
         "<button id=refresh>Refresh</button>"
         "<button id=logbtn>Log&hellip;</button>"
         "</div>"

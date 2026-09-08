@@ -290,3 +290,109 @@ def test_topology_reports_a_dead_inventory_as_an_error(mod, monkeypatch):
 def test_topology_requires_a_signed_in_caller(mod):
     app_mod, _ = mod
     assert TestClient(app_mod.app).get("/api/topology").status_code == 401
+
+
+# ---- event source (person / API caller / an app's own automation) ----------
+# The Controller classifies its own rows and reports a `source`; the other apps
+# do not, so Visualizer infers one from the actor. Getting this wrong in either
+# direction is bad: a person's action filed as "automation" hides real work, and
+# a background sweep filed as "user" pins the fleet's own noise on a human.
+def test_controller_source_is_taken_from_the_upstream(mod):
+    app_mod, sources = mod
+
+    def fake_get(url, identity, params=None, want_json=True):
+        if url.endswith("/api/activity"):
+            return {"activity": [
+                {"id": 1, "timestamp": 1.0, "username": "bob", "host": "web1",
+                 "description": "restarted nginx", "source": "user"},
+                {"id": 2, "timestamp": 2.0, "username": "bob", "host": "web1",
+                 "description": "ran a fleet health check", "source": "automation"},
+                {"id": 3, "timestamp": 3.0, "username": "svc", "host": "web1",
+                 "description": "ran a command", "source": "api"},
+            ]}, None
+        return None, "not permitted for role 'operator' (403)"
+
+    import backend.sources as s
+    object.__setattr__(s, "_get", fake_get)
+    c = TestClient(app_mod.app)
+    ev = c.get("/api/activity", params={"app": "controller"}, headers=hdr()).json()["events"]
+    assert {e["id"]: e["source"] for e in ev} == {1: "user", 2: "automation", 3: "api"}
+
+
+def test_an_upstream_source_we_do_not_know_falls_back_to_the_actor(mod):
+    """A future Controller inventing a new source value must not leak it into the
+    filter vocabulary — the chips would silently drop those rows."""
+    app_mod, sources = mod
+
+    def fake_get(url, identity, params=None, want_json=True):
+        if url.endswith("/api/activity"):
+            return {"activity": [
+                {"id": 1, "timestamp": 1.0, "username": "bob", "description": "x",
+                 "source": "something-new"},
+                {"id": 2, "timestamp": 2.0, "username": "controller", "description": "y",
+                 "source": None},
+            ]}, None
+        return None, "nope"
+
+    import backend.sources as s
+    object.__setattr__(s, "_get", fake_get)
+    c = TestClient(app_mod.app)
+    ev = c.get("/api/activity", params={"app": "controller"}, headers=hdr()).json()["events"]
+    got = {e["id"]: e["source"] for e in ev}
+    assert got == {1: "user", 2: "automation"}
+    assert all(e["source"] in sources.SOURCES for e in ev)
+
+
+def test_apps_without_a_source_are_classified_by_actor(mod):
+    """Connect/SLEP/Flashback record no source. A named human is a person; a
+    service identity (or an unattributed row) is the app's own automation."""
+    app_mod, sources = mod
+
+    def fake_get(url, identity, params=None, want_json=True):
+        return {"entries": [
+            {"id": 1, "ts": 1.0, "actor": "alice", "action": "opened a terminal"},
+            {"id": 2, "ts": 2.0, "actor": "system", "action": "pruned old snapshots"},
+            {"id": 3, "ts": 3.0, "actor": "", "action": "startup"},
+        ]}, None
+
+    import backend.sources as s
+    object.__setattr__(s, "_get", fake_get)
+    c = TestClient(app_mod.app)
+    ev = c.get("/api/activity", params={"app": "connect"}, headers=hdr()).json()["events"]
+    assert {e["id"]: e["source"] for e in ev} == {1: "user", 2: "automation", 3: "automation"}
+
+
+def test_every_event_carries_a_known_source(mod):
+    """Whatever an upstream returns, every row reaches the console with a source
+    the filter understands — otherwise a chip would hide rows with no way back."""
+    app_mod, sources = mod
+
+    def fake_get(url, identity, params=None, want_json=True):
+        if url.endswith("/api/runs"):
+            return {"runs": [{"id": 1, "created": 1.0, "created_by": "carol",
+                              "status": "ok", "kind": "playbook"}]}, None
+        # Every app names its rows differently; answer with all the shapes at once
+        # so one fake serves the Controller, SLEP, Connect and Flashback adapters.
+        return {"activity": [{"id": 2, "timestamp": 2.0, "username": "erin",
+                              "description": "restarted nginx"}],
+                "audit": [{"id": 3, "timestamp": 3.0, "username": "frank",
+                           "event": "login"}],
+                "entries": [{"id": 4, "ts": 4.0, "actor": "dave",
+                             "event": "login", "action": "login"}]}, None
+
+    import backend.sources as s
+    object.__setattr__(s, "_get", fake_get)
+    c = TestClient(app_mod.app)
+    for app in sources.app_keys():
+        ev = c.get("/api/activity", params={"app": app}, headers=hdr()).json()["events"]
+        assert ev, f"{app} produced no events"
+        for e in ev:
+            assert e["source"] in sources.SOURCES, (app, e)
+
+
+def test_console_offers_a_source_filter_for_every_kind(client):
+    """The chips are the whole point of the feature; if the markup loses one, the
+    rows of that kind become unreachable in the UI."""
+    html = client.get("/", headers={**hdr(), "Accept": "text/html"}).text
+    for kind in ("all", "user", "api", "automation"):
+        assert f"data-src={kind}" in html
