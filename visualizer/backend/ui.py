@@ -584,11 +584,53 @@ document.addEventListener('DOMContentLoaded',()=>{
 """
 
 
+# --------------------------------------------------------------------------- #
+# Browser-tab icon.
+#
+# The tab for this console came up BLANK next to the portal's and Connect's,
+# because nothing here ever declared an icon: with no <link rel=icon> a browser
+# falls back to /favicon.ico at the ORIGIN ROOT, which behind the SLOP gateway is
+# the portal's path, not ours. The mark is the canonical one from
+# portal/marks/visualizer.svg — but the portal is not in this image's Docker build
+# context (the Dockerfile copies only backend/), so it is embedded here rather
+# than shared by file. If the mark changes there, re-copy it here; the family
+# rules live in portal/marks/README.md.
+FAVICON_SVG = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sysible Visualizer — canonical mark. Family tile (see controller.svg); the
+  glyph is the two things this console shows: a brand-green ACTIVITY trace
+  climbing across the tile, over blue LOG bars. Deliberately not a hub-and-nodes
+  figure — that belongs to the Controller mark.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Visualizer">
+  <defs>
+    <linearGradient id="vz-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#vz-tile)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <!-- Log bars (blue), rising left to right. -->
+  <g fill="#7aa2ff" opacity="0.85">
+    <rect x="32" y="76" width="11" height="20" rx="3"/>
+    <rect x="52" y="66" width="11" height="30" rx="3"/>
+    <rect x="72" y="72" width="11" height="24" rx="3"/>
+    <rect x="92" y="56" width="11" height="40" rx="3"/>
+  </g>
+  <!-- Activity trace (green) with a marked point. -->
+  <polyline points="32,60 52,46 72,54 97,32" fill="none" stroke="#6ddb73" stroke-width="6.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="97" cy="32" r="6" fill="#6ddb73"/>
+</svg>"""
+
+
 def page(user: str, role: str) -> str:
     who = f"{escape(user)} · {escape(role)}" if user else ""
     return (
         "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<link rel=icon type='image/svg+xml' href='favicon.svg'>"
         "<title>Sysible Visualizer</title>"
         "<script>try{var t=localStorage.getItem('slop-theme');"
         "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
@@ -645,6 +687,7 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
     return (
         "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<link rel=icon type='image/svg+xml' href='favicon.svg'>"
         "<title>Sysible Visualizer &mdash; " + escape(head) + "</title>"
         "<script>try{var t=localStorage.getItem('slop-theme');"
         "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"

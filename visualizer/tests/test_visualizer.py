@@ -396,3 +396,45 @@ def test_console_offers_a_source_filter_for_every_kind(client):
     html = client.get("/", headers={**hdr(), "Accept": "text/html"}).text
     for kind in ("all", "user", "api", "automation"):
         assert f"data-src={kind}" in html
+
+
+# ---- browser-tab icon ------------------------------------------------------
+# The tab came up BLANK next to the portal's and Connect's: nothing here declared
+# an icon, so the browser fell back to /favicon.ico at the ORIGIN ROOT — which
+# behind the gateway is the portal's path, not ours.
+def test_the_console_declares_a_tab_icon(client):
+    html = client.get("/", headers={**hdr(), "Accept": "text/html"}).text
+    assert "rel=icon" in html and "favicon.svg" in html
+
+
+def test_the_icon_href_is_relative_so_it_survives_the_gateway_prefix(client):
+    """The gateway serves this app under /visualizer and STRIPS the prefix. An
+    absolute href would resolve to the portal's root and 404; a relative one
+    resolves to /visualizer/favicon.svg and reaches us."""
+    html = client.get("/", headers={**hdr(), "Accept": "text/html"}).text
+    assert "href='/favicon.svg'" not in html
+    assert "href='favicon.svg'" in html
+
+
+def test_the_refusal_page_carries_the_icon_too(client):
+    """A caller with no identity gets the refusal page — the very page where a
+    blank tab is most confusing, since that is what a wiring fault shows."""
+    r = client.get("/", headers={"Accept": "text/html"})
+    assert r.status_code == 401
+    assert "favicon.svg" in r.text
+
+
+def test_the_icon_is_served_and_is_the_visualizer_mark(client):
+    r = client.get("/favicon.svg")
+    assert r.status_code == 200
+    assert "image/svg+xml" in r.headers["content-type"]
+    # The canonical mark from portal/marks/visualizer.svg, not some other app's.
+    assert 'aria-label="Sysible Visualizer"' in r.text
+    assert "#6ddb73" in r.text                     # the family's brand-green ring
+
+
+def test_the_icon_needs_no_identity(client):
+    """It is fetched for the REFUSAL page too, by a caller who has no identity
+    yet. Gating it would leave exactly that tab blank. An icon is not a secret."""
+    r = client.get("/favicon.svg")                 # no gateway headers at all
+    assert r.status_code == 200

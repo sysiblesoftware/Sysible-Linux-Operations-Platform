@@ -164,6 +164,20 @@ def console(request: Request):
     return HTMLResponse(ui.page(who.user, who.role, who.can_write))
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon() -> Response:
+    """The tab icon. Public and unauthenticated on purpose: the browser fetches it
+    for the REFUSAL page too, which is served to callers who have no identity yet
+    — and an icon is not a secret. The pages reference it RELATIVELY, so it
+    resolves under whatever prefix the gateway serves this app at
+    (/flashback/favicon.svg) and standalone at the root alike."""
+    return Response(
+        content=ui.FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "service": "flashback"}

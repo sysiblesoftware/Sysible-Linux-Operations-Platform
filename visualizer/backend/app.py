@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from . import identity, sources, ui
@@ -123,6 +123,20 @@ def _require_identity(request: Request) -> identity.Identity:
 def console(request: Request):
     who = _require_identity(request)
     return HTMLResponse(ui.page(who.user, who.role))
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon() -> Response:
+    """The tab icon. Public and unauthenticated on purpose: the browser fetches it
+    for the REFUSAL page too, which is served to callers who have no identity yet
+    — and an icon is not a secret. The pages reference it RELATIVELY, so it
+    resolves under whatever prefix the gateway serves this app at
+    (/visualizer/favicon.svg) and standalone at the root alike."""
+    return Response(
+        content=ui.FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/health")
