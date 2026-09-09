@@ -232,6 +232,79 @@ def api_hosts(request: Request) -> dict:
     return {"hosts": hosts, "note": note, "can_request": controller.configured()}
 
 
+@app.get("/api/compare/paths")
+def api_compare_paths(request: Request) -> dict:
+    """Paths worth comparing, most-shared first."""
+    _require_identity(request)
+    return {"paths": store.paths_across_hosts()}
+
+
+@app.get("/api/compare")
+def api_compare(request: Request, path: str = Query(...),
+                baseline: str = Query(default="")) -> dict:
+    """Is this file the same across the fleet? Compared by content hash against
+    a baseline host, so it is a lookup rather than a diff of every pair."""
+    who = _require_identity(request)
+    out = store.compare_path(path, baseline or None)
+    # "No copy stored" must cover the whole FLEET, not just hosts that already
+    # have some history. A host enrolled but never captured is exactly the one an
+    # operator needs to see here, and the store cannot know about it.
+    have = {out["baseline"]["host_id"]} if out.get("baseline") else set()
+    have |= {h["host_id"] for h in out.get("hosts") or []}
+    fleet, _note = controller.list_hosts(who)
+    known = {m["host_id"] for m in out.get("missing") or []}
+    for h in fleet:
+        if h["host_id"] not in have and h["host_id"] not in known:
+            out.setdefault("missing", []).append(
+                {"host_id": h["host_id"], "label": h.get("label") or h["host_id"]})
+    out["missing"] = sorted(out.get("missing") or [],
+                            key=lambda m: (m.get("label") or "").lower())
+    return out
+
+
+@app.get("/api/compare/diff", response_class=PlainTextResponse)
+def api_compare_diff(request: Request, path: str = Query(...),
+                     a: str = Query(...), b: str = Query(...)):
+    """The diff for one pair, fetched only when an operator opens it."""
+    _require_identity(request)
+    d = store.diff_across_hosts(path, a, b)
+    if d is None:
+        raise HTTPException(status_code=404,
+                            detail="One of those hosts has no stored version of that path.")
+    return d or "(identical)"
+
+
+@app.post("/api/backup-now")
+def api_backup_now_many(request: Request, body: dict = Body(default=None)) -> dict:
+    """Back up several hosts, or the whole tracked fleet.
+
+    Best-effort per host: one unreachable host must not cost the rest, so each
+    result is reported and nothing aborts the batch."""
+    who = _require_identity(request)
+    if not who.can_write:
+        raise HTTPException(status_code=403,
+                            detail="Requesting a backup needs operator or superuser.")
+    ids = (body or {}).get("host_ids")
+    if ids == "all" or not ids:
+        fleet, _note = controller.list_hosts(who)
+        ids = [h["host_id"] for h in fleet] or [h["host_id"] for h in store.list_hosts()]
+    if not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="host_ids must be a list, or \"all\".")
+    ids = [str(i) for i in ids if str(i).strip()][:500]
+    if not ids:
+        raise HTTPException(status_code=409, detail="No hosts to back up.")
+    ok, failed = [], []
+    for hid in ids:
+        good, message = controller.request_capture(who, hid)
+        (ok if good else failed).append({"host_id": hid, "message": message})
+    store.log_audit(who.user, "request-backup",
+                    f"{len(ok)} host(s) requested, {len(failed)} failed")
+    return {"requested": len(ok), "failed": failed,
+            "message": (f"Requested on {len(ok)} host(s) — each captures on its next "
+                        "check-in (within a minute).")
+                       + (f" {len(failed)} could not be asked." if failed else "")}
+
+
 @app.post("/api/hosts/{host_id}/backup-now")
 def api_backup_now(host_id: str, request: Request) -> dict:
     """"Back up now" for one host. Write action, so operator or superuser only —

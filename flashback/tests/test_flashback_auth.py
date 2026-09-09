@@ -391,3 +391,169 @@ def test_a_backup_request_is_audited(cl, monkeypatch):
     entries = cl.get("/api/audit", headers=GOOD).json()["entries"]
     assert any(e.get("action") == "request-backup" and e.get("actor") == "admin"
                for e in entries), entries
+
+
+# ---- cross-host compare ----------------------------------------------------
+# The per-host view answers "how did this file change over time". The question an
+# operator actually arrives with after an incident is the other one: this box
+# behaves differently — is its config different from the rest? That is the
+# capability the EE panel has and this did not.
+def _snap(cl, host, files, label=None):
+    import backend.identity as ident
+    ident._AGENT_TOKEN = "t"
+    return cl.post("/api/agent/snapshot", headers={"Authorization": "Bearer t"},
+                   json={"host_id": host, "label": label or host,
+                         "files": [{"path": p, "content": c} for p, c in files]})
+
+
+def test_compare_says_when_every_host_agrees(cl, monkeypatch):
+    for h in ("h1", "h2", "h3"):
+        _snap(cl, h, [("/etc/sshd_config", "Port 22\n")])
+    d = cl.get("/api/compare", params={"path": "/etc/sshd_config"}, headers=GOOD).json()
+    assert d["distinct"] == 1                      # one content across the fleet
+    assert all(h["same"] for h in d["hosts"])
+    assert d["missing"] == []
+
+
+def test_compare_finds_the_odd_one_out(cl, monkeypatch):
+    _snap(cl, "h1", [("/etc/sshd_config", "Port 22\n")])
+    _snap(cl, "h2", [("/etc/sshd_config", "Port 22\n")])
+    _snap(cl, "h3", [("/etc/sshd_config", "Port 2222\nPermitRootLogin yes\n")])
+    d = cl.get("/api/compare", params={"path": "/etc/sshd_config", "baseline": "h1"},
+               headers=GOOD).json()
+    assert d["baseline"]["host_id"] == "h1"
+    by = {h["host_id"]: h for h in d["hosts"]}
+    assert by["h2"]["same"] is True
+    assert by["h3"]["same"] is False
+    assert d["distinct"] == 2
+
+
+def test_compare_lists_hosts_that_have_no_copy_at_all(cl, monkeypatch):
+    """"Absent" and "identical" are completely different findings, and a compare
+    that silently omitted the hosts without the file would read as agreement."""
+    _snap(cl, "h1", [("/etc/nginx.conf", "a\n")])
+    _snap(cl, "h2", [("/etc/other", "b\n")])       # h2 exists but has no nginx.conf
+    d = cl.get("/api/compare", params={"path": "/etc/nginx.conf"}, headers=GOOD).json()
+    assert [m["host_id"] for m in d["missing"]] == ["h2"]
+
+
+def test_compare_uses_the_NEWEST_version_on_each_host(cl, monkeypatch):
+    """Comparing stale versions would report a difference that no longer exists."""
+    _snap(cl, "h1", [("/etc/f", "old\n")])
+    _snap(cl, "h2", [("/etc/f", "new\n")])
+    _snap(cl, "h1", [("/etc/f", "new\n")])         # h1 catches up
+    d = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
+    assert d["distinct"] == 1, d
+    assert all(h["same"] for h in d["hosts"])
+
+
+def test_the_compare_diff_is_for_the_pair_asked_for(cl, monkeypatch):
+    _snap(cl, "h1", [("/etc/f", "Port 22\n")])
+    _snap(cl, "h2", [("/etc/f", "Port 2222\n")])
+    r = cl.get("/api/compare/diff", params={"path": "/etc/f", "a": "h1", "b": "h2"},
+               headers=GOOD)
+    assert r.status_code == 200
+    assert "-Port 22" in r.text and "+Port 2222" in r.text
+    assert "h1:/etc/f" in r.text and "h2:/etc/f" in r.text
+
+
+def test_a_diff_against_a_host_with_no_such_file_is_a_404_not_invented(cl, monkeypatch):
+    _snap(cl, "h1", [("/etc/f", "a\n")])
+    _snap(cl, "h2", [("/etc/other", "b\n")])
+    r = cl.get("/api/compare/diff", params={"path": "/etc/f", "a": "h1", "b": "h2"},
+               headers=GOOD)
+    assert r.status_code == 404
+
+
+def test_the_path_picker_puts_the_most_shared_paths_first(cl, monkeypatch):
+    for h in ("h1", "h2", "h3"):
+        _snap(cl, h, [("/etc/everywhere", "x\n")])
+    _snap(cl, "h1", [("/etc/only-here", "y\n")])
+    d = cl.get("/api/compare/paths", headers=GOOD).json()["paths"]
+    assert d[0]["path"] == "/etc/everywhere" and d[0]["hosts"] == 3
+    assert any(p["path"] == "/etc/only-here" and p["hosts"] == 1 for p in d)
+
+
+def test_compare_needs_an_identity(cl):
+    assert cl.get("/api/compare", params={"path": "/etc/f"}).status_code == 401
+    assert cl.get("/api/compare/paths").status_code == 401
+
+
+# ---- fleet-wide backup -----------------------------------------------------
+def test_backing_up_all_hosts_asks_each_one(cl, monkeypatch):
+    import backend.controller as ctrl
+    asked = []
+    monkeypatch.setattr(ctrl, "list_hosts", lambda i: (
+        [{"host_id": "h1", "label": "a"}, {"host_id": "h2", "label": "b"}], None))
+    monkeypatch.setattr(ctrl, "request_capture",
+                        lambda i, h: (asked.append(h) or (True, "ok")))
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": "all"})
+    assert r.status_code == 200, r.text
+    assert sorted(asked) == ["h1", "h2"]
+    assert r.json()["requested"] == 2
+
+
+def test_one_unreachable_host_does_not_cost_the_batch(cl, monkeypatch):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture",
+                        lambda i, h: (False, "unreachable") if h == "bad" else (True, "ok"))
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": ["good", "bad"]})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["requested"] == 1
+    assert [f["host_id"] for f in d["failed"]] == ["bad"]
+    assert "1 could not be asked" in d["message"]
+
+
+def test_a_fleet_backup_is_a_write(cl, monkeypatch):
+    r = cl.post("/api/backup-now", headers={**GOOD, "X-Sysible-Role": "auditor"},
+                json={"host_ids": ["h1"]})
+    assert r.status_code == 403
+
+
+def test_the_default_baseline_is_the_majority_not_the_first_by_name(cl, monkeypatch):
+    """Found in a browser: picking the alphabetically-first host made the single
+    ODD host the reference whenever its label sorted first, so the two hosts that
+    AGREED were reported as "differing" and the diff read inverted. The majority
+    is what an operator means by "the rest of the fleet"."""
+    _snap(cl, "h1", [("/etc/f", "Port 22\n")], label="web1")
+    _snap(cl, "h2", [("/etc/f", "Port 22\n")], label="web2")
+    _snap(cl, "h3", [("/etc/f", "Port 2222\n")], label="db1")   # sorts FIRST by label
+    d = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
+    assert d["baseline"]["host_id"] in ("h1", "h2"), d["baseline"]
+    by = {h["host_id"]: h["same"] for h in d["hosts"]}
+    assert by["h3"] is False
+    assert all(v for k, v in by.items() if k != "h3")
+
+
+def test_the_majority_baseline_is_deterministic_on_a_tie(cl, monkeypatch):
+    """Two contents, one host each: the choice must still be stable, or the page
+    would flip between reference hosts on every reload."""
+    _snap(cl, "h1", [("/etc/f", "a\n")], label="web1")
+    _snap(cl, "h2", [("/etc/f", "b\n")], label="db1")
+    first = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
+    again = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
+    assert first["baseline"]["host_id"] == again["baseline"]["host_id"] == "h2"   # 'db1' < 'web1'
+
+
+def test_an_explicit_baseline_still_wins(cl, monkeypatch):
+    """"Differs from prod" and "differs from this one box" are different
+    questions, so the operator can override the majority."""
+    _snap(cl, "h1", [("/etc/f", "Port 22\n")], label="web1")
+    _snap(cl, "h2", [("/etc/f", "Port 22\n")], label="web2")
+    _snap(cl, "h3", [("/etc/f", "Port 2222\n")], label="db1")
+    d = cl.get("/api/compare", params={"path": "/etc/f", "baseline": "h3"},
+               headers=GOOD).json()
+    assert d["baseline"]["host_id"] == "h3"
+    assert not any(h["same"] for h in d["hosts"])
+
+
+def test_a_host_enrolled_but_never_captured_is_listed_as_having_no_copy(cl, monkeypatch):
+    """Also found in a browser. The store only knows hosts that HAVE history, so
+    a host enrolled and never captured — exactly the one worth noticing — was
+    silently absent from the comparison instead of flagged."""
+    _snap(cl, "h1", [("/etc/f", "a\n")], label="web1")
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "web1"},
+                              {"host_id": "h9", "label": "new1"}])
+    d = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
+    assert [m["host_id"] for m in d["missing"]] == ["h9"]

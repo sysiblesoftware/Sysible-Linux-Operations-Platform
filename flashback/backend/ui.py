@@ -69,6 +69,8 @@ _CSS += """
 """
 
 _CSS += """
+.hostbar{display:flex;flex-wrap:wrap;gap:.3rem;margin:.2rem .5rem .5rem}
+.cmphead{margin:.3rem .5rem;font-weight:600}
 .envhdr{margin:.6rem .5rem .2rem;font-size:11px;letter-spacing:.06em;
   text-transform:uppercase;color:var(--faint)}
 .hostwrap{display:block}
@@ -96,6 +98,31 @@ function setMsg(t,kind){const m=$('#msg');m.textContent=t||'';m.className='msg '
 
 async function loadHosts(){
   const col=$('#hosts');col.innerHTML='';col.appendChild(el('h3',null,'Hosts'));
+  // Fleet-wide controls. "Compare files" answers the question an operator
+  // usually arrives with after an incident — is this box's config different
+  // from the rest? — which a per-host history cannot.
+  const bar=el('div','hostbar');
+  const cmp=el('button','btn ghost sm','Compare files across hosts');
+  cmp.onclick=loadComparePaths;
+  bar.appendChild(cmp);
+  if(CAN_WRITE){
+    const all=el('button','btn ghost sm','Back up all');
+    all.onclick=function(){
+      if(!window.confirm('Ask every tracked host to back up its config now?'))return;
+      all.disabled=true;
+      fetch(U('/api/backup-now'),{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({host_ids:'all'})})
+        .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+        .then(function(res){
+          setMsg(res.ok?(res.j.message||'Requested.'):(res.j.detail||'Failed.'),
+                 res.ok?'':'err');
+          all.disabled=false;
+        })
+        .catch(function(e){setMsg(String(e.message||e),'err');all.disabled=false;});
+    };
+    bar.appendChild(all);
+  }
+  col.appendChild(bar);
   let d;try{d=await jget(U('/api/hosts'));}catch(e){col.appendChild(el('div','empty','Failed to load.'));return;}
   const hosts=(d&&d.hosts)||[];
   // Why the fleet might be missing, when it is. Without this the empty state
@@ -235,6 +262,99 @@ async function doRestore(sha){
   }catch(e){setMsg('Restore failed.','err');}
 }
 loadHosts();
+
+// ---- compare across hosts --------------------------------------------------
+// Reuses the three right-hand columns: paths -> hosts -> diff, the same shape as
+// files -> versions -> diff, so nothing about the layout has to move.
+async function loadComparePaths(){
+  const col=$('#files'); col.innerHTML='';
+  col.appendChild(el('h3',null,'Compare \u2014 pick a file'));
+  $('#versions').innerHTML=''; $('#diff').innerHTML='';
+  let d;
+  try{ d=await jget(U('/api/compare/paths')); }
+  catch(e){ col.appendChild(el('div','empty','Failed to load.')); return; }
+  const paths=(d&&d.paths)||[];
+  if(!paths.length){
+    col.appendChild(el('div','empty','Nothing captured yet, so there is nothing to compare.'));
+    return;
+  }
+  paths.forEach(function(pp){
+    const b=el('button','item');
+    b.appendChild(el('div','',pp.path));
+    b.appendChild(el('div','sub', pp.hosts+' host'+(pp.hosts===1?'':'s')));
+    b.onclick=function(){
+      [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
+      b.classList.add('sel');
+      loadCompare(pp.path);
+    };
+    col.appendChild(b);
+  });
+}
+
+async function loadCompare(path, baseline){
+  const col=$('#versions'); col.innerHTML='';
+  col.appendChild(el('h3',null,'Across hosts'));
+  $('#diff').innerHTML='';
+  let d;
+  try{
+    d=await jget(U('/api/compare?path='+encodeURIComponent(path)
+      +(baseline?('&baseline='+encodeURIComponent(baseline)):'')));
+  }catch(e){ col.appendChild(el('div','empty','Failed to load.')); return; }
+  if(!d.baseline){
+    col.appendChild(el('div','empty','No host has a stored copy of that file.')); return;
+  }
+  // The headline: one content means the fleet agrees; more is the number of
+  // genuinely different files out there, which is what to investigate.
+  const head=el('div','cmphead');
+  const n=d.distinct;
+  const s=el('span',null, n===1 ? 'All hosts agree'
+                               : (n+' different versions across the fleet'));
+  s.style.color = n===1 ? '#4ec07a' : '#e0a83a';
+  head.appendChild(s);
+  col.appendChild(head);
+  col.appendChild(el('div','sub','baseline: '+(d.baseline.label||d.baseline.host_id)));
+
+  d.hosts.forEach(function(h){
+    const b=el('button','item');
+    b.appendChild(el('div','', h.label||h.host_id));
+    const tag=el('div','sub', h.same?'identical to baseline'
+                                    :'DIFFERS \u2014 click to see the diff');
+    tag.style.color = h.same ? '#4ec07a' : '#e0a83a';
+    b.appendChild(tag);
+    b.onclick=function(){
+      [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
+      b.classList.add('sel');
+      showCompareDiff(path, d.baseline.host_id, h.host_id);
+    };
+    col.appendChild(b);
+    // Any host can become the baseline: "differs from prod" and "differs from
+    // this one box" are different questions.
+    if(!h.same){
+      const mk=el('button','btn ghost sm','Use as baseline');
+      mk.className='backupnow';
+      mk.onclick=function(ev){ev.stopPropagation();loadCompare(path,h.host_id);};
+      col.appendChild(mk);
+    }
+  });
+  // Absent is not the same finding as identical, so it is listed separately.
+  if((d.missing||[]).length){
+    col.appendChild(el('div','envhdr','No copy stored ('+d.missing.length+')'));
+    d.missing.forEach(function(m){
+      col.appendChild(el('div','sub faint','  '+(m.label||m.host_id)));
+    });
+  }
+}
+
+async function showCompareDiff(path, a, b){
+  const pane=$('#diff'); pane.innerHTML='';
+  pane.appendChild(el('h3',null,'Diff'));
+  const r=await fetch(U('/api/compare/diff?path='+encodeURIComponent(path)
+    +'&a='+encodeURIComponent(a)+'&b='+encodeURIComponent(b)),{cache:'no-store'});
+  if(!r.ok){ pane.appendChild(el('div','empty','No diff available.')); return; }
+  const txt=await r.text();
+  pane.appendChild(el('pre','diff', txt || '(identical)'));
+}
+
 """
 
 

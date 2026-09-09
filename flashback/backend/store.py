@@ -312,3 +312,109 @@ def recent_restores(host_id: str, limit: int = 50) -> list[dict]:
             "FROM restores WHERE host_id=? ORDER BY id DESC LIMIT ?",
             (host_id, limit)).fetchall()
         return [dict(r) for r in rows]
+
+# --------------------------------------------------------------------------- #
+# Cross-host compare — "is this file the same everywhere?"
+#
+# The per-host view answers "how did this file change over time". The question an
+# operator actually arrives with after an incident is the other one: this box
+# behaves differently, is its config different from the rest? That needs the
+# NEWEST stored version of one path on every host that has it, compared against a
+# chosen baseline. It is the capability the EE panel has and this did not.
+# --------------------------------------------------------------------------- #
+def paths_across_hosts(limit: int = 500) -> list[dict]:
+    """Every tracked path, with how many hosts have it — the picker for a
+    comparison. Ordered by the paths present on the most hosts, since those are
+    the ones worth comparing."""
+    with _LOCK, _db() as c:
+        rows = c.execute(
+            "SELECT path, COUNT(DISTINCT host_id) AS hosts FROM versions "
+            "GROUP BY path ORDER BY hosts DESC, path COLLATE NOCASE LIMIT ?",
+            (max(1, min(int(limit), 2000)),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def newest_version(host_id: str, path: str) -> dict | None:
+    with _LOCK, _db() as c:
+        r = c.execute(
+            "SELECT sha256, size, captured_at FROM versions "
+            "WHERE host_id=? AND path=? ORDER BY captured_at DESC, id DESC LIMIT 1",
+            (host_id, path)).fetchone()
+        return dict(r) if r else None
+
+
+def compare_path(path: str, baseline: str | None = None) -> dict:
+    """Compare the newest stored version of `path` across every host that has it.
+
+    Returns the baseline plus one row per other host saying whether it matches,
+    differs, or has no copy at all. Comparison is by CONTENT HASH, so it is a
+    cheap lookup rather than a diff of every pair — the diff is fetched only for
+    the host an operator actually opens.
+    """
+    with _LOCK, _db() as c:
+        rows = c.execute(
+            """SELECT v.host_id, h.label, v.sha256, v.size, v.captured_at
+                 FROM versions v LEFT JOIN hosts h ON h.host_id = v.host_id
+                WHERE v.path = ?
+                  AND v.id = (SELECT id FROM versions v2
+                               WHERE v2.host_id = v.host_id AND v2.path = v.path
+                               ORDER BY v2.captured_at DESC, v2.id DESC LIMIT 1)
+                ORDER BY h.label COLLATE NOCASE""", (path,)).fetchall()
+        newest = [dict(r) for r in rows]
+        # Hosts Flashback knows about that have NO version of this path at all.
+        known = c.execute("SELECT host_id, label FROM hosts").fetchall()
+    have = {r["host_id"] for r in newest}
+    if not newest:
+        return {"path": path, "baseline": None, "hosts": [], "missing": [],
+                "distinct": 0}
+    # DEFAULT BASELINE = the MAJORITY content, not the alphabetically-first host.
+    # Picking by name made the single odd host the reference whenever its label
+    # sorted first, so the hosts that agreed were the ones reported as
+    # "differing" — backwards, and the diff read inverted too. The majority is
+    # what an operator means by "the rest of the fleet"; ties break by label so
+    # the choice is still deterministic.
+    if baseline:
+        base = next((r for r in newest if r["host_id"] == baseline), None)
+    else:
+        base = None
+    if base is None:
+        counts: dict = {}
+        for r in newest:
+            counts[r["sha256"]] = counts.get(r["sha256"], 0) + 1
+        top = max(counts.values())
+        base = min((r for r in newest if counts[r["sha256"]] == top),
+                   key=lambda r: ((r["label"] or r["host_id"]).lower()))
+    out = []
+    for r in newest:
+        if r["host_id"] == base["host_id"]:
+            continue
+        out.append({**r, "same": r["sha256"] == base["sha256"]})
+    missing = [{"host_id": k["host_id"], "label": k["label"]}
+               for k in known if k["host_id"] not in have]
+    return {
+        "path": path,
+        "baseline": base,
+        "hosts": out,
+        "missing": sorted(missing, key=lambda m: (m["label"] or "").lower()),
+        # How many genuinely different contents exist across the fleet. 1 means
+        # every host agrees; anything higher is the number worth investigating.
+        "distinct": len({r["sha256"] for r in newest}),
+    }
+
+
+def diff_across_hosts(path: str, host_a: str, host_b: str) -> str | None:
+    """Unified diff of the newest version of one path on two different hosts.
+    None when either host has no stored version of it — never invents content."""
+    a = newest_version(host_a, path)
+    b = newest_version(host_b, path)
+    if not a or not b:
+        return None
+    with _LOCK, _db() as c:
+        ba = _version_blob(c, host_a, path, a["sha256"])
+        bb = _version_blob(c, host_b, path, b["sha256"])
+    if ba is None or bb is None:
+        return None
+    return "".join(difflib.unified_diff(
+        ba.decode("utf-8", "replace").splitlines(keepends=True),
+        bb.decode("utf-8", "replace").splitlines(keepends=True),
+        fromfile=f"{host_a}:{path}", tofile=f"{host_b}:{path}"))
