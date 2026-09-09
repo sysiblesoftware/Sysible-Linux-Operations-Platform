@@ -68,6 +68,17 @@ _CSS += """
   color:var(--muted);font-size:12px}
 """
 
+_CSS += """
+.envhdr{margin:.6rem .5rem .2rem;font-size:11px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--faint)}
+.hostwrap{display:block}
+.backupnow{margin:.1rem 0 .5rem .5rem;font-size:11.5px}
+.item.pending .sub{color:var(--faint);font-style:italic}
+.note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
+  color:var(--muted);font-size:12px}
+.faint{color:var(--faint)}
+"""
+
 _JS = r"""
 const $=s=>document.querySelector(s);
 const CAN_WRITE = document.body.dataset.canWrite === '1';
@@ -89,24 +100,65 @@ async function loadHosts(){
   const hosts=(d&&d.hosts)||[];
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
-  if(d&&d.note){const n=el('div','note',d.note);col.appendChild(n);}
+  if(d&&d.note){col.appendChild(el('div','note',d.note));}
   if(!hosts.length){col.appendChild(el('div','empty',
     'No hosts. Enrolled agent hosts appear here as soon as the Controller lists them.'));return;}
-  hosts.forEach(h=>{
-    const b=el('button','item');
-    b.appendChild(el('div','', h.label||h.host_id));
-    // A host with no history yet says so plainly, rather than "0 files · never",
-    // which reads like a fault. It is still clickable — the empty file list then
-    // explains that capture has not run.
-    b.appendChild(el('div','sub', h.backed_up
-      ? (h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts))
-      : 'enrolled — no backup captured yet'));
-    if(!h.backed_up) b.classList.add('pending');
-    b.onclick=()=>{state.host=h.host_id;state.path=null;state.a=null;state.b=null;
-      [...col.children].forEach(c=>c.classList&&c.classList.remove('sel'));b.classList.add('sel');
-      loadFiles();$('#diff').innerHTML='';};
-    col.appendChild(b);
+  // Grouped by ENVIRONMENT, the way the EE panel groups them. A flat list of
+  // opaque host ids tells an operator nothing about which box they are on.
+  const groups={};
+  hosts.forEach(function(h){
+    const e=h.environment||'Unassigned';
+    (groups[e]=groups[e]||[]).push(h);
   });
+  Object.keys(groups).sort(function(a,b){
+    if(a==='Unassigned')return 1; if(b==='Unassigned')return -1;
+    return a.toLowerCase()<b.toLowerCase()?-1:1;
+  }).forEach(function(envName){
+    col.appendChild(el('div','envhdr', envName+'  ('+groups[envName].length+')'));
+    groups[envName].forEach(function(h){ col.appendChild(hostRow(h,d,col)); });
+  });
+}
+function hostRow(h,d,col){
+  const wrap=el('div','hostwrap');
+  const b=el('button','item');
+  b.appendChild(el('div','', h.label||h.host_id));
+  if(h.address) b.appendChild(el('div','sub faint', h.address));
+  // A host with no history yet says so plainly, rather than "0 files · never",
+  // which reads like a fault. It is still clickable — the empty file list then
+  // explains that capture has not run.
+  b.appendChild(el('div','sub', h.backed_up
+    ? (h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts))
+    : 'enrolled — no backup captured yet'));
+  if(!h.backed_up) b.classList.add('pending');
+  b.onclick=function(){
+    state.host=h.host_id;state.path=null;state.a=null;state.b=null;
+    [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
+    b.classList.add('sel');
+    loadFiles();$('#diff').innerHTML='';
+  };
+  wrap.appendChild(b);
+  // Back up now. An agent is outbound-only, so nothing can reach in — this is a
+  // REQUEST the host picks up on its next check-in, and the reply says so rather
+  // than implying the snapshot already happened.
+  if(d&&d.can_request&&CAN_WRITE){
+    const nb=el('button','btn ghost sm','Back up now');
+    nb.className='backupnow';
+    nb.onclick=function(ev){
+      ev.stopPropagation(); nb.disabled=true;
+      fetch(U('/api/hosts/'+encodeURIComponent(h.host_id)+'/backup-now'),{method:'POST'})
+        .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+        .then(function(res){
+          setMsg(res.ok ? (res.j.message||'Requested.')
+                        : (res.j.detail||'Could not request a backup.'),
+                 res.ok?'':'err');
+          nb.disabled=false;
+          if(res.ok) setTimeout(loadHosts, 65000);   // it lands within a minute
+        })
+        .catch(function(e){ setMsg(String(e.message||e),'err'); nb.disabled=false; });
+    };
+    wrap.appendChild(nb);
+  }
+  return wrap;
 }
 async function loadFiles(){
   const col=$('#files');col.innerHTML='';col.appendChild(el('h3',null,'Files'));

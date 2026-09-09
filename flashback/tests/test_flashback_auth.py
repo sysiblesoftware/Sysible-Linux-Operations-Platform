@@ -326,3 +326,68 @@ def test_every_third_party_import_is_declared_in_requirements():
                     continue
                 undeclared.setdefault(n, set()).add(src.name)
     assert not undeclared, f"imported but not in requirements.txt: {undeclared}"
+
+
+# ---- "Back up now" and environment grouping --------------------------------
+# The console showed neither: no way to trigger a capture, and a flat list of
+# opaque host ids with no indication of which environment a box was in. Both are
+# things the EE D3lorean panel has.
+def test_the_host_list_carries_the_environment(cl, monkeypatch):
+    _fake_fleet(monkeypatch, [
+        {"host_id": "h1", "label": "web1", "environment": "prod", "address": "10.0.0.1"},
+        {"host_id": "h2", "label": "db1", "environment": "", "address": "10.0.0.2"},
+    ])
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    by = {h["host_id"]: h for h in d["hosts"]}
+    assert by["h1"]["environment"] == "prod" and by["h1"]["address"] == "10.0.0.1"
+    assert by["h2"]["environment"] == ""          # the console groups these as Unassigned
+    assert d["can_request"] is True
+
+
+def test_a_backup_request_reaches_the_controller(cl, monkeypatch):
+    import backend.controller as ctrl
+    seen = {}
+
+    def fake(identity, host_id):
+        seen["host"] = host_id
+        seen["user"] = identity.user
+        return True, "Requested — the host captures on its next check-in."
+    monkeypatch.setattr(ctrl, "request_capture", fake)
+    r = cl.post("/api/hosts/h1/backup-now", headers=GOOD)
+    assert r.status_code == 200, r.text
+    assert seen == {"host": "h1", "user": "admin"}
+    # The wording must not imply the snapshot already happened: an agent is
+    # outbound-only, so this is a request it picks up on its next poll.
+    assert "next check-in" in r.json()["message"]
+
+
+def test_a_backup_request_is_a_write_and_an_auditor_cannot_make_one(cl, monkeypatch):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture", lambda i, h: (True, "ok"))
+    r = cl.post("/api/hosts/h1/backup-now",
+                headers={**GOOD, "X-Sysible-Role": "auditor"})
+    assert r.status_code == 403
+    assert "operator or superuser" in r.json()["detail"]
+
+
+def test_a_backup_request_needs_an_identity(cl):
+    assert cl.post("/api/hosts/h1/backup-now").status_code == 401
+
+
+def test_a_failed_backup_request_is_reported_not_swallowed(cl, monkeypatch):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture",
+                        lambda i, h: (False, "could not reach the Controller (ConnectError)"))
+    r = cl.post("/api/hosts/h1/backup-now", headers=GOOD)
+    assert r.status_code == 502
+    assert "ConnectError" in r.json()["detail"]
+
+
+def test_a_backup_request_is_audited(cl, monkeypatch):
+    """It causes a change on a host, so it belongs in the trail."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture", lambda i, h: (True, "ok"))
+    cl.post("/api/hosts/h1/backup-now", headers=GOOD)
+    entries = cl.get("/api/audit", headers=GOOD).json()["entries"]
+    assert any(e.get("action") == "request-backup" and e.get("actor") == "admin"
+               for e in entries), entries

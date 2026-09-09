@@ -217,9 +217,34 @@ def api_hosts(request: Request) -> dict:
         if h["host_id"] in known:
             continue
         hosts.append({"host_id": h["host_id"], "label": h["label"], "last_ts": None,
-                      "files": 0, "versions": 0, "backed_up": False})
+                      "files": 0, "versions": 0, "backed_up": False,
+                      "environment": h.get("environment") or "",
+                      "address": h.get("address") or ""})
+    # Environment for hosts that DO have history too, so the grouping is complete.
+    envs = {h["host_id"]: (h.get("environment") or "") for h in fleet}
+    addrs = {h["host_id"]: (h.get("address") or "") for h in fleet}
+    for h in hosts:
+        h.setdefault("environment", "")
+        h.setdefault("address", "")
+        h["environment"] = h["environment"] or envs.get(h["host_id"], "")
+        h["address"] = h["address"] or addrs.get(h["host_id"], "")
     hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
-    return {"hosts": hosts, "note": note}
+    return {"hosts": hosts, "note": note, "can_request": controller.configured()}
+
+
+@app.post("/api/hosts/{host_id}/backup-now")
+def api_backup_now(host_id: str, request: Request) -> dict:
+    """"Back up now" for one host. Write action, so operator or superuser only —
+    the same gate as queueing a restore."""
+    who = _require_identity(request)
+    if not who.can_write:
+        raise HTTPException(status_code=403,
+                            detail="Requesting a backup needs operator or superuser.")
+    ok, message = controller.request_capture(who, host_id)
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    store.log_audit(who.user, "request-backup", host_id)
+    return {"requested": True, "message": message}
 
 
 @app.get("/api/hosts/{host_id}/files")

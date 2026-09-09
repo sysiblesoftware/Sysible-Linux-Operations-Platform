@@ -93,5 +93,37 @@ def list_hosts(identity) -> tuple[list, str | None]:
             continue
         hid = str(h.get("id") or "").strip()
         if hid:
-            out.append({"host_id": hid, "label": str(h.get("label") or hid)})
+            # Keep the environment and address: the console groups by environment
+            # the way the EE panel does, and a bare host id tells an operator
+            # nothing about which box it is.
+            out.append({"host_id": hid, "label": str(h.get("label") or hid),
+                        "environment": str(h.get("environment") or ""),
+                        "address": str(h.get("address") or "")})
     return out, None
+
+
+def request_capture(identity, host_id: str) -> tuple[bool, str]:
+    """"Back up now": ask the Controller to have this host snapshot its config.
+
+    Agents are outbound-only, so nothing can reach in — the Controller parks the
+    request and hands it over on the host's next config-backup poll. Same identity
+    rule as the host list: the caller's own, so the Controller applies its own
+    RBAC rather than trusting us."""
+    if not configured():
+        return False, unavailable_reason() or "no Controller is configured"
+    headers = {
+        "Accept": "application/json",
+        "X-Sysible-Auth": _SSO_SECRET,
+        "X-Sysible-User": identity.user,
+        "X-Sysible-Role": identity.role,
+    }
+    try:
+        with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
+            r = c.post(f"{_url()}/api/host/{host_id}/backup-now", headers=headers)
+    except Exception as e:
+        return False, f"could not reach the Controller ({type(e).__name__})"
+    if r.status_code in (401, 403):
+        return False, f"the Controller did not permit this for role '{identity.role}'"
+    if r.status_code >= 400:
+        return False, f"the Controller returned HTTP {r.status_code}"
+    return True, "Requested — the host captures on its next check-in (within a minute)."
