@@ -74,6 +74,15 @@ def apply(key: str, user: str, role: str):
     return _call(f"/api/update/{key}", user, role, method="POST")
 
 
+def action(key: str, act: str, user: str, role: str):
+    """Restart / stop / start / recreate one product's containers.
+
+    Both the product key and the action are re-validated by the updater against
+    its own fixed tables; this side never builds a path, a command or an argv
+    from either. Same reason the update call passes only a key."""
+    return _call(f"/api/action/{key}/{act}", user, role, method="POST")
+
+
 def pending(apps) -> int:
     """How many products have an update waiting — what the header pill counts."""
     return sum(1 for a in apps or [] if a.get("available"))

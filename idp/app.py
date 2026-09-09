@@ -1388,6 +1388,64 @@ _UPDATES_JS = r"""
       td.appendChild(document.createElement('br'));
       td.appendChild(el('span','sub',a.reason));
     }
+    paintServices(a);
+    paintActions(a);
+  }
+  // What is actually RUNNING. "Up to date" said nothing about whether the thing
+  // was up, which is how a stack could sit dead behind a green row.
+  function paintServices(a){
+    var box=document.getElementById('s-'+a.key); if(!box)return;
+    box.innerHTML='';
+    var svcs=a.services||[];
+    if(!svcs.length){ return; }
+    var bad=svcs.filter(function(s){return s.state!=='running';});
+    var txt=svcs.length+' service'+(svcs.length===1?'':'s')+': ';
+    var s1=el('span',null,txt);
+    box.appendChild(s1);
+    var lbl=el('span',null, bad.length ? (bad.length+' not running') : 'all running');
+    lbl.style.color = bad.length ? '#e0a83a' : '#4ec07a';
+    box.appendChild(lbl);
+    if(bad.length){
+      box.appendChild(el('span','sub',' \u2014 '+bad.map(function(s){
+        return s.service+' ('+(s.state||'?')+')';}).join(', ')));
+    }
+  }
+  // Buttons come from the API's own allowlist, so a refused action can never be
+  // offered — the rule and the button cannot disagree.
+  function paintActions(a){
+    var box=document.getElementById('a-'+a.key); if(!box)return;
+    box.innerHTML='';
+    if(!a.installed) return;
+    (a.actions||[]).forEach(function(act){
+      var b=el('button','btn ghost sm', act.charAt(0).toUpperCase()+act.slice(1));
+      b.style.marginLeft='.4rem';
+      b.onclick=function(){ runAction(a.key, act, b); };
+      box.appendChild(b);
+    });
+  }
+  function runAction(key, act, b){
+    // Stop and restart interrupt service; make that explicit before doing it.
+    var warn = (act==='stop')
+      ? 'Stop '+key+"? Its services will be DOWN until you start them again."
+      : (act==='restart'||act==='recreate')
+        ? (act==='restart'?'Restart ':'Recreate ')+key+'? Brief downtime while it comes back.'
+        : null;
+    if(warn && !window.confirm(warn)) return;
+    b.disabled=true;
+    var body=new URLSearchParams();
+    body.set('csrf', document.getElementById('csrf').value);
+    body.set('app', key); body.set('action', act);
+    fetch('/admin/updates/action',{method:'POST',body:body,
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+      .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+      .then(function(res){
+        if(!res.ok){ pushToast(res.d.detail||'Refused',
+          {title:'Software & services',kind:'warn',ttl:0}); b.disabled=false; return; }
+        pushToast(res.d.message||(act+' '+key),{title:'Software & services'});
+        load();
+      })
+      .catch(function(e){ pushToast(String(e.message||e),
+        {title:'Software & services',kind:'error',ttl:0}); b.disabled=false; });
   }
   function paint(d){
     (d.apps||[]).forEach(fmtRow);
@@ -1402,7 +1460,8 @@ _UPDATES_JS = r"""
     if(!box||!j)return;
     box.hidden=false;
     document.getElementById('jobtitle').textContent =
-      'Update of '+j.app+' \u2014 '+j.state;
+      (j.action ? (j.action.charAt(0).toUpperCase()+j.action.slice(1)+' of ')
+                : 'Update of ')+j.app+' \u2014 '+j.state;
     box.textContent=(j.log||[]).join('\n');
     box.scrollTop=box.scrollHeight;
   }
@@ -1480,19 +1539,29 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
                      ("slop", "Sysible Linux Operations Platform (gateway, sign-in, "
                               "Flashback, Visualizer)")):
         rows.append(
-            f"<tr class=upd-row><td><b>{escape(lbl)}</b></td>"
+            f"<tr class=upd-row><td><b>{escape(lbl)}</b>"
+            f"<div id='s-{key}' class=sub></div></td>"
             f"<td id='u-{key}' class=sub>checking&hellip;</td>"
-            f"<td style='text-align:right'>"
+            f"<td style='text-align:right;white-space:nowrap'>"
             f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>"
-            f"Update now</button></td></tr>")
-    table = ("<table><tr><th>Product</th><th>Status</th><th></th></tr>"
+            f"Update now</button>"
+            f"<span id='a-{key}'></span></td></tr>")
+    table = ("<table><tr><th>Product</th><th>Update status</th>"
+             "<th style='text-align:right'>Controls</th></tr>"
              + "".join(rows) + "</table>")
 
     note = (
         "<p class=sub>Each product is a git checkout on this host. "
         "&ldquo;Update now&rdquo; pulls it and rebuilds its containers &mdash; the same thing "
         "<code>sysible_ctl &lt;product&gt; update</code> does on the command line. "
-        "A checkout with local changes is reported and refused rather than overwritten.</p>")
+        "A checkout with local changes is reported and refused rather than overwritten.</p>"
+        "<p class=sub>The controls restart, stop, start or recreate a product's "
+        "containers &mdash; what <code>sysible_ctl &lt;product&gt; restart</code> does, "
+        "without needing a shell on the host. Recreate applies a compose or "
+        "environment change using the images already built, so it is much quicker "
+        "than a full update. SLOP cannot be STOPPED from here: that would take down "
+        "the gateway, this page and the updater together, leaving no way back except "
+        "the host &mdash; restart it instead.</p>")
     if not updates.configured():
         note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
                  "updates can only be applied on the host with "
@@ -1500,7 +1569,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
-        f"<div class=top><h1>Administration · Software updates</h1>"
+        f"<div class=top><h1>Administration · Software &amp; services</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
         f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/settings'>Configuration</a> · "
         "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
@@ -1513,7 +1582,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "</div>"
         f"<script>{_UPDATES_JS}</script>"
     )
-    return _page("Software updates · SLOP", body, wide=True)
+    return _page("Software &amp; services · SLOP", body, wide=True)
 
 
 @app.get("/admin/updates", response_class=HTMLResponse)
@@ -1558,6 +1627,26 @@ def admin_updates_apply(request: Request, csrf: str = Form(""), app: str = Form(
         return JSONResponse({"detail": "Request blocked (bad origin or token)."},
                             status_code=403)
     data, error = updates.apply(app, sess["username"], "superuser")
+    if error:
+        return JSONResponse({"detail": error}, status_code=409)
+    return JSONResponse(data)
+
+
+@app.post("/admin/updates/action")
+def admin_updates_action(request: Request, csrf: str = Form(""), app: str = Form(""),
+                         action: str = Form("")):
+    """Restart / stop / start / recreate a product from the console, so a wedged
+    service does not require a shell on the host. Superuser-gated and carrying
+    the same origin + CSRF guard as every other admin mutation."""
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    tok = _csrf_token(request)
+    guard = _admin_guard(request, sess, csrf, tok)
+    if guard is not None:
+        return JSONResponse({"detail": "Request blocked (bad origin or token)."},
+                            status_code=403)
+    data, error = updates.action(app, action, sess["username"], "superuser")
     if error:
         return JSONResponse({"detail": error}, status_code=409)
     return JSONResponse(data)

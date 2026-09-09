@@ -94,6 +94,13 @@ def status(request: Request) -> dict:
             row["reason"] = "the checkout has local changes — resolve them on the host first"
         elif apps.compose_dir(root) is None:
             row["reason"] = "no compose file found in the checkout"
+        row["services"] = jobs.services(apps.compose_dir(root)) \
+            if apps.compose_dir(root) else []
+        # Which lifecycle actions this product will accept. The GUI renders from
+        # this rather than hard-coding the rules, so the refusal and the button
+        # can never disagree.
+        row["actions"] = [a for a in jobs.ACTIONS
+                          if jobs.action_refusal(key, a) is None]
         out.append(row)
     return {"apps": out, "job": jobs.current()}
 
@@ -117,6 +124,34 @@ def update(key: str, request: Request):
     if not started:
         raise HTTPException(status_code=409, detail=message)
     print(f"[sysible-updater] {actor} started an update of {key} ({root})", flush=True)
+    return {"started": True, "message": message}
+
+
+@app.post("/api/action/{key}/{action}")
+def action(key: str, action: str, request: Request):
+    """Restart / stop / start / recreate one product's containers.
+
+    So a wedged service can be recovered from the console instead of needing a
+    shell on the host. `action` is looked up in a fixed table — it never reaches
+    a shell, and no part of the argv comes from the request."""
+    actor = _authorized(request)
+    if key not in apps.ALLOWLIST:
+        raise HTTPException(status_code=404, detail="Unknown product.")
+    if action not in jobs.ACTIONS:
+        raise HTTPException(status_code=404, detail="Unknown action.")
+    refusal = jobs.action_refusal(key, action)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    root = apps.checkout_dir(key)
+    if root is None:
+        raise HTTPException(status_code=409, detail="That product is not installed here.")
+    compose = apps.compose_dir(root)
+    if compose is None:
+        raise HTTPException(status_code=409, detail="No compose file in that checkout.")
+    started, message = jobs.start_action(key, action, compose, actor)
+    if not started:
+        raise HTTPException(status_code=409, detail=message)
+    print(f"[sysible-updater] {actor} started {action} of {key} ({compose})", flush=True)
     return {"started": True, "message": message}
 
 

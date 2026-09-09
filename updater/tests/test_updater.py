@@ -9,6 +9,8 @@ superuser role, and concurrent updates.
 """
 import os
 import subprocess
+import threading
+import time
 import sys
 from pathlib import Path
 
@@ -28,8 +30,18 @@ def _make_repo(path: Path, remote: Path | None = None) -> Path:
     """A real git checkout, so the git helpers are exercised for real rather than
     against a mock that can agree with a wrong implementation."""
     path.mkdir(parents=True, exist_ok=True)
+    # FIXED dates, and that is load-bearing. This builds the "clone" with
+    # init + fetch rather than `git clone`, so the upstream's commit and the
+    # local one are separate objects — byte-identical, and therefore the same
+    # SHA, ONLY while both land in the same second. Without pinning the dates the
+    # two straddle a second boundary every so often, the checkout looks one commit
+    # behind its remote, and test_status_reports_installed_and_missing_products
+    # fails on `available is False` roughly one run in ten. Pinning them makes
+    # the two commits identical by construction instead of by luck.
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "GIT_AUTHOR_DATE": "2020-01-01T00:00:00+0000",
+           "GIT_COMMITTER_DATE": "2020-01-01T00:00:00+0000"}
     def g(*a, cwd=path):
         return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True,
                               text=True, env=env, check=False)
@@ -254,3 +266,123 @@ def test_the_actor_is_recorded_on_the_job(env, client, monkeypatch):
     monkeypatch.setattr(jobs_mod, "_run", lambda argv, cwd: 0)
     client.post("/api/update/controller", headers=_hdrs(user="carol"))
     assert client.get("/api/job", headers=_hdrs()).json()["job"]["actor"] == "carol"
+
+
+# ---- container lifecycle controls ------------------------------------------
+# Restart/stop/start/recreate, so a wedged service is recoverable from the
+# console instead of needing a shell on the host. This service holds the Docker
+# socket, so the action is a KEY into a fixed table and never reaches a shell.
+def test_a_lifecycle_action_needs_the_shared_secret(client):
+    r = client.post("/api/action/controller/restart")
+    assert r.status_code == 401
+
+
+def test_a_lifecycle_action_requires_a_superuser(client):
+    r = client.post("/api/action/controller/restart",
+                    headers=_hdrs(role="operator"))
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize("action", [
+    "rm", "down", "exec", "run", "kill", "restart;rm -rf /", "../restart", "",
+])
+def test_no_action_outside_the_table_is_ever_accepted(env, client, action):
+    """The whole reason this service can hold a Docker socket: it accepts a key
+    from a fixed table, never a command. `down` and `rm` are deliberately absent
+    — they destroy containers and volumes."""
+    r = client.post(f"/api/action/controller/{action}", headers=_hdrs())
+    assert r.status_code in (404, 405), (action, r.status_code)
+
+
+def test_the_argv_for_every_action_is_a_literal(env):
+    """No element of any action's argv is derived from a request."""
+    from backend import jobs
+    for action, (argv, _verb) in jobs.ACTIONS.items():
+        assert argv[0] == "docker" and argv[1] == "compose", (action, argv)
+        for part in argv:
+            assert isinstance(part, str) and part.isprintable()
+            assert ";" not in part and "&" not in part and "|" not in part
+
+
+def test_slop_cannot_be_stopped_from_its_own_console(env, client, tmp_path):
+    """Stopping SLOP would take down the gateway, this console and the updater
+    together — no way back except a shell on the host. Restart is fine."""
+    from backend import jobs
+    refusal = jobs.action_refusal("slop", "stop")
+    assert refusal and "no way back" in refusal
+    assert jobs.action_refusal("slop", "restart") is None
+    assert jobs.action_refusal("controller", "stop") is None
+
+
+def test_the_offered_actions_never_include_a_refused_one(env, client, tmp_path):
+    """The GUI renders its buttons from this list, so a refused action must not
+    appear in it — the rule and the button cannot be allowed to disagree."""
+    _make_repo(tmp_path / "src" / "sysible-linux-operations-platform")
+    d = client.get("/api/status", headers=_hdrs()).json()
+    by_key = {a["key"]: a for a in d["apps"]}
+    from backend import jobs
+    for key, row in by_key.items():
+        for action in row.get("actions") or []:
+            assert jobs.action_refusal(key, action) is None, (key, action)
+    assert "stop" not in (by_key["slop"].get("actions") or [])
+    assert "restart" in (by_key["slop"].get("actions") or [])
+
+
+def test_a_product_not_installed_here_cannot_be_actioned(client):
+    r = client.post("/api/action/connect/restart", headers=_hdrs())
+    assert r.status_code == 409
+    assert "not installed" in r.json()["detail"]
+
+
+def test_a_lifecycle_action_runs_and_is_reported(env, client, monkeypatch):
+    """Drive the real route with docker stubbed, and check the job records the
+    action so the console can title it 'Restart of …' rather than 'Update of …'."""
+    from backend import jobs
+    calls = []
+    monkeypatch.setattr(jobs, "_run", lambda argv, cwd: calls.append(list(argv)) or 0)
+    r = client.post("/api/action/controller/restart", headers=_hdrs())
+    assert r.status_code == 200, r.text
+    for _ in range(100):
+        j = jobs.current()
+        if j and j["state"] != "running":
+            break
+        time.sleep(0.02)
+    j = jobs.current()
+    assert j["state"] == "succeeded", j
+    assert j["action"] == "restart"
+    assert calls == [["docker", "compose", "restart"]]
+    # ...and NO git pull: a restart must not move the checkout.
+    assert not any("git" in c[0] for c in calls)
+
+
+def test_an_action_and_an_update_cannot_run_at_once(env, client, monkeypatch):
+    """They would fight over container names and the build cache."""
+    from backend import jobs
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(argv, cwd):
+        started.set()
+        release.wait(5)
+        return 0
+    monkeypatch.setattr(jobs, "_run", slow)
+    assert client.post("/api/action/controller/restart", headers=_hdrs()).status_code == 200
+    assert started.wait(5)
+    r = client.post("/api/update/controller", headers=_hdrs())
+    assert r.status_code == 409
+    assert "already" in r.json()["detail"]
+    # Let the worker finish AND drop the global lock before returning. Without
+    # this the next test can start while the lock is still held and get a stray
+    # 409 — a flaky failure that points at the wrong test.
+    release.set()
+    for _ in range(250):
+        j = jobs.current()
+        if j and j["state"] != "running":
+            break
+        time.sleep(0.02)
+    assert jobs.current()["state"] != "running", "worker never finished"
+    for _ in range(250):
+        if jobs._lock.acquire(blocking=False):
+            jobs._lock.release()
+            break
+        time.sleep(0.02)

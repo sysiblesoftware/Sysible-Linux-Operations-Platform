@@ -101,6 +101,9 @@ services:
       # open (dev only); set it and hand the same value to the agents.
       SYSIBLE_FLASHBACK_AGENT_TOKEN: ${SYSIBLE_FLASHBACK_AGENT_TOKEN:-}
       SYSIBLE_FLASHBACK_KEEP: ${SYSIBLE_FLASHBACK_KEEP:-50}
+      # Flashback reads the Controller's enrolled-host list so the console can
+      # show hosts that have not captured yet. Same var the Visualizer uses.
+      SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
     volumes:
       - flashback-data:/data       # the version store (SQLite) — persist across restarts
     expose:
@@ -114,6 +117,11 @@ services:
       # lives in one place instead of on every host, and the Controller stamps
       # host_id from the agent it just authenticated (a host cannot name another).
       - "127.0.0.1:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}:8080"
+    extra_hosts:
+      # Reach the Controller, which is published on the HOST — without this
+      # host.docker.internal does not resolve on Linux and the host list fails
+      # with ConnectError, exactly as the Visualizer needed the same mapping.
+      - "host.docker.internal:host-gateway"
 
   # Visualizer — the platform-wide activity & log console. Like the IdP and
   # Flashback it is a SLOP-native service in this stack: expose-only (no host
