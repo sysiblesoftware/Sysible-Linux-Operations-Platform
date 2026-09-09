@@ -1,5 +1,14 @@
 # Sysible Flashback — the standalone SLOP module runtime. Deliberately tiny:
-# everything else (sqlite3, hashlib, difflib, base64, hmac) is Python stdlib, so
+# almost everything (sqlite3, hashlib, difflib, base64, hmac) is Python stdlib, so
 # the service stays easy to audit.
+#
+# httpx is the one addition, and only for reading the Controller's host list so
+# the console can show hosts that have not backed anything up yet — the same
+# reason the Visualizer carries it, pinned to the same version. backend/controller
+# .py imports it DEFENSIVELY: if it is ever missing, the host import turns itself
+# off and says so, rather than taking the whole service down. It did exactly that
+# once — the import was added here before the dependency was, so uvicorn could
+# not start and the gateway served 502 for every Flashback page.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+httpx==0.28.1

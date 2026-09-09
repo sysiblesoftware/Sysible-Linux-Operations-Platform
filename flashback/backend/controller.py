@@ -20,7 +20,16 @@ from __future__ import annotations
 
 import os
 
-import httpx
+# DEFENSIVE on purpose. This module is an ENRICHMENT — it makes the console show
+# hosts that have not captured yet — and an enrichment must never be able to stop
+# Flashback serving. Importing httpx at module scope without it being in
+# requirements.txt is exactly what happened: backend.app failed to import,
+# uvicorn never started, and every Flashback page became a 502 at the gateway.
+# A missing dependency now disables the host import and reports it as a note.
+try:
+    import httpx
+except ImportError:                                  # pragma: no cover
+    httpx = None
 
 # Where the Controller's BFF listens. Same default and env var the Visualizer
 # uses, so one platform install configures both.
@@ -39,7 +48,15 @@ def _url() -> str:
 
 
 def configured() -> bool:
-    return bool(_SSO_SECRET and _CONTROLLER)
+    return bool(httpx is not None and _SSO_SECRET and _CONTROLLER)
+
+
+def unavailable_reason() -> str | None:
+    """Why the host import is off, when it is off for a reason worth showing."""
+    if httpx is None:
+        return ("the host list needs httpx, which is not installed in this "
+                "Flashback image — rebuild it (docker compose up -d --build flashback)")
+    return None
 
 
 def list_hosts(identity) -> tuple[list, str | None]:
@@ -47,7 +64,9 @@ def list_hosts(identity) -> tuple[list, str | None]:
     agent, so an SSH-only host has nothing that could ever report a snapshot and
     listing it as "no backup yet" would be a promise we cannot keep."""
     if not configured():
-        return [], None                      # standalone Flashback: nothing to ask
+        # A standalone Flashback has no Controller to ask and needs no note; a
+        # missing dependency is a real fault and gets one.
+        return [], unavailable_reason()
     headers = {
         "Accept": "application/json",
         "X-Sysible-Auth": _SSO_SECRET,

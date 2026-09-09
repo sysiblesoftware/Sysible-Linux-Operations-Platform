@@ -242,3 +242,87 @@ def test_an_unreachable_controller_costs_a_note_not_the_page(cl, monkeypatch):
 
 def test_the_host_list_still_needs_an_identity(cl):
     assert cl.get("/api/hosts").status_code == 401
+
+
+# ---- an enrichment must never take the service down ------------------------
+# The host-import module imported httpx at module scope before httpx was in
+# requirements.txt. backend.app imports that module, so the app failed to import,
+# uvicorn never started, and EVERY Flashback page became a 502 at the gateway —
+# a feature that only adds rows to a list took the whole service out.
+def test_the_app_still_serves_when_httpx_is_missing(monkeypatch, tmp_path):
+    """Simulate the dependency being absent and re-import the app from scratch."""
+    import builtins
+    import importlib
+    import sys as _sys
+
+    real_import = builtins.__import__
+
+    def no_httpx(name, *a, **kw):
+        if name == "httpx" or name.startswith("httpx."):
+            raise ImportError("simulated: httpx not installed")
+        return real_import(name, *a, **kw)
+
+    os.environ.update(SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
+                      SYSIBLE_SSO_SHARED_SECRET=SECRET,
+                      SYSIBLE_FLASHBACK_DATA=str(tmp_path))
+    for m in [m for m in list(_sys.modules) if m.startswith("backend")]:
+        del _sys.modules[m]
+    monkeypatch.setattr(builtins, "__import__", no_httpx)
+    try:
+        app_mod = importlib.import_module("backend.app")     # must NOT raise
+        ctrl = importlib.import_module("backend.controller")
+        assert ctrl.httpx is None
+        assert ctrl.configured() is False
+        assert "httpx" in (ctrl.unavailable_reason() or "")
+    finally:
+        monkeypatch.setattr(builtins, "__import__", real_import)
+
+    from starlette.testclient import TestClient
+    with TestClient(app_mod.app, base_url="http://slop.lan") as c:
+        # The console still loads, and the page says why the fleet is missing.
+        d = c.get("/api/hosts", headers=GOOD).json()
+        assert d["hosts"] == []
+        assert "httpx" in d["note"]
+        assert c.get("/api/health").status_code == 200
+    for m in [m for m in list(_sys.modules) if m.startswith("backend")]:
+        del _sys.modules[m]
+
+
+def test_httpx_is_declared_in_requirements():
+    """The other half: it must actually be installed, or the host import is off
+    on every deployment and nobody sees the fleet."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "requirements.txt")) as fh:
+        assert "httpx" in fh.read(), "backend/controller.py imports httpx"
+
+
+def test_every_third_party_import_is_declared_in_requirements():
+    """The general form of the 502 above: any module backend/ imports at top
+    level must be stdlib, local, or in requirements.txt — otherwise the image
+    builds fine and the service dies at startup."""
+    import ast
+    import pathlib
+    import sys as _sys
+
+    here = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    reqs = (here / "requirements.txt").read_text().lower()
+    local = {p.stem for p in (here / "backend").glob("*.py")}
+    stdlib = set(getattr(_sys, "stdlib_module_names", ()))
+
+    undeclared = {}
+    for src in (here / "backend").glob("*.py"):
+        tree = ast.parse(src.read_text())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module.split(".")[0]]
+            for n in names:
+                if n in stdlib or n in local or n == "backend":
+                    continue
+                # uvicorn/fastapi bring these; a name in requirements is fine too.
+                if n.lower() in reqs or n.lower() in ("starlette", "pydantic"):
+                    continue
+                undeclared.setdefault(n, set()).add(src.name)
+    assert not undeclared, f"imported but not in requirements.txt: {undeclared}"
