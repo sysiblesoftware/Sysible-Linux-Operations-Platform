@@ -96,9 +96,19 @@ def list_hosts(identity) -> tuple[list, str | None]:
             # Keep the environment and address: the console groups by environment
             # the way the EE panel does, and a bare host id tells an operator
             # nothing about which box it is.
+            # `capture_capable` is the diagnostic that turns "Back up now did
+            # nothing" into something an operator can act on: the Controller
+            # records when each agent last asked for config-backup work, and an
+            # agent that has NEVER asked is running a build without it. Without
+            # this the console cannot tell that from "the next check-in hasn't
+            # come round yet", and both look identical — silence.
+            poll = h.get("last_config_poll")
             out.append({"host_id": hid, "label": str(h.get("label") or hid),
                         "environment": str(h.get("environment") or ""),
-                        "address": str(h.get("address") or "")})
+                        "address": str(h.get("address") or ""),
+                        "online": h.get("online"),
+                        "capture_capable": bool(poll),
+                        "last_config_poll": poll})
     return out, None
 
 

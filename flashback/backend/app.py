@@ -223,11 +223,22 @@ def api_hosts(request: Request) -> dict:
     # Environment for hosts that DO have history too, so the grouping is complete.
     envs = {h["host_id"]: (h.get("environment") or "") for h in fleet}
     addrs = {h["host_id"]: (h.get("address") or "") for h in fleet}
+    # Whether each host's agent asks for config-backup work at all. This is what
+    # lets a host that never captures say WHY: an agent that has never asked is
+    # running a build without config backup, and no amount of waiting or pressing
+    # "Back up now" will change that.
+    capable = {h["host_id"]: h.get("capture_capable") for h in fleet}
+    onlines = {h["host_id"]: h.get("online") for h in fleet}
     for h in hosts:
         h.setdefault("environment", "")
         h.setdefault("address", "")
         h["environment"] = h["environment"] or envs.get(h["host_id"], "")
         h["address"] = h["address"] or addrs.get(h["host_id"], "")
+        # A host with stored history has demonstrably captured, so it is capable
+        # whatever the fleet list says (the Controller may not have seen a poll
+        # since it last restarted).
+        h["capture_capable"] = bool(h.get("backed_up")) or bool(capable.get(h["host_id"]))
+        h["online"] = onlines.get(h["host_id"])
     hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
     return {"hosts": hosts, "note": note, "can_request": controller.configured()}
 

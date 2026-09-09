@@ -557,3 +557,44 @@ def test_a_host_enrolled_but_never_captured_is_listed_as_having_no_copy(cl, monk
                               {"host_id": "h9", "label": "new1"}])
     d = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
     assert [m["host_id"] for m in d["missing"]] == ["h9"]
+
+
+# --------------------------------------------------------------------------- #
+# Why a host has no backup
+#
+# "Back up now" reported success and then nothing happened, with no way to find
+# out why. Two very different situations rendered as the same sentence: an agent
+# whose build predates config backup (which will NEVER capture, however long you
+# wait) and one that simply hasn't reached its next check-in. The Controller
+# knows the difference — it records when each agent last asked for config-backup
+# work — so the console must carry it through rather than flatten it.
+# --------------------------------------------------------------------------- #
+def test_a_host_whose_agent_never_asks_is_marked_incapable(cl, monkeypatch):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "list_hosts", lambda who: ([
+        {"host_id": "old", "label": "old-box", "environment": "dev", "address": "10.0.0.1",
+         "capture_capable": False, "online": True},
+        {"host_id": "new", "label": "new-box", "environment": "dev", "address": "10.0.0.2",
+         "capture_capable": True, "online": True},
+    ], None))
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    hosts = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}
+    assert hosts["old"]["capture_capable"] is False
+    assert hosts["new"]["capture_capable"] is True
+
+
+def test_stored_history_proves_capability_whatever_the_controller_says(cl, monkeypatch):
+    """A Controller that restarted has not seen a poll since, so it reports the
+    host as never having asked. A host with stored snapshots has demonstrably
+    captured, and must not be told its agent can't do this."""
+    import backend.controller as ctrl
+    import backend.store as store
+    store.ingest_snapshot("h1", "web1", [{"path": "/etc/hosts", "content_b64": "eA=="}])
+    monkeypatch.setattr(ctrl, "list_hosts", lambda who: ([
+        {"host_id": "h1", "label": "web1", "environment": "", "address": "",
+         "capture_capable": False, "online": True},
+    ], None))
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    h1 = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}["h1"]
+    assert h1["backed_up"] is True
+    assert h1["capture_capable"] is True, "a host with history was called incapable"

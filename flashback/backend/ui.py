@@ -29,7 +29,7 @@ background:var(--panel);position:sticky;top:0;z-index:5}
 .head .brand{font-size:16px}.head .brand b{color:var(--accent)}
 .head .who{margin-left:auto;color:var(--muted);font-size:12.5px}
 .head a.back{color:var(--muted);font-size:12.5px}
-.wrap{display:grid;grid-template-columns:220px 260px 240px 1fr;gap:0;height:calc(100vh - 49px)}
+.wrap{display:grid;grid-template-columns:300px 250px 230px 1fr;gap:0;height:calc(100vh - 49px)}
 @media(max-width:900px){.wrap{grid-template-columns:1fr;height:auto}.col{max-height:40vh}}
 .col{overflow:auto;border-right:1px solid var(--line);padding:.5em}
 .col:last-child{border-right:none}
@@ -69,12 +69,40 @@ _CSS += """
 """
 
 _CSS += """
-.hostbar{display:flex;flex-wrap:wrap;gap:.3rem;margin:.2rem .5rem .5rem}
+.hostbar{display:flex;flex-wrap:wrap;gap:.35rem;margin:.2rem .5rem .6rem}
+.hostbar .btn{flex:1 1 auto}
 .cmphead{margin:.3rem .5rem;font-weight:600}
-.envhdr{margin:.6rem .5rem .2rem;font-size:11px;letter-spacing:.06em;
+.envhdr{margin:.9rem .55rem .25rem;font-size:11px;letter-spacing:.06em;
   text-transform:uppercase;color:var(--faint)}
-.hostwrap{display:block}
-.backupnow{margin:.1rem 0 .5rem .5rem;font-size:11.5px}
+/* One row per host: name and address on one line, the status under it, and the
+   action on the right. Previously the action was a full-width button UNDER every
+   host, so a three-host fleet rendered as six stacked blocks. */
+.hostwrap{display:flex;align-items:flex-start;gap:.4rem;padding:.1rem .25rem .1rem 0;
+  border-radius:8px}
+.hostwrap:hover{background:var(--panel2)}
+.hostwrap .item{flex:1 1 auto;min-width:0}
+.hostwrap .item:hover{background:none}
+/* Only the NAME and ADDRESS may be clipped. The status line must wrap: it is the
+   line that says WHY a host has no backup, and an ellipsis there ("agent doesn't
+   do config bac…") destroys the only thing it was added to say. */
+.hostname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hostwrap .item>.sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Always visible, never hover-revealed. It is the primary action on this page,
+   and a disabled button has `opacity:.5` from button.btn:disabled — which beat a
+   hover rule and left the UNUSABLE buttons showing while the usable ones hid. */
+.backupnow{flex:0 0 auto;font-size:11px;padding:.3em .55em;margin-top:.15rem}
+/* Status line. "waiting" and "can't" are different problems and must not look the
+   same — the whole complaint about Back up now was that they did. */
+.hstat{font-size:11.5px;line-height:1.35;margin-top:.15em}
+.hstat.ok{color:var(--muted)}
+.hstat.waiting{color:var(--faint);font-style:italic}
+.hstat.blocked{color:var(--err)}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:.4em;
+  vertical-align:middle;background:var(--faint);flex:0 0 auto}
+.dot.on{background:var(--ok)}.dot.off{background:var(--err)}
+/* The three drill-down columns are empty until a host is picked. Saying so beats
+   three blank panes, which read as a broken page rather than a starting point. */
+.placeholder{color:var(--faint);font-size:12.5px;padding:1.2em .8em;line-height:1.6}
 .item.pending .sub{color:var(--faint);font-style:italic}
 .note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
   color:var(--muted);font-size:12px}
@@ -148,40 +176,68 @@ async function loadHosts(){
 function hostRow(h,d,col){
   const wrap=el('div','hostwrap');
   const b=el('button','item');
-  b.appendChild(el('div','', h.label||h.host_id));
+  const name=el('div','hostname', h.label||h.host_id);
+  b.appendChild(name);
   if(h.address) b.appendChild(el('div','sub faint', h.address));
-  // A host with no history yet says so plainly, rather than "0 files · never",
-  // which reads like a fault. It is still clickable — the empty file list then
-  // explains that capture has not run.
-  b.appendChild(el('div','sub', h.backed_up
-    ? (h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts))
-    : 'enrolled — no backup captured yet'));
+
+  // The status line. Three genuinely different states that used to render as one
+  // sentence ("enrolled — no backup captured yet"), which is why "Back up now"
+  // looked broken: an agent that CANNOT capture and one that simply hasn't yet
+  // said exactly the same thing, and neither hinted at what to do.
+  const st=el('div','hstat');
+  if(h.backed_up){
+    st.className='hstat ok';
+    st.textContent=h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts);
+  }else if(h.capture_capable===false){
+    st.className='hstat blocked';
+    st.textContent="agent doesn't do config backup — update this host's agent";
+    st.title="This host's agent has never asked the Controller for config-backup "
+            +"work, so it is running a build from before config backup existed. "
+            +"Back up now will keep doing nothing until its agent is updated.";
+  }else{
+    st.className='hstat waiting';
+    st.textContent='no backup captured yet — waiting for its next check-in';
+  }
+  // Online/offline dot: a host that is simply DOWN explains the wait on its own.
+  if(h.online===false||h.online===true){
+    const dot=el('span','dot '+(h.online?'on':'off'));
+    dot.title=h.online?'agent online':'agent offline';
+    st.insertBefore(dot, st.firstChild);
+  }
+  b.appendChild(st);
+
   if(!h.backed_up) b.classList.add('pending');
   b.onclick=function(){
     state.host=h.host_id;state.path=null;state.a=null;state.b=null;
     [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
     b.classList.add('sel');
-    loadFiles();$('#diff').innerHTML='';
+    loadFiles();$('#diff').innerHTML='<div class="placeholder">Pick a file, then two versions to diff.</div>';
   };
   wrap.appendChild(b);
   // Back up now. An agent is outbound-only, so nothing can reach in — this is a
   // REQUEST the host picks up on its next check-in, and the reply says so rather
   // than implying the snapshot already happened.
   if(d&&d.can_request&&CAN_WRITE){
-    const nb=el('button','btn ghost sm','Back up now');
-    nb.className='backupnow';
+    const nb=el('button','btn ghost sm backupnow','Back up now');
+    // Refuse up front on a host that provably can't act on it, instead of
+    // reporting success and leaving the operator to wonder.
+    if(h.capture_capable===false){
+      nb.disabled=true;
+      nb.title="This host's agent doesn't support config backup yet — update it first.";
+    }
     nb.onclick=function(ev){
       ev.stopPropagation(); nb.disabled=true;
       fetch(U('/api/hosts/'+encodeURIComponent(h.host_id)+'/backup-now'),{method:'POST'})
         .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
         .then(function(res){
-          setMsg(res.ok ? (res.j.message||'Requested.')
-                        : (res.j.detail||'Could not request a backup.'),
+          setMsg(res.ok?(res.j.message||'Requested.'):(res.j.detail||'Failed.'),
                  res.ok?'':'err');
           nb.disabled=false;
-          if(res.ok) setTimeout(loadHosts, 65000);   // it lands within a minute
+          // Re-read shortly: a capable host captures within its poll interval, so
+          // the row should stop saying "no backup captured yet" on its own.
+          if(res.ok) setTimeout(loadHosts, 8000);
         })
-        .catch(function(e){ setMsg(String(e.message||e),'err'); nb.disabled=false; });
+        .catch(function(e){setMsg(String(e.message||e),'err');nb.disabled=false;});
     };
     wrap.appendChild(nb);
   }
@@ -416,9 +472,16 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<div class=msg id=msg hidden></div>"
         "<div class=wrap>"
         "<div class=col id=hosts></div>"
-        "<div class=col id=files></div>"
+        "<div class=col id=files>"
+        "<div class=placeholder>Pick a host to see the config files it has captured.</div>"
+        "</div>"
         "<div class=col id=versions></div>"
-        "<div class=col id=diff></div>"
+        "<div class=col id=diff>"
+        "<div class=placeholder>Every version of every tracked config file, per host.<br><br>"
+        "Pick a host, then a file, then two versions to diff \u2014 or use "
+        "<b>Compare files across hosts</b> to find where one box's config drifted "
+        "from the rest of the fleet.</div>"
+        "</div>"
         "</div>"
         f"<script>{_JS}</script>"
         "</body></html>"
