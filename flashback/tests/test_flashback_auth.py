@@ -731,3 +731,47 @@ def test_a_forged_host_id_never_becomes_a_controller_request(cl, monkeypatch, hi
     assert seen == [], f"{hid!r} was sent to the Controller as {seen}"
     assert r.json()["requested"] == 0
     assert r.json()["failed"][0]["message"] == "not a valid host id"
+
+
+# ---- the console must let an operator work an ENVIRONMENT at a time ---------
+# "Every host" and "this one box" were the only two sizes on offer, and neither
+# is the unit an operator works in. These assert the console SHIPS the controls;
+# the behaviour behind them (a list of host_ids) is covered above.
+def _console(cl) -> str:
+    r = cl.get("/", headers=GOOD)
+    assert r.status_code == 200, r.text
+    return r.text
+
+
+def test_the_console_offers_a_whole_environment_backup(cl):
+    page = _console(cl)
+    assert "Back up selected" in page
+    # The selection box, on the environment header and on each host.
+    assert "pickbox" in page
+    assert "state.sel" in page
+    # and it posts the selected ids to the batch endpoint, not "all"
+    assert "host_ids:ids" in page.replace(" ", "")
+
+
+def test_the_console_folds_environments_and_remembers_it(cl):
+    page = _console(cl)
+    assert "envtoggle" in page
+    assert "state.collapsed" in page
+    assert "sysible-flashback-collapsed" in page          # persisted per browser
+    assert "AUTO_COLLAPSE_HOSTS" in page                  # big fleets start folded
+
+
+def test_the_console_can_filter_a_long_host_list(cl):
+    page = _console(cl)
+    assert "hostfilter" in page
+    assert "matchesFilter" in page
+
+
+def test_selection_boxes_are_withheld_from_a_reader(cl):
+    """The boxes exist only to fire a fleet-wide write. An auditor gets the
+    drill-down and the filter, and no way to queue anything."""
+    r = cl.get("/", headers={**GOOD, "X-Sysible-Role": "auditor"})
+    assert r.status_code == 200
+    assert 'data-can-write="0"' in r.text or "data-can-write='0'" in r.text
+    # The write controls are gated on CAN_WRITE in the shipped script.
+    assert "canPick=CAN_WRITE" in r.text.replace(" ", "")

@@ -85,6 +85,29 @@ _CSS += """
 .cmphead{margin:.3rem .5rem;font-weight:600}
 .envhdr{margin:.9rem .55rem .25rem;font-size:11px;letter-spacing:.06em;
   text-transform:uppercase;color:var(--faint)}
+/* The environment header is a control, not a caption: it collapses its group and
+   (for writers) selects every host in it. A fleet of three fits on screen; a
+   fleet of three hundred does not, and a flat list of it is unusable. */
+.envrow{display:flex;align-items:center;gap:.4rem;margin:.9rem .55rem .25rem}
+.envrow .envtoggle{flex:1 1 auto;display:flex;align-items:center;gap:.4rem;min-width:0;
+  background:none;border:0;padding:.15em 0;color:var(--faint);cursor:pointer;
+  font:inherit;font-size:11px;letter-spacing:.06em;text-transform:uppercase;text-align:left}
+.envrow .envtoggle:hover{color:var(--text)}
+.envrow .caret{flex:0 0 auto;display:inline-block;width:.7em;
+  transition:transform .12s ease;transform:rotate(90deg)}
+.envrow.closed .caret{transform:rotate(0deg)}
+.envrow .envname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.envrow .envcount{flex:0 0 auto;color:var(--faint)}
+/* Selection boxes. Sized up from the browser default — at 13px they are a hard
+   target next to a host name, and this is the control that fires a fleet-wide
+   write. */
+.pickbox{flex:0 0 auto;width:15px;height:15px;margin:0;accent-color:var(--accent);cursor:pointer}
+.hostwrap .pickbox{margin-top:.55rem}
+.hostfilter{display:block;width:calc(100% - 1rem);margin:.1rem .5rem .5rem;
+  padding:.4em .6em;border:1px solid var(--line);border-radius:8px;
+  background:var(--field);color:var(--text);font:inherit;font-size:12.5px}
+.hostfilter:focus{outline:none;border-color:var(--accent)}
+.envempty{margin:.1rem .55rem .5rem 1.6rem;color:var(--faint);font-size:11.5px;font-style:italic}
 /* One row per host: name and address on one line, the status under it, and the
    action on the right. Previously the action was a full-width button UNDER every
    host, so a three-host fleet rendered as six stacked blocks. */
@@ -133,14 +156,69 @@ const CAN_WRITE = document.body.dataset.canWrite === '1';
 // the gateway -> /flashback/api/..., with no build-time base to configure.
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const U = p => BASE + String(p).replace(/^\//,'');
-let state={host:null,path:null,a:null,b:null};
+let state={host:null,path:null,a:null,b:null,
+           data:null,sel:new Set(),collapsed:null,filter:''};
 function fmtTs(t){if(!t)return '—';const d=new Date(t*1000);return d.toLocaleString();}
 function el(tag,cls,txt){const e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e;}
 async function jget(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json();}
 function setMsg(t,kind){const m=$('#msg');m.textContent=t||'';m.className='msg '+(kind||'');m.hidden=!t;}
 
+// Collapse state lives per browser: which environments an operator keeps folded
+// is a view preference, not fleet data, and it must survive a reload or the
+// drill-down is worthless on the fleet it exists for.
+const COLLAPSE_KEY='sysible-flashback-collapsed';
+function loadCollapsed(){
+  try{const v=JSON.parse(localStorage.getItem(COLLAPSE_KEY)||'[]');
+      return new Set(Array.isArray(v)?v:[]);}catch(e){return new Set();}
+}
+function saveCollapsed(){
+  try{localStorage.setItem(COLLAPSE_KEY,JSON.stringify([...state.collapsed]));}catch(e){}
+}
+// Big fleets start folded. Rendering 300 rows the operator has to scroll past to
+// reach the environment they came for is the problem this whole section fixes.
+const AUTO_COLLAPSE_HOSTS=25;
+const FILTER_FROM=8;
+
+function envGroups(hosts){
+  const groups={};
+  hosts.forEach(function(h){
+    const e=h.environment||'Unassigned';
+    (groups[e]=groups[e]||[]).push(h);
+  });
+  return Object.keys(groups).sort(function(a,b){
+    if(a==='Unassigned')return 1; if(b==='Unassigned')return -1;
+    return a.toLowerCase()<b.toLowerCase()?-1:1;
+  }).map(function(name){return [name,groups[name]];});
+}
+function matchesFilter(h,q){
+  if(!q)return true;
+  return [h.label,h.host_id,h.address,h.environment]
+    .some(function(v){return String(v||'').toLowerCase().indexOf(q)>=0;});
+}
+
 async function loadHosts(){
   const col=$('#hosts');col.innerHTML='';col.appendChild(el('h3',null,'Hosts'));
+  let d;try{d=await jget(U('/api/hosts'));}catch(e){col.appendChild(el('div','empty','Failed to load.'));return;}
+  state.data=d;
+  const hosts=(d&&d.hosts)||[];
+  // Selections are keyed by host id, so a host that has since disappeared from
+  // the fleet must not linger in the set and be "backed up" on the next click.
+  const live=new Set(hosts.map(function(h){return h.host_id;}));
+  state.sel=new Set([...(state.sel||[])].filter(function(id){return live.has(id);}));
+  if(state.collapsed==null){
+    state.collapsed=loadCollapsed();
+    const groups=envGroups(hosts);
+    if(!localStorage.getItem(COLLAPSE_KEY) && groups.length>1 && hosts.length>AUTO_COLLAPSE_HOSTS){
+      groups.forEach(function(g){state.collapsed.add(g[0]);});
+    }
+  }
+  renderHosts();
+}
+
+function renderHosts(){
+  const col=$('#hosts');col.innerHTML='';col.appendChild(el('h3',null,'Hosts'));
+  const d=state.data||{};
+  const hosts=(d&&d.hosts)||[];
   // Fleet-wide controls. "Compare files" answers the question an operator
   // usually arrives with after an incident — is this box's config different
   // from the rest? — which a per-host history cannot.
@@ -148,28 +226,45 @@ async function loadHosts(){
   const cmp=el('button','btn ghost sm','Compare files across hosts');
   cmp.onclick=loadComparePaths;
   bar.appendChild(cmp);
-  let allBtn=null;
+  let allBtn=null,selBtn=null;
+  const request=function(btn,ids,confirmText){
+    if(!window.confirm(confirmText))return;
+    btn.disabled=true;
+    fetch(U('/api/backup-now'),{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({host_ids:ids})})
+      .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+      .then(function(res){
+        setMsg(res.ok?(res.j.message||'Requested.'):(res.j.detail||'Failed.'),
+               res.ok?'':'err');
+        btn.disabled=false;
+        // Re-read shortly: a capable host captures within its poll interval, so
+        // the rows should stop saying "no backup captured yet" on their own.
+        if(res.ok){state.sel=new Set();setTimeout(loadHosts,8000);renderHosts();}
+      })
+      .catch(function(e){setMsg(String(e.message||e),'err');btn.disabled=false;});
+  };
   if(CAN_WRITE){
     const all=el('button','btn ghost sm','Back up all');
     allBtn=all;
     all.onclick=function(){
-      if(!window.confirm('Ask every tracked host to back up its config now?'))return;
-      all.disabled=true;
-      fetch(U('/api/backup-now'),{method:'POST',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({host_ids:'all'})})
-        .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
-        .then(function(res){
-          setMsg(res.ok?(res.j.message||'Requested.'):(res.j.detail||'Failed.'),
-                 res.ok?'':'err');
-          all.disabled=false;
-        })
-        .catch(function(e){setMsg(String(e.message||e),'err');all.disabled=false;});
+      request(all,'all','Ask every tracked host to back up its config now?');
     };
     bar.appendChild(all);
+    // Backing up one ENVIRONMENT at a time is the request this page is actually
+    // asked for — "the whole fleet" and "this one box" were the only two sizes
+    // on offer, and neither is the unit an operator works in.
+    const sel=el('button','btn ghost sm','Back up selected');
+    selBtn=sel;
+    sel.disabled=!state.sel.size;
+    if(state.sel.size) sel.textContent='Back up selected ('+state.sel.size+')';
+    sel.onclick=function(){
+      const ids=[...state.sel];
+      if(!ids.length)return;
+      request(sel,ids,'Ask '+ids.length+' selected host(s) to back up their config now?');
+    };
+    bar.appendChild(sel);
   }
   col.appendChild(bar);
-  let d;try{d=await jget(U('/api/hosts'));}catch(e){col.appendChild(el('div','empty','Failed to load.'));return;}
-  const hosts=(d&&d.hosts)||[];
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
   if(d&&d.note){col.appendChild(el('div','note',d.note));}
@@ -179,30 +274,96 @@ async function loadHosts(){
   if(d&&d.config_backup_configured===false){
     col.appendChild(el('div','note err',
       d.config_backup_reason||'The Controller has no Flashback wiring, so no host can capture.'));
-    // Withdraw the fleet-wide button too, not just the per-host ones. Leaving it
-    // there is the same broken promise one row wider: every host would be asked,
-    // and every host would fail.
+    // Withdraw the fleet-wide buttons too, not just the per-host ones. Leaving
+    // them there is the same broken promise one row wider: every host would be
+    // asked, and every host would fail.
     if(allBtn) allBtn.remove();
+    if(selBtn) selBtn.remove();
   }
   if(!hosts.length){col.appendChild(el('div','empty',
     'No hosts. Enrolled agent hosts appear here as soon as the Controller lists them.'));return;}
+
+  // A filter, once the list is long enough that scanning it stops working.
+  const q=(state.filter||'').trim().toLowerCase();
+  if(hosts.length>FILTER_FROM){
+    const f=el('input','hostfilter');
+    f.type='search';
+    f.placeholder='Filter hosts or environments…';
+    f.value=state.filter||'';
+    // A filtered view has to show what it found, so a match inside a folded
+    // environment is not silently withheld.
+    f.oninput=function(){state.filter=f.value;renderHosts();
+      const again=col.querySelector('.hostfilter');
+      if(again){again.focus();try{again.setSelectionRange(again.value.length,again.value.length);}catch(e){}}};
+    col.appendChild(f);
+  }
+
   // Grouped by ENVIRONMENT, the way the EE panel groups them. A flat list of
   // opaque host ids tells an operator nothing about which box they are on.
-  const groups={};
-  hosts.forEach(function(h){
-    const e=h.environment||'Unassigned';
-    (groups[e]=groups[e]||[]).push(h);
+  const canPick=CAN_WRITE && d && d.can_request && d.config_backup_configured!==false;
+  let shown=0;
+  envGroups(hosts).forEach(function(g){
+    const envName=g[0], list=g[1];
+    const visible=list.filter(function(h){return matchesFilter(h,q);});
+    if(q && !visible.length) return;            // nothing here matches; say nothing
+    shown+=visible.length;
+    const open=q ? true : !state.collapsed.has(envName);
+    const row=el('div','envrow'+(open?'':' closed'));
+    if(canPick){
+      const box=document.createElement('input');
+      box.type='checkbox'; box.className='pickbox';
+      const ids=visible.map(function(h){return h.host_id;});
+      const picked=ids.filter(function(id){return state.sel.has(id);}).length;
+      box.checked = picked>0 && picked===ids.length;
+      box.indeterminate = picked>0 && picked<ids.length;
+      box.title='Select every host in '+envName+' — then use “Back up selected”';
+      box.setAttribute('aria-label','Select every host in '+envName);
+      box.onclick=function(ev){
+        ev.stopPropagation();
+        const on=box.checked;
+        ids.forEach(function(id){ on?state.sel.add(id):state.sel.delete(id); });
+        renderHosts();
+      };
+      row.appendChild(box);
+    }
+    const tgl=el('button','envtoggle');
+    const caret=el('span','caret','▸');
+    tgl.appendChild(caret);
+    tgl.appendChild(el('span','envname',envName));
+    tgl.appendChild(el('span','envcount','('+visible.length+')'));
+    tgl.title=open?'Collapse '+envName:'Expand '+envName;
+    tgl.setAttribute('aria-expanded',open?'true':'false');
+    tgl.onclick=function(){
+      if(q) return;   // while filtering, groups follow the filter, not the fold
+      state.collapsed.has(envName)?state.collapsed.delete(envName):state.collapsed.add(envName);
+      saveCollapsed(); renderHosts();
+    };
+    row.appendChild(tgl);
+    col.appendChild(row);
+    if(!open) return;
+    visible.forEach(function(h){ col.appendChild(hostRow(h,d,col,canPick)); });
   });
-  Object.keys(groups).sort(function(a,b){
-    if(a==='Unassigned')return 1; if(b==='Unassigned')return -1;
-    return a.toLowerCase()<b.toLowerCase()?-1:1;
-  }).forEach(function(envName){
-    col.appendChild(el('div','envhdr', envName+'  ('+groups[envName].length+')'));
-    groups[envName].forEach(function(h){ col.appendChild(hostRow(h,d,col)); });
-  });
+  if(q && !shown){
+    col.appendChild(el('div','empty','No host or environment matches “'+state.filter+'”.'));
+  }
 }
-function hostRow(h,d,col){
+function hostRow(h,d,col,canPick){
   const wrap=el('div','hostwrap');
+  // The per-host box, so an environment's selection can be pared back to the
+  // handful of boxes actually in question.
+  if(canPick){
+    const box=document.createElement('input');
+    box.type='checkbox'; box.className='pickbox';
+    box.checked=state.sel.has(h.host_id);
+    box.title='Select '+(h.label||h.host_id)+' for “Back up selected”';
+    box.setAttribute('aria-label','Select '+(h.label||h.host_id));
+    box.onclick=function(ev){
+      ev.stopPropagation();
+      box.checked?state.sel.add(h.host_id):state.sel.delete(h.host_id);
+      renderHosts();
+    };
+    wrap.appendChild(box);
+  }
   const b=el('button','item');
   const name=el('div','hostname', h.label||h.host_id);
   b.appendChild(name);
