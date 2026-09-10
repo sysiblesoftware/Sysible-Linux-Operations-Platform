@@ -59,14 +59,25 @@ def unavailable_reason() -> str | None:
     return None
 
 
-def list_hosts(identity) -> tuple[list, str | None]:
-    """(agent hosts, note). Only agent hosts: config capture is done BY the
-    agent, so an SSH-only host has nothing that could ever report a snapshot and
-    listing it as "no backup yet" would be a promise we cannot keep."""
+def list_hosts(identity) -> tuple[list, str | None, dict]:
+    """(agent hosts, note, controller-wide config-backup state).
+
+    Only agent hosts: config capture is done BY the agent, so an SSH-only host has
+    nothing that could ever report a snapshot and listing it as "no backup yet"
+    would be a promise we cannot keep.
+
+    The third value is the CONTROLLER's own wiring — {"configured": bool|None,
+    "reason": str|None}. It matters because the per-host signal cannot tell the
+    difference on its own: a Controller with no Flashback wiring makes EVERY agent
+    look like a stale build, and the console duly told the operator to go update
+    agents that were already current. None means an older Controller that does not
+    report it — unknown, not broken.
+    """
+    unknown = {"configured": None, "reason": None}
     if not configured():
         # A standalone Flashback has no Controller to ask and needs no note; a
         # missing dependency is a real fault and gets one.
-        return [], unavailable_reason()
+        return [], unavailable_reason(), unknown
     headers = {
         "Accept": "application/json",
         "X-Sysible-Auth": _SSO_SECRET,
@@ -77,16 +88,20 @@ def list_hosts(identity) -> tuple[list, str | None]:
         with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
             r = c.get(f"{_url()}/api/hosts", headers=headers)
     except Exception as e:
-        return [], f"could not reach the Controller for its host list ({type(e).__name__})"
+        return [], f"could not reach the Controller for its host list ({type(e).__name__})", unknown
     if r.status_code in (401, 403):
-        return [], f"the Controller did not permit this host list for role '{identity.role}'"
+        return [], f"the Controller did not permit this host list for role '{identity.role}'", unknown
     if r.status_code >= 400:
-        return [], f"the Controller returned HTTP {r.status_code} for its host list"
+        return [], f"the Controller returned HTTP {r.status_code} for its host list", unknown
     try:
         data = r.json()
     except Exception:
-        return [], "the Controller returned a malformed host list"
+        return [], "the Controller returned a malformed host list", unknown
     rows = (data or {}).get("hosts") if isinstance(data, dict) else data
+    cfg = unknown
+    if isinstance(data, dict) and "config_backup_configured" in data:
+        cfg = {"configured": bool(data.get("config_backup_configured")),
+               "reason": data.get("config_backup_reason") or None}
     out = []
     for h in rows or []:
         if not isinstance(h, dict) or h.get("kind") != "agent":
@@ -109,7 +124,7 @@ def list_hosts(identity) -> tuple[list, str | None]:
                         "online": h.get("online"),
                         "capture_capable": bool(poll),
                         "last_config_poll": poll})
-    return out, None
+    return out, None, cfg
 
 
 def request_capture(identity, host_id: str) -> tuple[bool, str]:

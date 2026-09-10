@@ -212,7 +212,7 @@ def api_hosts(request: Request) -> dict:
     for h in hosts:
         h["backed_up"] = True
     known = {h["host_id"] for h in hosts}
-    fleet, note = controller.list_hosts(who)
+    fleet, note, cbcfg = controller.list_hosts(who)
     for h in fleet:
         if h["host_id"] in known:
             continue
@@ -240,7 +240,19 @@ def api_hosts(request: Request) -> dict:
         h["capture_capable"] = bool(h.get("backed_up")) or bool(capable.get(h["host_id"]))
         h["online"] = onlines.get(h["host_id"])
     hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
-    return {"hosts": hosts, "note": note, "can_request": controller.configured()}
+    # When the CONTROLLER itself has no Flashback wiring, no host can ever
+    # capture and the per-host signal is meaningless — every agent reads as a
+    # stale build. Say that once, at the top, and suppress the per-host verdict
+    # rather than sending the operator to update agents that are already current.
+    controller_blocked = cbcfg.get("configured") is False
+    if controller_blocked:
+        for h in hosts:
+            if not h.get("backed_up"):
+                h["capture_capable"] = None      # unknown — the fault is upstream
+    return {"hosts": hosts, "note": note,
+            "can_request": controller.configured() and not controller_blocked,
+            "config_backup_configured": cbcfg.get("configured"),
+            "config_backup_reason": cbcfg.get("reason")}
 
 
 @app.get("/api/compare/paths")
@@ -262,7 +274,7 @@ def api_compare(request: Request, path: str = Query(...),
     # operator needs to see here, and the store cannot know about it.
     have = {out["baseline"]["host_id"]} if out.get("baseline") else set()
     have |= {h["host_id"] for h in out.get("hosts") or []}
-    fleet, _note = controller.list_hosts(who)
+    fleet, _note, _cb = controller.list_hosts(who)
     known = {m["host_id"] for m in out.get("missing") or []}
     for h in fleet:
         if h["host_id"] not in have and h["host_id"] not in known:
@@ -297,7 +309,7 @@ def api_backup_now_many(request: Request, body: dict = Body(default=None)) -> di
                             detail="Requesting a backup needs operator or superuser.")
     ids = (body or {}).get("host_ids")
     if ids == "all" or not ids:
-        fleet, _note = controller.list_hosts(who)
+        fleet, _note, _cb = controller.list_hosts(who)
         ids = [h["host_id"] for h in fleet] or [h["host_id"] for h in store.list_hosts()]
     if not isinstance(ids, list):
         raise HTTPException(status_code=400, detail="host_ids must be a list, or \"all\".")

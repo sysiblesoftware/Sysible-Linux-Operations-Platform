@@ -156,6 +156,13 @@ async function loadHosts(){
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
   if(d&&d.note){col.appendChild(el('div','note',d.note));}
+  // The CONTROLLER's own wiring. When it is missing, no host can ever capture —
+  // so say it once here instead of letting every row read as a stale agent,
+  // which is what sent operators off updating agents that were already current.
+  if(d&&d.config_backup_configured===false){
+    col.appendChild(el('div','note err',
+      d.config_backup_reason||'The Controller has no Flashback wiring, so no host can capture.'));
+  }
   if(!hosts.length){col.appendChild(el('div','empty',
     'No hosts. Enrolled agent hosts appear here as soon as the Controller lists them.'));return;}
   // Grouped by ENVIRONMENT, the way the EE panel groups them. A flat list of
@@ -194,6 +201,13 @@ function hostRow(h,d,col){
     st.title="This host's agent has never asked the Controller for config-backup "
             +"work, so it is running a build from before config backup existed. "
             +"Back up now will keep doing nothing until its agent is updated.";
+  }else if(h.capture_capable===null||h.capture_capable===undefined){
+    // Unknown, not "waiting": either this Controller cannot relay snapshots at
+    // all (see the banner above) or it is too old to report the per-agent
+    // signal. Promising a check-in that can never produce anything is exactly
+    // the false reassurance this column exists to remove.
+    st.className='hstat waiting';
+    st.textContent='no backup captured yet';
   }else{
     st.className='hstat waiting';
     st.textContent='no backup captured yet — waiting for its next check-in';

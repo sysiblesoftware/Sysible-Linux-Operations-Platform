@@ -200,9 +200,13 @@ def test_the_right_token_is_accepted(cl, monkeypatch):
 # Listing only hosts WITH history made a correctly-wired fleet that had not
 # captured yet look identical to a broken one — both rendered "No host has
 # reported a config backup yet", which covered four different faults at once.
-def _fake_fleet(monkeypatch, hosts, note=None):
+_UNKNOWN_CB = {"configured": None, "reason": None}
+
+
+def _fake_fleet(monkeypatch, hosts, note=None, cb=None):
     import backend.controller as ctrl
-    monkeypatch.setattr(ctrl, "list_hosts", lambda identity: (hosts, note))
+    monkeypatch.setattr(ctrl, "list_hosts",
+                        lambda identity: (hosts, note, cb or _UNKNOWN_CB))
 
 
 def test_enrolled_hosts_show_with_no_history_yet(cl, monkeypatch):
@@ -484,7 +488,8 @@ def test_backing_up_all_hosts_asks_each_one(cl, monkeypatch):
     import backend.controller as ctrl
     asked = []
     monkeypatch.setattr(ctrl, "list_hosts", lambda i: (
-        [{"host_id": "h1", "label": "a"}, {"host_id": "h2", "label": "b"}], None))
+        [{"host_id": "h1", "label": "a"}, {"host_id": "h2", "label": "b"}],
+        None, _UNKNOWN_CB))
     monkeypatch.setattr(ctrl, "request_capture",
                         lambda i, h: (asked.append(h) or (True, "ok")))
     r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": "all"})
@@ -576,7 +581,7 @@ def test_a_host_whose_agent_never_asks_is_marked_incapable(cl, monkeypatch):
          "capture_capable": False, "online": True},
         {"host_id": "new", "label": "new-box", "environment": "dev", "address": "10.0.0.2",
          "capture_capable": True, "online": True},
-    ], None))
+    ], None, _UNKNOWN_CB))
     monkeypatch.setattr(ctrl, "configured", lambda: True)
     hosts = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}
     assert hosts["old"]["capture_capable"] is False
@@ -593,8 +598,84 @@ def test_stored_history_proves_capability_whatever_the_controller_says(cl, monke
     monkeypatch.setattr(ctrl, "list_hosts", lambda who: ([
         {"host_id": "h1", "label": "web1", "environment": "", "address": "",
          "capture_capable": False, "online": True},
-    ], None))
+    ], None, _UNKNOWN_CB))
     monkeypatch.setattr(ctrl, "configured", lambda: True)
     h1 = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}["h1"]
     assert h1["backed_up"] is True
     assert h1["capture_capable"] is True, "a host with history was called incapable"
+
+
+# ---------------------------------------------------------------------------
+# When the CONTROLLER is the fault, do not blame the agents.
+#
+# The per-host signal ("this agent has never asked for config-backup work") is
+# only meaningful if the Controller can relay snapshots at all. On a Controller
+# with no Flashback wiring NO agent ever asks, so every row rendered "agent
+# doesn't do config backup — update this host's agent" — and the operator went
+# and updated agents that were already current, which changed nothing.
+# ---------------------------------------------------------------------------
+_CB_OFF = {"configured": False, "reason": "this controller has no Flashback wiring"}
+_CB_ON = {"configured": True, "reason": None}
+
+
+def test_an_unwired_controller_is_reported_once_not_per_host(cl, monkeypatch):
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    _fake_fleet(monkeypatch, [
+        {"host_id": "h1", "label": "a", "capture_capable": False, "online": True},
+        {"host_id": "h2", "label": "b", "capture_capable": False, "online": True},
+    ], cb=_CB_OFF)
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert d["config_backup_configured"] is False
+    assert "Flashback wiring" in (d["config_backup_reason"] or "")
+    # None = unknown. Not False, which the console renders as "update this agent".
+    assert [h["capture_capable"] for h in d["hosts"]] == [None, None]
+
+
+def test_back_up_now_is_withdrawn_when_it_could_not_possibly_work(cl, monkeypatch):
+    """Offering the button on a Controller that cannot relay a snapshot is the
+    exact "Back up now does nothing" complaint, one layer up."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "a", "capture_capable": False}],
+                cb=_CB_OFF)
+    assert cl.get("/api/hosts", headers=GOOD).json()["can_request"] is False
+
+
+def test_a_wired_controller_still_names_the_stale_agent(cl, monkeypatch):
+    """The per-host verdict is suppressed only when it would be meaningless."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    _fake_fleet(monkeypatch, [
+        {"host_id": "old", "label": "a", "capture_capable": False, "online": True},
+        {"host_id": "new", "label": "b", "capture_capable": True, "online": True},
+    ], cb=_CB_ON)
+    hosts = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}
+    assert hosts["old"]["capture_capable"] is False
+    assert hosts["new"]["capture_capable"] is True
+    assert cl.get("/api/hosts", headers=GOOD).json()["can_request"] is True
+
+
+def test_an_older_controller_that_says_nothing_is_unknown_not_broken(cl, monkeypatch):
+    """A Controller predating the flag must not be reported as unwired — that
+    would replace one wrong diagnosis with another."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "a", "capture_capable": True}])
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert d["config_backup_configured"] is None
+    assert d["can_request"] is True
+    assert d["hosts"][0]["capture_capable"] is True
+
+
+def test_history_still_wins_over_an_unwired_controller(cl, monkeypatch):
+    """A host with stored snapshots demonstrably captured at some point; the
+    banner explains the present, but its rows must not be downgraded."""
+    import backend.controller as ctrl
+    import backend.store as store
+    store.ingest_snapshot("h1", "web1", [{"path": "/etc/hosts", "content_b64": "eA=="}])
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    _fake_fleet(monkeypatch, [{"host_id": "h1", "label": "web1", "capture_capable": False}],
+                cb=_CB_OFF)
+    h1 = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}["h1"]
+    assert h1["backed_up"] is True and h1["capture_capable"] is True
