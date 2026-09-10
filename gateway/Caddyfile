@@ -255,6 +255,15 @@ sysible.slop {
 	handle /auth/* {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
+	# Shared brand assets — the topographic background every SLOP surface draws
+	# (portal, sign-in, Flashback, Visualizer). PUBLIC on purpose: the sign-in page
+	# is the first thing anyone sees and it must be able to load its own
+	# background, which a forward_auth'd asset could not be. Static art, no data.
+	handle /brand/* {
+		root * /srv/portal
+		file_server
+		header Cache-Control "public, max-age=604800, immutable"
+	}
 	handle /login {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
