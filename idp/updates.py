@@ -19,7 +19,12 @@ import urllib.error
 import urllib.request
 
 UPSTREAM = os.environ.get("SLOP_UPDATER_UPSTREAM", "updater:8080")
-SECRET = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")
+# The updater has its OWN secret (see updater/backend/app.py): it holds the host's
+# Docker socket, and the platform-wide SSO secret is held by every service on this
+# network. Fall back to the shared one so an install predating the split keeps
+# working; the updater is the side that warns about it.
+SECRET = (os.environ.get("SYSIBLE_UPDATER_SECRET", "")
+          or os.environ.get("SYSIBLE_SSO_SHARED_SECRET", ""))
 TIMEOUT = float(os.environ.get("SLOP_UPDATER_TIMEOUT", "20"))
 
 

@@ -36,6 +36,12 @@ services:
       # internal network, proving itself with the platform shared secret. The IdP
       # deliberately has NO Docker socket of its own.
       SLOP_UPDATER_UPSTREAM: ${SLOP_UPDATER_UPSTREAM:-updater:8080}
+      # The updater's OWN secret. It holds the host's Docker socket, so it is not
+      # authenticated with the platform-wide value every other service carries —
+      # otherwise a flaw in any of them is one hop from a root shell. Only these
+      # two services get it. Empty falls back to the shared secret (an install
+      # that predates the split), and the updater says so on every start.
+      SYSIBLE_UPDATER_SECRET: ${SYSIBLE_UPDATER_SECRET:-}
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
     volumes:
       - slop-idp-data:/data     # the user store (SQLite) — persist across restarts
@@ -165,6 +171,8 @@ services:
     container_name: sysible-slop-updater
     restart: unless-stopped
     environment:
+      # See the note on the IdP: this pair, and only this pair, shares it.
+      SYSIBLE_UPDATER_SECRET: ${SYSIBLE_UPDATER_SECRET:-}
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
       # Where install.sh cloned the products. Bind-mounted at the SAME path below
       # so a build context resolves identically inside the container and on the

@@ -386,3 +386,85 @@ def test_an_action_and_an_update_cannot_run_at_once(env, client, monkeypatch):
             jobs._lock.release()
             break
         time.sleep(0.02)
+
+
+# ---------------------------------------------------------------------------
+# THE SECRET THAT IS NOT THE PLATFORM SECRET.
+#
+# This service holds the host's Docker socket. Every other service on the compose
+# network — Flashback, the Visualizer, the gateway — carries
+# SYSIBLE_SSO_SHARED_SECRET in its own environment, so authenticating this one
+# with that same value made a flaw in ANY of them exactly one hop from a root
+# shell: read your own env, POST to updater:8080, done.
+# ---------------------------------------------------------------------------
+def _reload(monkeypatch, tmp_path, updater_secret=None, sso_secret=None):
+    if updater_secret is None:
+        monkeypatch.delenv("SYSIBLE_UPDATER_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("SYSIBLE_UPDATER_SECRET", updater_secret)
+    if sso_secret is None:
+        monkeypatch.delenv("SYSIBLE_SSO_SHARED_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("SYSIBLE_SSO_SHARED_SECRET", sso_secret)
+    monkeypatch.setenv("SYSIBLE_SRC_DIR", str(tmp_path / "src"))
+    import importlib
+    from backend import apps as apps_mod, app as app_mod
+    importlib.reload(apps_mod)
+    return importlib.reload(app_mod)
+
+
+def test_the_platform_wide_secret_no_longer_opens_the_socket(tmp_path, monkeypatch):
+    """The whole point. A service holding only the SSO secret is refused."""
+    app_mod = _reload(monkeypatch, tmp_path,
+                      updater_secret="updater-only", sso_secret="platform-wide")
+    c = TestClient(app_mod.app)
+    assert c.get("/api/status", headers=_hdrs(secret="platform-wide")).status_code == 401
+    assert c.post("/api/update/controller",
+                  headers=_hdrs(secret="platform-wide")).status_code == 401
+    assert c.post("/api/action/slop/restart",
+                  headers=_hdrs(secret="platform-wide")).status_code == 401
+
+
+def test_its_own_secret_is_accepted(tmp_path, monkeypatch):
+    app_mod = _reload(monkeypatch, tmp_path,
+                      updater_secret="updater-only", sso_secret="platform-wide")
+    c = TestClient(app_mod.app)
+    assert c.get("/api/status", headers=_hdrs(secret="updater-only")).status_code == 200
+
+
+def test_an_install_predating_the_split_still_works_but_says_so(tmp_path, monkeypatch,
+                                                                capsys):
+    """Bricking the update button on an existing install would be worse than the
+    hop. It degrades — and announces the degradation on every start rather than
+    quietly reintroducing it."""
+    app_mod = _reload(monkeypatch, tmp_path, updater_secret=None,
+                      sso_secret="platform-wide")
+    out = capsys.readouterr().out
+    assert "SYSIBLE_UPDATER_SECRET is not set" in out
+    assert "Docker socket" in out
+    c = TestClient(app_mod.app)
+    assert c.get("/api/status", headers=_hdrs(secret="platform-wide")).status_code == 200
+
+
+def test_neither_secret_is_still_fail_closed(tmp_path, monkeypatch):
+    app_mod = _reload(monkeypatch, tmp_path, updater_secret=None, sso_secret=None)
+    c = TestClient(app_mod.app)
+    assert c.get("/api/status", headers=_hdrs(secret="")).status_code == 503
+    assert c.post("/api/update/controller", headers=_hdrs(secret="")).status_code == 503
+
+
+def test_the_compose_file_hands_it_to_exactly_two_services():
+    """A regression guard on the deployment, not the code: adding
+    SYSIBLE_UPDATER_SECRET to a third service silently restores the hop, and
+    nothing in Python would notice."""
+    import re
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "docker-compose.yml").read_text()
+    services = re.findall(r"^  ([a-z0-9_-]+):$", text, re.M)
+    holders = []
+    for i, name in enumerate(services):
+        start = text.index(f"\n  {name}:\n")
+        end = text.index(f"\n  {services[i + 1]}:\n") if i + 1 < len(services) else len(text)
+        if "SYSIBLE_UPDATER_SECRET" in text[start:end]:
+            holders.append(name)
+    assert sorted(holders) == ["idp", "updater"], holders

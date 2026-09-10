@@ -33,10 +33,29 @@ from . import apps, git, jobs
 
 app = FastAPI(title="Sysible updater", docs_url=None, redoc_url=None, openapi_url=None)
 
-_SECRET = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")
+# ITS OWN SECRET, not the platform-wide one. Every service on this network carries
+# SYSIBLE_SSO_SHARED_SECRET, and this service holds the host's Docker socket — so
+# authenticating it with that shared value made a flaw in ANY of them (Flashback,
+# the Visualizer, the gateway) one hop from a root shell: read the secret out of
+# your own environment, POST here, done. SYSIBLE_UPDATER_SECRET is known only to
+# the IdP and this service, so that hop does not exist.
+#
+# The fallback keeps an install that predates the split working rather than
+# bricking its update button, but it restores the hop — so it says so, loudly and
+# on every start, instead of degrading quietly.
+_SECRET = os.environ.get("SYSIBLE_UPDATER_SECRET", "")
+_SHARED_FALLBACK = not _SECRET
+if _SHARED_FALLBACK:
+    _SECRET = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")
 if not _SECRET:
-    print("[sysible-updater] SYSIBLE_SSO_SHARED_SECRET is empty — every request will be "
-          "refused (fail closed).", flush=True)
+    print("[sysible-updater] no SYSIBLE_UPDATER_SECRET and no SYSIBLE_SSO_SHARED_SECRET — "
+          "every request will be refused (fail closed).", flush=True)
+elif _SHARED_FALLBACK:
+    print("[sysible-updater] SYSIBLE_UPDATER_SECRET is not set; falling back to the "
+          "PLATFORM-WIDE SYSIBLE_SSO_SHARED_SECRET. Every service on this network holds "
+          "that value, so any one of them can reach the Docker socket through this "
+          "service. Re-run install.sh (or set SYSIBLE_UPDATER_SECRET in the SLOP .env "
+          "and recreate idp + updater) to separate them.", flush=True)
 
 
 def _authorized(request: Request) -> str:

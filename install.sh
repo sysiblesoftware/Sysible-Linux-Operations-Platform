@@ -251,6 +251,33 @@ if [ -z "$SSO_SECRET" ]; then
 fi
 export SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET"
 
+# ---- updater secret (one per install; persisted in this repo's .env) ---------
+# The updater holds the host's DOCKER SOCKET — root-equivalent — and it is the one
+# component whose whole job is to run privileged commands on the host. Every other
+# service on this network carries SYSIBLE_SSO_SHARED_SECRET, so authenticating the
+# updater with that same value made a flaw in ANY of them (Flashback, the
+# Visualizer, the gateway) a one-hop path to the socket: read the secret out of
+# your own environment, POST to updater:8080, done. This secret is known only to
+# the IdP and the updater, so that hop no longer exists.
+_upd_secret_from_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^SYSIBLE_UPDATER_SECRET=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+}
+UPD_SECRET="${SYSIBLE_UPDATER_SECRET:-$(_upd_secret_from_env || true)}"
+if [ -z "$UPD_SECRET" ]; then
+  UPD_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # Same reasoning as the SSO secret: /bin/sh has no pipefail, so a partial failure
+  # in the /dev/urandom fallback pipe is masked. This one guards a root shell on
+  # the host, so a short or empty value must never ship.
+  case "$UPD_SECRET" in
+    *[!0-9a-f]* | "") die "failed to generate a valid updater secret (need 64 hex chars)." ;;
+  esac
+  [ "${#UPD_SECRET}" -eq 64 ] || die "generated updater secret is not 64 hex chars (got ${#UPD_SECRET})."
+  _upsert_env SYSIBLE_UPDATER_SECRET "$UPD_SECRET"
+  say "Generated an updater secret into $ENV_FILE"
+fi
+export SYSIBLE_UPDATER_SECRET="$UPD_SECRET"
+
 # ---- Flashback agent token (one per install; persisted in this repo's .env) ----
 # Flashback's snapshot-ingest and restore endpoints are authenticated by a bearer
 # token, and they FAIL CLOSED when it is unset — so without this, config backups
