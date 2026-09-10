@@ -19,6 +19,8 @@ and a line of explanation, not the page.
 from __future__ import annotations
 
 import os
+import re
+from urllib.parse import quote
 
 # DEFENSIVE on purpose. This module is an ENRICHMENT — it makes the console show
 # hosts that have not captured yet — and an enrichment must never be able to stop
@@ -36,6 +38,11 @@ except ImportError:                                  # pragma: no cover
 _CONTROLLER = os.getenv("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800")
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 _TIMEOUT = float(os.getenv("SYSIBLE_FLASHBACK_CONTROLLER_TIMEOUT_S", "6"))
+
+
+# What the Controller accepts as a host id (backend/app.py enroll()): alphanumerics
+# plus dot, dash and underscore. Anything else is not a host we could ask.
+_HOST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 
 
 def _url() -> str:
@@ -136,6 +143,16 @@ def request_capture(identity, host_id: str) -> tuple[bool, str]:
     RBAC rather than trusting us."""
     if not configured():
         return False, unavailable_reason() or "no Controller is configured"
+    # host_id is the ONLY caller-controlled part of any URL this module builds,
+    # and it lands in the PATH of a request carrying the platform shared secret.
+    # /api/backup-now takes host_ids from a JSON LIST, so nothing upstream of here
+    # constrains it the way a FastAPI path parameter would: an unvalidated
+    # "../../whatever" collapses before the request leaves the process, turning
+    # "Back up now" into a way to POST to arbitrary Controller endpoints as the
+    # gateway. The Controller mints host ids from [A-Za-z0-9._-]; match that.
+    host_id = (host_id or "").strip()
+    if not _HOST_ID_RE.match(host_id):
+        return False, "not a valid host id"
     headers = {
         "Accept": "application/json",
         "X-Sysible-Auth": _SSO_SECRET,
@@ -144,7 +161,8 @@ def request_capture(identity, host_id: str) -> tuple[bool, str]:
     }
     try:
         with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
-            r = c.post(f"{_url()}/api/host/{host_id}/backup-now", headers=headers)
+            r = c.post(f"{_url()}/api/host/{quote(host_id, safe='')}/backup-now",
+                       headers=headers)
     except Exception as e:
         return False, f"could not reach the Controller ({type(e).__name__})"
     if r.status_code in (401, 403):

@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import os
 
+import re as _re
+from urllib.parse import quote as _quote
+
 import httpx
 
 from . import fleet
@@ -226,11 +229,26 @@ def fetch(app: str, identity, limit: int = 100) -> dict:
             "errors": out["errors"], "notes": out["notes"]}
 
 
+# A SLEP run reference, as it appears in a run row. Deliberately narrow: this
+# value is the ONLY caller-controlled part of any URL this module builds, and it
+# lands in the PATH of a request that carries the platform shared secret.
+# Unvalidated, "../../api/admin/users" collapsed to /api/admin/users/log before
+# the request left the process — turning the log viewer into a way for ANY
+# signed-in user, auditor included, to GET arbitrary SLEP endpoints through a
+# privileged internal channel and read the raw body. "?" and "#" were just as
+# effective, truncating the path and injecting a query.
+_REF_RE = _re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+
+
 def fetch_log(app: str, identity, ref: str) -> tuple[str | None, str | None]:
     """A raw log body for an app, when it has one. SLEP exposes per-run logs; the
     Controller exposes its own service log (superuser-only upstream)."""
     if app == "slep":
-        return _get(_url(_SLEP, "https") + f"/api/runs/{ref}/log", identity, want_json=False)
+        ref = (ref or "").strip()
+        if not _REF_RE.match(ref):
+            return None, "not a valid run reference"
+        return _get(_url(_SLEP, "https") + f"/api/runs/{_quote(ref, safe='')}/log",
+                    identity, want_json=False)
     if app == "controller":
         return _get(_url(_CONTROLLER, "https") + "/api/controller-log", identity,
                     {"lines": 500}, want_json=False)

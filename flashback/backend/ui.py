@@ -66,6 +66,10 @@ _CSS += """
 .item.pending .sub{color:var(--faint);font-style:italic}
 .note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
   color:var(--muted);font-size:12px}
+/* The controller-wide banner. It has to out-rank an ordinary note: it says no
+   host can capture at all, and reading as one more muted line is how the wrong
+   diagnosis ("update your agents") kept winning. */
+.note.err{border-color:var(--err);color:var(--err);background:rgba(229,83,75,.10)}
 """
 
 _CSS += """
@@ -106,6 +110,10 @@ _CSS += """
 .item.pending .sub{color:var(--faint);font-style:italic}
 .note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
   color:var(--muted);font-size:12px}
+/* The controller-wide banner. It has to out-rank an ordinary note: it says no
+   host can capture at all, and reading as one more muted line is how the wrong
+   diagnosis ("update your agents") kept winning. */
+.note.err{border-color:var(--err);color:var(--err);background:rgba(229,83,75,.10)}
 .faint{color:var(--faint)}
 """
 
@@ -133,8 +141,10 @@ async function loadHosts(){
   const cmp=el('button','btn ghost sm','Compare files across hosts');
   cmp.onclick=loadComparePaths;
   bar.appendChild(cmp);
+  let allBtn=null;
   if(CAN_WRITE){
     const all=el('button','btn ghost sm','Back up all');
+    allBtn=all;
     all.onclick=function(){
       if(!window.confirm('Ask every tracked host to back up its config now?'))return;
       all.disabled=true;
@@ -162,6 +172,10 @@ async function loadHosts(){
   if(d&&d.config_backup_configured===false){
     col.appendChild(el('div','note err',
       d.config_backup_reason||'The Controller has no Flashback wiring, so no host can capture.'));
+    // Withdraw the fleet-wide button too, not just the per-host ones. Leaving it
+    // there is the same broken promise one row wider: every host would be asked,
+    // and every host would fail.
+    if(allBtn) allBtn.remove();
   }
   if(!hosts.length){col.appendChild(el('div','empty',
     'No hosts. Enrolled agent hosts appear here as soon as the Controller lists them.'));return;}

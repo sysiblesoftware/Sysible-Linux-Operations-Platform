@@ -679,3 +679,55 @@ def test_history_still_wins_over_an_unwired_controller(cl, monkeypatch):
                 cb=_CB_OFF)
     h1 = {h["host_id"]: h for h in cl.get("/api/hosts", headers=GOOD).json()["hosts"]}["h1"]
     assert h1["backed_up"] is True and h1["capture_capable"] is True
+
+
+# ---------------------------------------------------------------------------
+# "Back up now" builds a Controller URL from a caller-supplied host id, and that
+# request carries the platform shared secret. /api/backup-now takes the ids from
+# a JSON LIST, so nothing constrains them the way a path parameter would — an
+# unvalidated "../../whatever" collapses before the request leaves the process,
+# and the operator gets to POST to arbitrary Controller endpoints as the gateway.
+# ---------------------------------------------------------------------------
+def _capture_url(monkeypatch):
+    import backend.controller as ctrl
+    seen = []
+
+    class _Resp:
+        status_code = 200
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, headers=None):
+            seen.append(url)
+            return _Resp()
+    monkeypatch.setattr(ctrl, "configured", lambda: True)
+    monkeypatch.setattr(ctrl.httpx, "Client", lambda **kw: _C())
+    return seen
+
+
+def test_a_real_host_id_is_still_asked(cl, monkeypatch):
+    seen = _capture_url(monkeypatch)
+    r = cl.post("/api/hosts/web-1.example_01/backup-now", headers=GOOD)
+    assert r.status_code == 200, r.text
+    assert seen and seen[0].endswith("/api/host/web-1.example_01/backup-now")
+
+
+@pytest.mark.parametrize("hid", [
+    "../../api/controller-restart",
+    "x/../../admin",
+    "a?force=1",
+    "a#frag",
+    "has space",
+    "/etc/passwd",
+    "x" * 129,
+])
+def test_a_forged_host_id_never_becomes_a_controller_request(cl, monkeypatch, hid):
+    """Through the LIST endpoint, which is the one with no path-parameter to hide
+    behind."""
+    seen = _capture_url(monkeypatch)
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": [hid]})
+    assert r.status_code == 200, r.text
+    assert seen == [], f"{hid!r} was sent to the Controller as {seen}"
+    assert r.json()["requested"] == 0
+    assert r.json()["failed"][0]["message"] == "not a valid host id"

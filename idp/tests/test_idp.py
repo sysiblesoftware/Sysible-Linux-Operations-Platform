@@ -525,3 +525,41 @@ def test_the_updater_is_always_called_as_a_superuser(cl, monkeypatch):
     _login(cl, "admin", ADMIN_PW)
     cl.get("/admin/updates/status", headers={"X-Sysible-Role": "auditor"})
     assert seen == {"user": "admin", "role": "superuser"}
+
+
+# ---------------------------------------------------------------------------
+# The updater holds the host's Docker socket — root-equivalent. The product key
+# and the lifecycle action are the only caller-supplied parts of any URL the IdP
+# builds towards it, so a value that can reshape that URL must never get as far
+# as the updater's own allowlist check.
+# ---------------------------------------------------------------------------
+def test_a_forged_product_key_never_becomes_an_updater_call(monkeypatch):
+    import updates
+    sent = []
+    monkeypatch.setattr(updates, "_call",
+                        lambda path, u, r, method="GET": sent.append(path) or ({}, None))
+    for bad in ("../action/slop/stop", "a/b", "a?x=1", "a#f", "", "A" * 33, "slop stop"):
+        data, err = updates.apply(bad, "al", "superuser")
+        assert data is None and err == "unknown product", bad
+    assert sent == [], sent
+
+
+def test_a_forged_action_never_becomes_an_updater_call(monkeypatch):
+    import updates
+    sent = []
+    monkeypatch.setattr(updates, "_call",
+                        lambda path, u, r, method="GET": sent.append(path) or ({}, None))
+    for key, act in (("slop", "../../update/slop"), ("../x", "stop"), ("slop", "st op")):
+        data, err = updates.action(key, act, "al", "superuser")
+        assert data is None and err == "unknown product or action", (key, act)
+    assert sent == [], sent
+
+
+def test_the_real_keys_and_actions_still_go_through(monkeypatch):
+    import updates
+    sent = []
+    monkeypatch.setattr(updates, "_call",
+                        lambda path, u, r, method="GET": sent.append(path) or ({}, None))
+    updates.apply("controller", "al", "superuser")
+    updates.action("slop", "restart", "al", "superuser")
+    assert sent == ["/api/update/controller", "/api/action/slop/restart"]

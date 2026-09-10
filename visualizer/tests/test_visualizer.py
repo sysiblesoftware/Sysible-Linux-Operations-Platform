@@ -438,3 +438,62 @@ def test_the_icon_needs_no_identity(client):
     yet. Gating it would leave exactly that tab blank. An icon is not a secret."""
     r = client.get("/favicon.svg")                 # no gateway headers at all
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The log viewer's `ref` is the only caller-controlled part of any URL this
+# service builds — and it lands in the PATH of a request that carries the
+# platform shared secret. Unvalidated, "../../api/admin/users" collapsed to
+# /api/admin/users/log before the request left the process, so ANY signed-in
+# user (an auditor included) could use the log viewer to GET arbitrary SLEP
+# endpoints through a privileged internal channel and read the raw body back.
+# ---------------------------------------------------------------------------
+def _captured_url(monkeypatch, ref):
+    from backend import sources
+    seen = {}
+
+    def _fake_get(url, identity, params=None, want_json=True):
+        seen["url"] = url
+        return "log body", None
+    monkeypatch.setattr(sources, "_get", _fake_get)
+
+    class _Id:
+        user, role = "auditor-al", "auditor"
+    body, err = sources.fetch_log("slep", _Id(), ref)
+    return seen.get("url"), body, err
+
+
+def test_a_plain_run_reference_still_works(monkeypatch):
+    url, body, err = _captured_url(monkeypatch, "run-42")
+    assert err is None and body == "log body"
+    assert url.endswith("/api/runs/run-42/log")
+
+
+@pytest.mark.parametrize("ref", [
+    "../../api/admin/users",          # collapses to /api/admin/users/log
+    "x/../../secret",
+    "a?admin=1",                      # truncates the path, injects a query
+    "a#frag",
+    "..%2f..%2fadmin",
+    "a b",
+    "/etc/passwd",
+    "",
+    "x" * 129,
+])
+def test_a_forged_reference_never_reaches_an_upstream(monkeypatch, ref):
+    url, body, err = _captured_url(monkeypatch, ref)
+    assert url is None, f"{ref!r} was sent upstream as {url}"
+    assert body is None and err == "not a valid run reference"
+
+
+def test_the_controller_log_takes_no_reference_at_all(monkeypatch):
+    """Its URL is fixed, so nothing the caller sends can steer it."""
+    from backend import sources
+    seen = {}
+    monkeypatch.setattr(sources, "_get",
+                        lambda url, i, params=None, want_json=True: (seen.update(url=url), ("x", None))[1])
+
+    class _Id:
+        user, role = "al", "auditor"
+    sources.fetch_log("controller", _Id(), "../../anything")
+    assert seen["url"].endswith("/api/controller-log")
