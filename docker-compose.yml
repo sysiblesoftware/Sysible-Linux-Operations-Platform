@@ -52,10 +52,15 @@ services:
     image: caddy:2-alpine
     container_name: sysible-slop-gateway
     restart: unless-stopped
-    depends_on:
-      - idp
-      - flashback
-      - visualizer
+    # NO depends_on. It bought ordering and cost the front door: with a plain
+    # depends_on, a module that fails to START (Flashback cannot bind its
+    # loopback port because something else holds it, say) stops compose bringing
+    # the gateway up at all — so a broken side feature takes down the portal AND
+    # the sign-in page, with nothing on :443 to explain why.
+    #
+    # Caddy resolves every upstream at request time, so it needs none of them to
+    # exist when it starts. A module that is down 502s on its own path and
+    # nothing else is affected, which is the behaviour we actually want.
     ports:
       - "80:80"     # HTTP → redirected to HTTPS by Caddy
       - "443:443"   # the single front door
