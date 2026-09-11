@@ -44,6 +44,12 @@ _TIMEOUT = float(os.getenv("SYSIBLE_FLASHBACK_CONTROLLER_TIMEOUT_S", "6"))
 # plus dot, dash and underscore. Anything else is not a host we could ask.
 _HOST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 
+# Why a capture request failed, when the fault is the CALLER's and not the
+# Controller's. A batch rejected for malformed ids is a 400; one that failed
+# because the Controller is unreachable is a 502, and conflating them tells the
+# operator to go look at the wrong machine.
+INVALID_HOST_ID = "not a valid host id"
+
 
 def _url() -> str:
     u = (_CONTROLLER or "").strip().rstrip("/")
@@ -81,6 +87,15 @@ def list_hosts(identity) -> tuple[list, str | None, dict]:
     report it — unknown, not broken.
     """
     unknown = {"configured": None, "reason": None}
+    # A Controller we cannot USE is not "unknown" — it is blocking. Capture runs
+    # entirely through the Controller (we ask it to park a request; the agent
+    # collects it on its next poll), so while it is unreachable or refusing us,
+    # no host can back anything up. Reporting that as `configured: None` left the
+    # console offering "Back up now" and "Back up all" buttons that could not
+    # possibly work, with the explanation demoted to a muted line.
+    def _blocked(reason: str) -> dict:
+        return {"configured": False, "reason": reason}
+
     if not configured():
         # A standalone Flashback has no Controller to ask and needs no note; a
         # missing dependency is a real fault and gets one.
@@ -95,15 +110,24 @@ def list_hosts(identity) -> tuple[list, str | None, dict]:
         with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
             r = c.get(f"{_url()}/api/hosts", headers=headers)
     except Exception as e:
-        return [], f"could not reach the Controller for its host list ({type(e).__name__})", unknown
+        msg = (f"could not reach the Controller ({type(e).__name__}) — no host can back "
+               f"anything up until it is back. Check it with: sysible_ctl controller status")
+        return [], msg, _blocked(msg)
     if r.status_code in (401, 403):
-        return [], f"the Controller did not permit this host list for role '{identity.role}'", unknown
+        # The capture request carries the SAME identity, so it will be refused
+        # identically. Offering the button would be a promise we cannot keep.
+        msg = (f"the Controller did not permit this for role '{identity.role}' — "
+               f"backups cannot be requested with this account")
+        return [], msg, _blocked(msg)
     if r.status_code >= 400:
-        return [], f"the Controller returned HTTP {r.status_code} for its host list", unknown
+        msg = (f"the Controller returned HTTP {r.status_code} — it is reachable but not "
+               f"answering usefully, so no host can back anything up")
+        return [], msg, _blocked(msg)
     try:
         data = r.json()
     except Exception:
-        return [], "the Controller returned a malformed host list", unknown
+        msg = "the Controller returned a malformed host list — it is not answering usefully"
+        return [], msg, _blocked(msg)
     rows = (data or {}).get("hosts") if isinstance(data, dict) else data
     cfg = unknown
     if isinstance(data, dict) and "config_backup_configured" in data:
@@ -152,7 +176,7 @@ def request_capture(identity, host_id: str) -> tuple[bool, str]:
     # gateway. The Controller mints host ids from [A-Za-z0-9._-]; match that.
     host_id = (host_id or "").strip()
     if not _HOST_ID_RE.match(host_id):
-        return False, "not a valid host id"
+        return False, INVALID_HOST_ID
     headers = {
         "Accept": "application/json",
         "X-Sysible-Auth": _SSO_SECRET,

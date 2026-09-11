@@ -267,11 +267,17 @@ function renderHosts(){
   col.appendChild(bar);
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
-  if(d&&d.note){col.appendChild(el('div','note',d.note));}
+  // Skipped when the blocking banner below is about to say the same thing —
+  // printing one sentence twice, once muted and once in red, reads as two
+  // separate faults.
+  const blocked = d && d.config_backup_configured===false;
+  if(d&&d.note && !(blocked && d.note===d.config_backup_reason)){
+    col.appendChild(el('div','note',d.note));
+  }
   // The CONTROLLER's own wiring. When it is missing, no host can ever capture —
   // so say it once here instead of letting every row read as a stale agent,
   // which is what sent operators off updating agents that were already current.
-  if(d&&d.config_backup_configured===false){
+  if(blocked){
     col.appendChild(el('div','note err',
       d.config_backup_reason||'The Controller has no Flashback wiring, so no host can capture.'));
     // Withdraw the fleet-wide buttons too, not just the per-host ones. Leaving

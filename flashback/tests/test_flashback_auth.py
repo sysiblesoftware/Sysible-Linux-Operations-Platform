@@ -507,7 +507,7 @@ def test_one_unreachable_host_does_not_cost_the_batch(cl, monkeypatch):
     d = r.json()
     assert d["requested"] == 1
     assert [f["host_id"] for f in d["failed"]] == ["bad"]
-    assert "1 could not be asked" in d["message"]
+    assert "1 could NOT be asked" in d["message"]
 
 
 def test_a_fleet_backup_is_a_write(cl, monkeypatch):
@@ -724,13 +724,17 @@ def test_a_real_host_id_is_still_asked(cl, monkeypatch):
 ])
 def test_a_forged_host_id_never_becomes_a_controller_request(cl, monkeypatch, hid):
     """Through the LIST endpoint, which is the one with no path-parameter to hide
-    behind."""
+    behind.
+
+    400, not 200: a batch in which nothing could be asked is a failed request and
+    has to arrive as one. 400 rather than 502 because the fault is the caller's —
+    the Controller was never involved, and pointing the operator at it would be
+    the wrong machine."""
     seen = _capture_url(monkeypatch)
     r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": [hid]})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 400, r.text
     assert seen == [], f"{hid!r} was sent to the Controller as {seen}"
-    assert r.json()["requested"] == 0
-    assert r.json()["failed"][0]["message"] == "not a valid host id"
+    assert "not a valid host id" in r.json()["detail"]
 
 
 # ---- the console must let an operator work an ENVIRONMENT at a time ---------
@@ -775,3 +779,87 @@ def test_selection_boxes_are_withheld_from_a_reader(cl):
     assert 'data-can-write="0"' in r.text or "data-can-write='0'" in r.text
     # The write controls are gated on CAN_WRITE in the shipped script.
     assert "canPick=CAN_WRITE" in r.text.replace(" ", "")
+
+
+# ---- a Controller that cannot be USED is blocking, not "unknown" -------------
+# Reported as "Flashback isn't backing things up", and reproduced exactly: with
+# the Controller container down, /api/hosts returned can_request=True and
+# config_backup_configured=None, so the console kept offering "Back up now" and
+# "Back up all" — buttons that could not possibly work — with the explanation
+# demoted to a muted line. Capture runs ENTIRELY through the Controller (we ask
+# it to park a request; the agent collects it on its next poll), so while it is
+# unreachable nothing can back up, and the console has to say so.
+def _unreachable(monkeypatch):
+    import backend.controller as ctrl
+    def boom(*a, **kw):
+        raise OSError("connection refused")
+    monkeypatch.setattr(ctrl.httpx, "Client", boom)
+
+
+def test_an_unreachable_controller_withdraws_the_backup_buttons(cl, monkeypatch):
+    _unreachable(monkeypatch)
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert d["can_request"] is False, d
+    assert d["config_backup_configured"] is False, d
+    assert "could not reach the Controller" in (d["config_backup_reason"] or ""), d
+    # and it names the command that says what is wrong with it
+    assert "sysible_ctl controller status" in d["config_backup_reason"], d
+
+
+def test_a_batch_that_asked_nobody_is_a_failure_not_a_calm_status_line(cl, monkeypatch):
+    """It returned 200 with "Requested on 0 host(s) — each captures on its next
+    check-in", which the console renders as an ordinary message because the HTTP
+    call succeeded. Pressing "Back up all" against a downed Controller looked
+    reassuring and backed up precisely nothing."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture",
+                        lambda i, h: (False, "could not reach the Controller (ConnectError)"))
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": ["h1", "h2"]})
+    assert r.status_code == 502, r.text          # 502: the fault is upstream
+    assert "No host could be asked" in r.json()["detail"]
+    assert "and 1 more" in r.json()["detail"]
+
+
+def test_a_partial_batch_is_still_a_success_and_counts_both_sides(cl, monkeypatch):
+    """The all-failed rule must not swallow the case this endpoint exists for:
+    one unreachable host never costs the rest."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture",
+                        lambda i, h: (False, "nope") if h == "bad" else (True, "ok"))
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": ["good", "bad"]})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["requested"] == 1
+    assert "Requested on 1 host(s)" in d["message"]
+    assert "1 could NOT be asked" in d["message"]
+
+
+def test_the_promise_of_a_capture_is_not_made_for_hosts_nobody_asked(cl, monkeypatch):
+    """"each captures on its next check-in" is a promise; it must not be printed
+    over a count of zero."""
+    import backend.controller as ctrl
+    monkeypatch.setattr(ctrl, "request_capture", lambda i, h: (False, "nope"))
+    r = cl.post("/api/backup-now", headers=GOOD, json={"host_ids": ["h1"]})
+    assert r.status_code == 502
+    assert "captures on its next check-in" not in r.json()["detail"]
+
+
+def test_a_refusing_controller_also_withdraws_the_buttons(cl, monkeypatch):
+    """The capture request carries the SAME identity, so a 403 on the host list
+    means the capture would be refused identically."""
+    import backend.controller as ctrl
+
+    class _R:
+        status_code = 403
+        text = ""
+
+    class _C:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **kw): return _R()
+
+    monkeypatch.setattr(ctrl.httpx, "Client", _C)
+    d = cl.get("/api/hosts", headers=GOOD).json()
+    assert d["can_request"] is False, d
+    assert d["config_backup_configured"] is False, d

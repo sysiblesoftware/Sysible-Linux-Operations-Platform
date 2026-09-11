@@ -322,10 +322,28 @@ def api_backup_now_many(request: Request, body: dict = Body(default=None)) -> di
         (ok if good else failed).append({"host_id": hid, "message": message})
     store.log_audit(who.user, "request-backup",
                     f"{len(ok)} host(s) requested, {len(failed)} failed")
+    # NOTHING was requested. This used to return 200 with "Requested on 0 host(s)
+    # — each captures on its next check-in", which the console renders as an
+    # ordinary status line because the HTTP call succeeded. Pressing "Back up all"
+    # against a Controller that is down therefore looked calm and reassuring while
+    # backing up precisely nothing — the whole of "Flashback isn't backing things
+    # up". A batch in which every host failed is a failed request, and has to
+    # arrive as one.
+    if failed and not ok:
+        # 400 when every id was rejected here (the caller's fault), 502 when the
+        # Controller could not be asked (not the caller's) — the two send an
+        # operator to different machines.
+        bad_ids = all(f["message"] == controller.INVALID_HOST_ID for f in failed)
+        raise HTTPException(
+            status_code=400 if bad_ids else 502,
+            detail="No host could be asked to back up: "
+                   + (failed[0]["message"] or "the request was refused")
+                   + (f" (and {len(failed) - 1} more)" if len(failed) > 1 else ""))
     return {"requested": len(ok), "failed": failed,
+            # Only promise a capture for hosts that were actually asked.
             "message": (f"Requested on {len(ok)} host(s) — each captures on its next "
                         "check-in (within a minute).")
-                       + (f" {len(failed)} could not be asked." if failed else "")}
+                       + (f" {len(failed)} could NOT be asked." if failed else "")}
 
 
 @app.post("/api/hosts/{host_id}/backup-now")
