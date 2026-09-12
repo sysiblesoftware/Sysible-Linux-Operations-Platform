@@ -750,8 +750,11 @@ def _hidden_csrf(token: str) -> str:
 
 def _login_form(next_url: str, msg: str = "", csrf: str = "") -> str:
     body = (
+        # Name everything this one sign-in actually covers. It listed the three
+        # fronted apps and predated Flashback and the Visualizer, so the page that
+        # exists to explain "one login for all of it" quietly undersold itself.
         "<h1>Sign in</h1><p class=sub>One sign-in for Controller, Engineering "
-        "Platform, and Connect.</p>"
+        "Platform, Connect, Flashback and the Visualizer.</p>"
         f"{_msg(msg)}"
         f"<form method=post action='/login?{urlencode({'next': next_url})}'>"
         f"{_hidden_csrf(csrf)}"
