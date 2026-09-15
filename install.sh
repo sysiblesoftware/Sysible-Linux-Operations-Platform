@@ -309,6 +309,25 @@ export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"
 # and inside it loopback is the container itself. Its compose maps that name to
 # the host gateway. Override for a Controller on a different machine.
 FB_URL="${SYSIBLE_FLASHBACK_URL:-http://host.docker.internal:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}"
+# ...and the address Flashback must LISTEN on for that to be reachable. These two
+# lines are one decision and were previously made in two places that disagreed:
+# this file said "the Controller runs in a container", docker-compose.yml said it
+# "runs on the host" and bound the agent port to 127.0.0.1. The compose half won
+# at runtime, so the Controller dialled the bridge gateway, found nothing
+# listening on the host's loopback, and every snapshot was refused.
+#
+# Ask docker for the real gateway rather than assuming 172.17.0.1 — a host with a
+# customised default bridge subnet has a different one, and guessing there fails
+# exactly as silently.
+FB_BIND="${SYSIBLE_FLASHBACK_AGENT_BIND:-}"
+if [ -z "$FB_BIND" ]; then
+  FB_BIND="$(docker network inspect bridge \
+             -f '{{ range .IPAM.Config }}{{ .Gateway }}{{ end }}' 2>/dev/null \
+             | awk '{print $1}')"
+  [ -n "$FB_BIND" ] || FB_BIND="172.17.0.1"
+fi
+export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"
+_upsert_kv "$ENV_FILE" SYSIBLE_FLASHBACK_AGENT_BIND "$FB_BIND" 2>/dev/null || true
 
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""

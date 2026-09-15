@@ -121,13 +121,26 @@ services:
       - "8080"                     # the gateway's front door for the browser console
     ports:
       # The AGENT api (snapshot ingest + restore delivery) has to be reachable by
-      # the Controller, which runs on the host and is not on this network. Bound to
-      # LOOPBACK only: it is not reachable off this machine, so this adds no public
-      # surface and needs no hole in the gateway's SSO. The Controller is the only
-      # client — host agents never talk to Flashback directly, so the bearer token
-      # lives in one place instead of on every host, and the Controller stamps
-      # host_id from the agent it just authenticated (a host cannot name another).
-      - "127.0.0.1:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}:8080"
+      # the Controller. The Controller is the only client — host agents never talk
+      # to Flashback directly, so the bearer token lives in one place instead of on
+      # every host, and the Controller stamps host_id from the agent it just
+      # authenticated (a host cannot name another).
+      #
+      # THE BIND ADDRESS IS NOT 127.0.0.1 BY DEFAULT, and that is the whole point.
+      # This was hardcoded to loopback "because the Controller runs on the host" —
+      # it does not. The Controller is a container, and it reaches back through
+      # host.docker.internal, which resolves to the docker bridge gateway
+      # (172.17.0.1), a DIFFERENT interface from the host's loopback. Nothing was
+      # listening there, so every snapshot and every restore poll was refused, and
+      # a fleet of perfectly healthy agents captured precisely nothing — with the
+      # console showing them all politely asking, forever.
+      #
+      # host-gateway is still not a public surface: it is reachable from containers
+      # on this host and from the host itself, not from the network, which is the
+      # property loopback was chosen for. Override with SYSIBLE_FLASHBACK_AGENT_BIND
+      # (127.0.0.1 restores the old behaviour, for a Controller genuinely on the
+      # host; 0.0.0.0 exposes it and should not be needed).
+      - "${SYSIBLE_FLASHBACK_AGENT_BIND:-172.17.0.1}:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}:8080"
     extra_hosts:
       # Reach the Controller, which is published on the HOST — without this
       # host.docker.internal does not resolve on Linux and the host list fails
