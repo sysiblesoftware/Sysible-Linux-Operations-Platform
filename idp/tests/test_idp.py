@@ -503,7 +503,7 @@ def test_apply_requires_the_csrf_token_and_origin(cl, monkeypatch):
 def test_a_missing_updater_is_a_message_not_a_crash(cl, monkeypatch):
     import app as m
     monkeypatch.setattr(m.updates, "status",
-                        lambda u, r: (None, "the updater service is not deployed"))
+                        lambda u, r, **kw: (None, "the updater service is not deployed"))
     _login(cl, "admin", ADMIN_PW)
     d = cl.get("/admin/updates/status").json()
     assert d["apps"] == [] and "not deployed" in d["error"]
@@ -517,14 +517,36 @@ def test_the_updater_is_always_called_as_a_superuser(cl, monkeypatch):
     import app as m
     seen = {}
 
-    def fake(u, r):
-        seen["user"], seen["role"] = u, r
+    def fake(u, r, refresh=False):
+        seen["user"], seen["role"], seen["refresh"] = u, r, refresh
         return {"apps": []}, None
 
     monkeypatch.setattr(m.updates, "status", fake)
     _login(cl, "admin", ADMIN_PW)
     cl.get("/admin/updates/status", headers={"X-Sysible-Role": "auditor"})
-    assert seen == {"user": "admin", "role": "superuser"}
+    assert seen == {"user": "admin", "role": "superuser", "refresh": False}
+
+
+def test_only_an_explicit_check_pays_for_a_fresh_remote_query(cl, monkeypatch):
+    """The header pill polls this endpoint from every Administration page, and each
+    product costs a round-trip to its git remote — so the default must take the
+    updater's memoised answer, and only the console's "Check now" bypass it."""
+    import app as m
+    seen = []
+    monkeypatch.setattr(m.updates, "status",
+                        lambda u, r, refresh=False: (seen.append(refresh) or ({"apps": []}, None)))
+    _login(cl, "admin", ADMIN_PW)
+    cl.get("/admin/updates/status")
+    cl.get("/admin/updates/status?refresh=1")
+    assert seen == [False, True]
+
+
+def test_the_page_offers_a_way_to_re_ask_the_remotes(cl):
+    """A cached answer must never be the only answer available."""
+    _login(cl, "admin", ADMIN_PW)
+    html = cl.get("/admin/updates").text
+    assert "id=checknow" in html
+    assert "refresh=1" in html, "the button must request a fresh check, not a re-render"
 
 
 # ---------------------------------------------------------------------------

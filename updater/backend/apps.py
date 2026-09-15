@@ -53,6 +53,19 @@ def checkout_dir(key: str) -> Path | None:
     for cand in ([Path(override)] if override else []) + [SRC_DIR / dirname]:
         if (cand / ".git").is_dir():
             return cand
+    # Last resort: a case-insensitive scan of SRC_DIR. GitHub serves each repo
+    # under its canonical capitalisation, so `git clone .../Sysible-Controller`
+    # lands in a CAPITALISED directory that the conventional path above misses —
+    # and the product then reads as "not installed on this host" on a box where
+    # it is plainly installed. Exact matches are tried first, above, so this only
+    # ever resolves a case variant. (sysible_ctl hit the same thing and answers
+    # it with `find -iname`.)
+    try:
+        for child in sorted(SRC_DIR.iterdir()):
+            if child.name.lower() == dirname.lower() and (child / ".git").is_dir():
+                return child
+    except OSError:
+        pass
     return None
 
 

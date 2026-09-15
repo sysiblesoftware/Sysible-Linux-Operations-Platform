@@ -45,9 +45,31 @@
       .then(function (r) { setDot(app, r.ok ? "up" : "down"); })
       .catch(function () { setDot(app, "down"); });
   }
-  function pollAll() { ["controller", "slep", "connect", "flashback", "visualizer"].forEach(poll); }
+  // Which apps to poll comes from the dots the page actually renders, not from a
+  // second hard-coded list: a card added here and forgotten there shows a dot that
+  // is never polled (stuck on "checking…") or polls an app with nowhere to report.
+  function healthApps() {
+    return Array.prototype.map.call(
+      document.querySelectorAll(".dot[data-health]"),
+      function (d) { return d.getAttribute("data-health"); });
+  }
+  function pollAll() { healthApps().forEach(poll); }
   pollAll();
-  setInterval(pollAll, 15000);
+  // Only while the portal is actually on screen. Each sweep is one proxied request
+  // per app, and a tab left open all day polled every 15s forever — work the gateway
+  // and every app did for nobody. Resume with an immediate sweep so coming back to
+  // the tab shows current state rather than a quarter-minute-old one.
+  var timer = null;
+  function startPolling() {
+    if (timer === null) timer = setInterval(pollAll, 15000);
+  }
+  function stopPolling() {
+    if (timer !== null) { clearInterval(timer); timer = null; }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { stopPolling(); } else { pollAll(); startPolling(); }
+  });
+  if (!document.hidden) startPolling();
 
   // Who's signed in — the portal sits behind SLOP single sign-on, so show the
   // current user with links to manage their password (/account) and, for a

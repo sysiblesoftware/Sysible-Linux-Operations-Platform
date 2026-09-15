@@ -28,6 +28,8 @@ import os
 import re as _re
 from urllib.parse import quote as _quote
 
+import concurrent.futures as _futures
+
 import httpx
 
 from . import fleet
@@ -269,26 +271,45 @@ def topology(identity, with_posture: bool = False) -> dict:
     Same trust rule as every other source: the upstream applies its own RBAC to
     the real human behind the request, so an auditor sees an auditor's fleet. A
     reading we can't get degrades the map (and is reported) rather than blanking
-    it — a half-drawn map beats an empty one when one endpoint is slow."""
+    it — a half-drawn map beats an empty one when one endpoint is slow.
+
+    The readings are INDEPENDENT — nothing here feeds anything else, they are
+    merged afterwards — so they are fetched together. Sequentially the map cost
+    the sum of five round-trips, and its worst case was five times the per-request
+    timeout: a Controller that was merely slow made the page look hung. Together,
+    the cost is the slowest single reading.
+    """
     base = _url(_CONTROLLER, "https")
     errors, notes = [], []
 
-    def read(path, key, params=None, fatal=True):
-        data, err = _get(f"{base}{path}", identity, params or {})
+    reads = [("/api/hosts", "hosts", True),
+             # Health/agents/suppressions are overlays: without them the map still
+             # has its shape, just fewer colours, so their failure is a note.
+             ("/api/fleet-health", "hosts", False),
+             ("/api/agents", "agents", False),
+             ("/api/suppressions", "suppressions", False)]
+    if with_posture:
+        reads.append(("/api/fleet-posture", "hosts", False))
+
+    def read(spec):
+        path, key, _fatal = spec
+        data, err = _get(f"{base}{path}", identity)
+        return (data or {}).get(key) or [], err
+
+    with _futures.ThreadPoolExecutor(max_workers=len(reads)) as pool:
+        results = list(pool.map(read, reads))
+
+    got = {}
+    # Report in the order the reads are declared, not the order they finished, so
+    # the operator sees a stable list rather than one that reshuffles per load.
+    for (path, key, fatal), (rows, err) in zip(reads, results):
         if err:
             (errors if fatal else notes).append(f"{path}: {err}")
-            return []
-        return (data or {}).get(key) or []
+        got[path] = rows
 
-    hosts = read("/api/hosts", "hosts")
-    # Health/agents/suppressions are overlays: without them the map still has its
-    # shape, just fewer colours, so their failure is a note rather than an error.
-    health = read("/api/fleet-health", "hosts", fatal=False)
-    agents = read("/api/agents", "agents", fatal=False)
-    supps = read("/api/suppressions", "suppressions", fatal=False)
-    posture = read("/api/fleet-posture", "hosts", fatal=False) if with_posture else []
-
-    nodes = fleet.build(hosts, health, agents, supps, posture)
+    nodes = fleet.build(got["/api/hosts"], got["/api/fleet-health"],
+                        got["/api/agents"], got["/api/suppressions"],
+                        got.get("/api/fleet-posture", []))
     return {
         "nodes": nodes,
         "parents": fleet.parents(nodes),

@@ -201,6 +201,15 @@ services:
       # Root-equivalent on the host. See the note above before adding anything here.
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SYSIBLE_SRC_DIR:-/opt/sysible-src}:${SYSIBLE_SRC_DIR:-/opt/sysible-src}
+      # SLOP's OWN checkout. install.sh clones the other products into SYSIBLE_SRC_DIR
+      # (mounted above) but is itself run FROM this repo, wherever the operator cloned
+      # it — so without this mount the updater could not see the checkout named by
+      # SYSIBLE_SLOP_DIR, apps.checkout_dir() answered None, and Administration showed
+      # SLOP as "not installed on this host": the platform could not update itself.
+      # The source is `.` (this compose file's directory, so it is the real checkout
+      # by construction); the target is the path it has on the HOST, because the
+      # `docker compose` this service runs is resolved by the host daemon.
+      - .:${SYSIBLE_SLOP_DIR:-/opt/sysible-src/sysible-linux-operations-platform}
     expose:
       - "8080"                     # internal only; never published
 

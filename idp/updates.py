@@ -74,8 +74,15 @@ def _call(path: str, user: str, role: str, method: str = "GET") -> tuple[dict | 
         return None, f"updater unreachable ({type(e).__name__})"
 
 
-def status(user: str, role: str):
-    return _call("/api/status", user, role)
+def status(user: str, role: str, refresh: bool = False):
+    """What is installed and what is behind.
+
+    `refresh` asks the updater to re-query every remote rather than take its
+    memoised answer. The header pill on every Administration page calls this, and
+    each product costs a network round-trip, so the default is the cached view and
+    the console's explicit "Check now" is what pays for a fresh one.
+    """
+    return _call("/api/status" + ("?refresh=1" if refresh else ""), user, role)
 
 
 def job(user: str, role: str):

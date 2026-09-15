@@ -1454,7 +1454,28 @@ _UPDATES_JS = r"""
       .catch(function(e){ pushToast(String(e.message||e),
         {title:'Software & services',kind:'error',ttl:0}); b.disabled=false; });
   }
+  // A product the API knows about but the server-rendered table does not: build
+  // its row rather than dropping it. The skeleton exists so an unreachable updater
+  // still lists the known products; it must not become a filter that hides one
+  // that was added to the updater's allowlist afterwards.
+  function ensureRow(a){
+    if(document.getElementById('u-'+a.key)) return;
+    var tbl=document.getElementById('updtable'); if(!tbl) return;
+    var tr=el('tr','upd-row');
+    var td=el('td'); var b=el('b',null,a.label||a.key); td.appendChild(b);
+    var sub=el('div','sub'); sub.id='s-'+a.key; td.appendChild(sub);
+    var td2=el('td','sub'); td2.id='u-'+a.key;
+    var td3=el('td'); td3.style.textAlign='right'; td3.style.whiteSpace='nowrap';
+    var btn=el('button','btn','Update now'); btn.id='b-'+a.key;
+    btn.setAttribute('data-app',a.key); btn.hidden=true; btn.disabled=true;
+    btn.addEventListener('click',function(){ startUpdate(a.key, btn); });
+    var acts=el('span'); acts.id='a-'+a.key;
+    td3.appendChild(btn); td3.appendChild(acts);
+    tr.appendChild(td); tr.appendChild(td2); tr.appendChild(td3);
+    tbl.appendChild(tr);
+  }
   function paint(d){
+    (d.apps||[]).forEach(ensureRow);
     (d.apps||[]).forEach(fmtRow);
     var n=(d.apps||[]).filter(function(a){return a.available;}).length;
     var pill=document.getElementById('updpill');
@@ -1472,8 +1493,8 @@ _UPDATES_JS = r"""
     box.textContent=(j.log||[]).join('\n');
     box.scrollTop=box.scrollHeight;
   }
-  function load(){
-    fetch('/admin/updates/status',{cache:'no-store'})
+  function load(fresh){
+    return fetch('/admin/updates/status'+(fresh?'?refresh=1':''),{cache:'no-store'})
       .then(function(r){return r.ok?r.json():Promise.reject(new Error('HTTP '+r.status));})
       .then(function(d){
         if(d.error){pushToast(d.error,{title:'Software updates',kind:'warn',ttl:0});return;}
@@ -1509,11 +1530,7 @@ _UPDATES_JS = r"""
         });
     },2000);
   }
-  document.addEventListener('DOMContentLoaded',function(){
-    load();
-    document.querySelectorAll('button[data-app]').forEach(function(b){
-      b.addEventListener('click',function(){
-        var key=b.getAttribute('data-app');
+  function startUpdate(key, b){
         if(key==='slop' && !confirm('Updating SLOP rebuilds the gateway and this console. '
             +'You will be signed out briefly. Continue?'))return;
         b.disabled=true;
@@ -1531,7 +1548,22 @@ _UPDATES_JS = r"""
           })
           .catch(function(e){pushToast(String(e.message||e),
                 {title:'Software updates',kind:'error',ttl:0}); b.disabled=false;});
-      });
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    load();
+    document.querySelectorAll('button[data-app]').forEach(function(b){
+      b.addEventListener('click',function(){ startUpdate(b.getAttribute('data-app'), b); });
+    });
+    // The remote tip is memoised by the updater (browsing Administration would
+    // otherwise cost a round-trip to GitHub per product per page). This is the
+    // way to say "no, ask now" — so a cached answer is never the only answer.
+    var chk=document.getElementById('checknow');
+    if(chk) chk.addEventListener('click',function(){
+      chk.disabled=true;
+      var was=chk.textContent; chk.textContent='Checking\u2026';
+      var done=function(){ chk.disabled=false; chk.textContent=was; };
+      var p=load(true);
+      if(p&&p.then){p.then(done,done);}else{done();}
     });
   });
 })();
@@ -1553,7 +1585,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
             f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>"
             f"Update now</button>"
             f"<span id='a-{key}'></span></td></tr>")
-    table = ("<table><tr><th>Product</th><th>Update status</th>"
+    table = ("<table id=updtable><tr><th>Product</th><th>Update status</th>"
              "<th style='text-align:right'>Controls</th></tr>"
              + "".join(rows) + "</table>")
 
@@ -1582,6 +1614,13 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
         f"{note}"
         f"<input type=hidden id=csrf value='{escape(tok)}'>"
+        # The remote tip is memoised by the updater — the header pill polls this
+        # page's data endpoint from EVERY Administration page, and each product
+        # costs a round-trip to its git remote. This button is how an operator says
+        # "ask the remotes now" instead of taking the remembered answer.
+        "<p class=sub><button class='btn ghost sm' id=checknow>Check now</button>"
+        " <span class=sub>Update availability is remembered for a few minutes; "
+        "this re-asks every product&rsquo;s git remote.</span></p>"
         f"{table}"
         "<div id=joblog-wrap>"
         "<div id=jobtitle class=sub style='margin-top:1rem'></div>"
@@ -1602,11 +1641,11 @@ def admin_updates(request: Request):
 
 
 @app.get("/admin/updates/status")
-def admin_updates_status(request: Request):
+def admin_updates_status(request: Request, refresh: bool = False):
     sess, err = _require_super(request)
     if err:
         return JSONResponse({"error": "Superuser access required."}, status_code=403)
-    data, error = updates.status(sess["username"], "superuser")
+    data, error = updates.status(sess["username"], "superuser", refresh=refresh)
     if error:
         return JSONResponse({"error": error, "apps": []})
     return JSONResponse(data)

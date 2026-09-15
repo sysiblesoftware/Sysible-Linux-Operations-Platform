@@ -329,6 +329,17 @@ fi
 export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"
 _upsert_kv "$ENV_FILE" SYSIBLE_FLASHBACK_AGENT_BIND "$FB_BIND" 2>/dev/null || true
 
+# Where THIS checkout lives. The updater sidecar bind-mounts it (docker-compose.yml)
+# so SLOP can be updated from its own Administration page, and the mount target has
+# to be the path the checkout has on the HOST — the `docker compose` the updater
+# runs is resolved by the host daemon. It was previously passed only as a one-shot
+# env var on the `sysible_ctl slop up` line below, so every LATER recreate fell back
+# to the conventional /opt/sysible-src path, which is not where install.sh is run
+# from: the updater then saw no checkout and Administration reported SLOP as "not
+# installed on this host". Persisted here so it survives every future recreate.
+export SYSIBLE_SLOP_DIR="$HERE"
+_upsert_kv "$ENV_FILE" SYSIBLE_SLOP_DIR "$HERE" 2>/dev/null || true
+
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then

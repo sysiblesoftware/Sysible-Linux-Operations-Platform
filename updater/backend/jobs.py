@@ -21,6 +21,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import git
+
 # Bound the log: a --build pours out a lot, and this lives in memory.
 MAX_LOG_LINES = int(os.environ.get("SYSIBLE_UPDATER_MAX_LOG_LINES", "600"))
 STEP_TIMEOUT = float(os.environ.get("SYSIBLE_UPDATER_STEP_TIMEOUT", "1800"))
@@ -75,6 +77,10 @@ def _worker(key: str, root: Path, compose: Path, actor: str) -> None:
     try:
         rc = _run(["git", "-C", str(root), "-c", f"safe.directory={root}",
                    "pull", "--ff-only"], root)
+        # The pull moved HEAD, so whatever was memoised about this checkout's
+        # remote describes the world before it. Drop it either way: a failed pull
+        # may still have fetched.
+        git.forget_remote(root)
         if rc != 0:
             _set(state="failed", finished=time.time(),
                  message="git pull failed — the checkout may have local changes "

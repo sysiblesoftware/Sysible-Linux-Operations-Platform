@@ -91,7 +91,14 @@ def health() -> dict:
 
 
 @app.get("/api/status")
-def status(request: Request) -> dict:
+def status(request: Request, refresh: bool = False) -> dict:
+    """What is installed and what is behind.
+
+    `refresh=1` re-queries every remote instead of taking the memoised answer —
+    the console's explicit "Check now". Without it the remote tip is cached
+    briefly (see git.REMOTE_TTL), because Administration's header pill calls this
+    on every page it renders and each product costs a network round-trip.
+    """
     _authorized(request)
     out = []
     for key in apps.keys():
@@ -105,16 +112,18 @@ def status(request: Request) -> dict:
             out.append(row)
             continue
         row["installed"] = True
-        row.update(git.status(root))
+        row.update(git.status(root, fresh=refresh))
         row["dirty"] = git.dirty(root)
+        # Resolved ONCE: this used to be four separate probes of the filesystem
+        # for every product on every call.
+        compose = apps.compose_dir(root)
         row["can_update"] = bool(row.get("available")) and not row["dirty"] \
-            and apps.compose_dir(root) is not None
+            and compose is not None
         if row["dirty"]:
             row["reason"] = "the checkout has local changes — resolve them on the host first"
-        elif apps.compose_dir(root) is None:
+        elif compose is None:
             row["reason"] = "no compose file found in the checkout"
-        row["services"] = jobs.services(apps.compose_dir(root)) \
-            if apps.compose_dir(root) else []
+        row["services"] = jobs.services(compose) if compose else []
         # Which lifecycle actions this product will accept. The GUI renders from
         # this rather than hard-coding the rules, so the refusal and the button
         # can never disagree.
