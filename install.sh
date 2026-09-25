@@ -174,44 +174,54 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running and could n
 # gateway-asserted identity ONLY when the secret matches. Generate it once and
 # reuse it, so the same value reaches the gateway AND all three apps.
 ENV_FILE="$HERE/.env"
-_upsert_env() {  # _upsert_env KEY VALUE — set KEY=VALUE in $ENV_FILE (replace or append)
-  # Create the secret store 0600 from the start — independent of the caller's
-  # umask — so the SSO shared secret is never even briefly world-readable.
-  if [ ! -f "$ENV_FILE" ]; then
-    ( umask 077; touch "$ENV_FILE" )
-  fi
-  chmod 600 "$ENV_FILE" 2>/dev/null || true
-  if grep -q "^$1=" "$ENV_FILE" 2>/dev/null; then
-    # Rewrite through a PRIVATE temp file, never `sed -i.bak`: an .env.bak is
-    # created 0644 and would leak the secret to any local reader before removal.
-    # The temp is created 0600, then atomically renamed over the original.
-    _tmp="$ENV_FILE.tmp.$$"
-    ( umask 077; : > "$_tmp" )
-    if sed "s|^$1=.*|$1=$2|" "$ENV_FILE" > "$_tmp"; then
-      mv "$_tmp" "$ENV_FILE"
-    else
-      rm -f "$_tmp"
-    fi
-    chmod 600 "$ENV_FILE" 2>/dev/null || true
-  else
-    printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
-  fi
-}
-
-# _upsert_kv FILE KEY VALUE — set KEY=VALUE in an arbitrary env file (0600),
-# replace-or-append, same private-temp handling as _upsert_env. Used to PERSIST
-# the SSO secret + trust flag into each app's compose-directory .env.
+# _upsert_kv FILE KEY VALUE — set KEY=VALUE in an env file (0600), replacing an
+# existing line or appending a new one.
+#
+# The value is handed to awk through the ENVIRONMENT and never interpolated into
+# the expression. This used to be `sed "s|^$KEY=.*|$KEY=$VALUE|"`, which reads the
+# VALUE as part of a sed replacement — and the values here are filesystem paths
+# and URLs, where every one of sed's metacharacters is legitimate:
+#
+#   /opt/R&D/slop     -> `&` is "the whole match": became /opt/R<the whole line>D/slop
+#   /opt/a|b/slop     -> `|` closed the expression: sed errored and the OLD value
+#                        was silently kept, because the failure branch just drops
+#                        the temp file and carries on
+#   /opt/back\slash   -> the backslash was eaten
+#
+# Only on the REPLACE branch, so a first install was fine and the corruption
+# appeared on the re-run. SYSIBLE_SLOP_DIR (the checkout Administration updates
+# SLOP from) is one of the values that goes through here.
+#
+# awk -v would not fix it: -v processes escape sequences in the value, so the
+# backslash case would still be wrong. ENVIRON does not.
+#
+# The temp file is created 0600 and renamed over the original — never `sed -i.bak`,
+# whose .bak is 0644 and would leak the secret to any local reader before removal.
 _upsert_kv() {
   _f="$1"; _k="$2"; _v="$3"
   if [ ! -f "$_f" ]; then ( umask 077; touch "$_f" ); fi
   chmod 600 "$_f" 2>/dev/null || true
-  if grep -q "^$_k=" "$_f" 2>/dev/null; then
-    _t="$_f.tmp.$$"; ( umask 077; : > "$_t" )
-    if sed "s|^$_k=.*|$_k=$_v|" "$_f" > "$_t"; then mv "$_t" "$_f"; else rm -f "$_t"; fi
+  _t="$_f.tmp.$$"
+  ( umask 077; : > "$_t" )
+  if _uk="$_k" _uv="$_v" awk '
+        BEGIN { k = ENVIRON["_uk"]; v = ENVIRON["_uv"]; seen = 0 }
+        index($0, k "=") == 1 { if (!seen) { print k "=" v; seen = 1 } ; next }
+        { print }
+        END { if (!seen) print k "=" v }
+      ' "$_f" > "$_t"; then
+    mv "$_t" "$_f"
     chmod 600 "$_f" 2>/dev/null || true
   else
-    printf '%s=%s\n' "$_k" "$_v" >> "$_f"
+    # Never leave the caller believing a value was written. The old file is
+    # untouched, which is the safe half; saying so is the other half.
+    rm -f "$_t"
+    return 1
   fi
+}
+
+# _upsert_env KEY VALUE — the same, for the platform's own .env.
+_upsert_env() {
+  _upsert_kv "$ENV_FILE" "$1" "$2"
 }
 
 # _app_compose_dir DIR — echo the directory that holds the app's compose file
