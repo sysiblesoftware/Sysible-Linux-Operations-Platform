@@ -408,3 +408,43 @@ def test_a_websocket_really_upgrades_through_the_shipping_appsite_snippet(tmp_pa
     assert "upgrade" not in auth, f"the auth subrequest still carries Upgrade: {auth}"
     assert "upgrade" not in (auth.get("connection", "").lower()), \
         f"the auth subrequest still carries Connection: Upgrade: {auth}"
+
+
+# ---- a module that is down must still say so -------------------------------
+def test_a_failed_upstream_returns_a_page_and_not_an_empty_body(text):
+    """Caddy's own 502 has a ZERO-BYTE body, so the browser shows ITS error page:
+    "This page isn't working", no product name, no reason, no way back. Measured
+    against the shipping config before this existed: 502, content-length 0.
+
+    The no-depends_on decision above is what makes a single module's failure
+    survivable; this is what makes it explicable. The dot on the portal tile
+    already said the module was down, and clicking it threw that away."""
+    assert "handle_errors" in text, \
+        "the gateway has no error handler, so a down module is a blank browser error"
+    block = text[text.index("handle_errors"):]
+    for token in ("502", "Sysible", "Back to the portal"):
+        assert token in block, f"the error page does not mention {token!r}"
+
+
+@needs_caddy
+def test_the_error_page_covers_every_way_an_upstream_can_fail(adapted):
+    """502/503/504 are the same event to an operator — the module did not answer.
+    Covering only one leaves the other two as blank browser errors."""
+    blob = json.dumps(adapted)
+    assert "handle_errors" in blob or "errors" in blob, "no error routes were adapted"
+    for code in (502, 503, 504):
+        assert str(code) in blob, f"HTTP {code} is not handled"
+
+
+def test_the_error_page_does_not_leak_where_the_upstream_lives(text):
+    """It names the PATH the operator clicked, never the internal host:port the
+    gateway dialled — that is infrastructure detail on a page anyone signed in
+    can reach. Checked against the page BODY itself (the heredoc), not its
+    surroundings: the config either side of it is full of upstreams by design."""
+    start = text.index("respond <<HTML")
+    end = text.index("HTML 502", start)
+    page = text[start:end]
+    assert "That module is not answering" in page
+    for leak in ("host.docker.internal", "8800", "8810", "8700", "idp:8080",
+                 "SLOP_CONTROLLER_UPSTREAM", "reverse_proxy"):
+        assert leak not in page, f"the error page leaks the upstream detail {leak!r}"
