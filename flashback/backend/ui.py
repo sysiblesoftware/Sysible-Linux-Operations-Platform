@@ -113,9 +113,11 @@ _CSS += """
    host, so a three-host fleet rendered as six stacked blocks. */
 .hostwrap{display:flex;align-items:flex-start;gap:.4rem;padding:.1rem .25rem .1rem 0;
   border-radius:8px}
-.hostwrap:hover{background:var(--panel2)}
 .hostwrap .item{flex:1 1 auto;min-width:0}
-.hostwrap .item:hover{background:none}
+/* The highlight follows the CLICKABLE region, not the whole row. Lighting up the
+   entire row — select box and "Back up now" included — made every part of it look
+   equally live, which told an operator nothing about where the drill-down is. */
+.hostwrap .item:hover{background:var(--panel2)}
 /* Only the NAME and ADDRESS may be clipped. The status line must wrap: it is the
    line that says WHY a host has no backup, and an ellipsis there ("agent doesn't
    do config bac…") destroys the only thing it was added to say. */
@@ -137,6 +139,18 @@ _CSS += """
 /* The three drill-down columns are empty until a host is picked. Saying so beats
    three blank panes, which read as a broken page rather than a starting point. */
 .placeholder{color:var(--faint);font-size:12.5px;padding:1.2em .8em;line-height:1.6}
+/* The row IS the way in to browse, diff, download and restore — and it used to
+   say so nowhere. The two controls that looked like controls (the select box and
+   "Back up now") are both about CAPTURING, so a host that had plainly captured
+   1183 files still read as "backed up, and nothing you can do with it". The
+   chevron, the hover and the hint under the column title are the whole fix: the
+   drill-down worked all along, it was invisible. */
+.hostwrap .item{position:relative;padding-right:1.5em}
+.drill{position:absolute;right:.45em;top:.45em;color:var(--faint);font-size:15px;line-height:1}
+.hostwrap .item:hover .hostname,.hostwrap .item:focus-visible .hostname{color:var(--accent2)}
+.hostwrap .item:hover .drill,.hostwrap .item:focus-visible .drill{color:var(--accent2)}
+.hostwrap .item.sel .drill{color:var(--accent2)}
+.hint{margin:0 .55rem .5rem;color:var(--faint);font-size:11.5px;line-height:1.45}
 .item.pending .sub{color:var(--faint);font-style:italic}
 .note{margin:6px 8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;
   color:var(--muted);font-size:12px}
@@ -265,6 +279,12 @@ function renderHosts(){
     bar.appendChild(sel);
   }
   col.appendChild(bar);
+  // What a host row DOES. Without this the page offered three capture controls
+  // and no stated way to read anything back, which is exactly how an operator
+  // with 1183 files captured concludes there is nothing they can do with them.
+  col.appendChild(el('div','hint',
+    'Click a host to browse its config files — then a file, then a version to '
+    + 'diff, download or restore it.'));
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
   // Skipped when the blocking banner below is about to say the same thing —
@@ -374,6 +394,13 @@ function hostRow(h,d,col,canPick){
   const name=el('div','hostname', h.label||h.host_id);
   b.appendChild(name);
   if(h.address) b.appendChild(el('div','sub faint', h.address));
+  // The affordance. A row that opens a whole drill-down has to look like one.
+  const chev=el('span','drill','\u203A');
+  chev.setAttribute('aria-hidden','true');
+  b.appendChild(chev);
+  const what=(h.label||h.host_id);
+  b.title='Browse '+what+"'s config files — diff versions, download or restore one";
+  b.setAttribute('aria-label','Browse '+what+"'s config files");
 
   // The status line. Three genuinely different states that used to render as one
   // sentence ("enrolled — no backup captured yet"), which is why "Back up now"
@@ -413,7 +440,10 @@ function hostRow(h,d,col,canPick){
     state.host=h.host_id;state.path=null;state.a=null;state.b=null;
     [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
     b.classList.add('sel');
-    loadFiles();$('#diff').innerHTML='<div class="placeholder">Pick a file, then two versions to diff.</div>';
+    loadFiles();
+    $('#versions').innerHTML='<div class="placeholder">Pick a file to see every version of it.</div>';
+    $('#diff').innerHTML='<div class="placeholder">Pick a file, then a version to download or '
+      +'restore it \u2014 and a second version to diff the two.</div>';
   };
   wrap.appendChild(b);
   // Back up now. An agent is outbound-only, so nothing can reach in — this is a
@@ -448,8 +478,15 @@ function hostRow(h,d,col,canPick){
 async function loadFiles(){
   const col=$('#files');col.innerHTML='';col.appendChild(el('h3',null,'Files'));
   if(!state.host)return;
-  let files;try{files=await jget(U('/api/hosts/'+encodeURIComponent(state.host)+'/files'));}catch(e){return;}
-  if(!files.length){col.appendChild(el('div','empty','No files for this host.'));return;}
+  let files;
+  // A silent `return` here emptied the column and said nothing — indistinguishable
+  // from a page that does not respond to the click at all. If the read fails, say
+  // so and say what failed.
+  try{files=await jget(U('/api/hosts/'+encodeURIComponent(state.host)+'/files'));}
+  catch(e){col.appendChild(el('div','empty','Could not read this host\u2019s files: '
+    +String(e&&e.message||e)));return;}
+  if(!files.length){col.appendChild(el('div','empty',
+    'Nothing captured for this host yet.'));return;}
   files.forEach(f=>{
     const b=el('button','item');
     const p=el('div','mono');p.textContent=f.path;b.appendChild(p);
@@ -463,8 +500,15 @@ async function loadFiles(){
 async function loadVersions(){
   const col=$('#versions');col.innerHTML='';col.appendChild(el('h3',null,'Versions'));
   if(!state.host||!state.path)return;
-  let vers;try{vers=await jget(U('/api/hosts/'+encodeURIComponent(state.host)+'/versions?path='+encodeURIComponent(state.path)));}catch(e){return;}
+  let vers;
+  try{vers=await jget(U('/api/hosts/'+encodeURIComponent(state.host)+'/versions?path='+encodeURIComponent(state.path)));}
+  catch(e){col.appendChild(el('div','empty','Could not read this file\u2019s versions: '
+    +String(e&&e.message||e)));return;}
   if(!vers.length){col.appendChild(el('div','empty','No versions.'));return;}
+  // Same reason as the hosts column: the action lives one click further in, so
+  // the column that holds it has to say so.
+  col.appendChild(el('div','hint',
+    'Pick a version to download or restore it; pick a second to diff the two.'));
   vers.forEach((v,i)=>{
     const b=el('button','item');const row=el('div','ver');
     row.appendChild(el('span','', fmtTs(v.captured_at)));
@@ -675,14 +719,17 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<div class=wrap>"
         "<div class=col id=hosts></div>"
         "<div class=col id=files>"
-        "<div class=placeholder>Pick a host to see the config files it has captured.</div>"
+        "<div class=placeholder>Click a host on the left to see the config files "
+        "it has captured.</div>"
         "</div>"
         "<div class=col id=versions></div>"
         "<div class=col id=diff>"
         "<div class=placeholder>Every version of every tracked config file, per host.<br><br>"
-        "Pick a host, then a file, then two versions to diff \u2014 or use "
-        "<b>Compare files across hosts</b> to find where one box's config drifted "
-        "from the rest of the fleet.</div>"
+        "Click a host, then a file, then a version \u2014 from there you can "
+        "<b>download</b> that version, <b>restore</b> it to the host, or pick a "
+        "second version to <b>diff</b> the two.<br><br>"
+        "Or use <b>Compare files across hosts</b> to find where one box's config "
+        "drifted from the rest of the fleet.</div>"
         "</div>"
         "</div>"
         f"<script>{_JS}</script>"
