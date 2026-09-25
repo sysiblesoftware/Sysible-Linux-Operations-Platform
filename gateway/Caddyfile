@@ -108,6 +108,15 @@
 
 			# 5) Hand off to the app (unchanged, on its own port).
 			reverse_proxy {args[1]} {
+				# Tell the app which prefix was just stripped. Everything above this
+				# line hides the mount point from the app, which is what lets an app
+				# serve its own root paths unchanged — but a BROWSER still has to ask
+				# for /controller/assets/... and /controller/api/..., and an app that
+				# does not know it is mounted emits absolute /assets and /api instead.
+				# Those land on the PORTAL at the origin root, so the app's own script
+				# and API 404 and the page comes up blank. This header is the one thing
+				# that tells it otherwise; an app that does not read it is unaffected.
+				header_up X-Forwarded-Prefix {args[0]}
 				transport http {
 					# CE ships self-signed app certs, so the gateway can't verify the
 					# upstream cert. RESIDUAL RISK: an attacker able to interpose on the
@@ -182,6 +191,9 @@
 			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
 			uri strip_prefix {args[0]}
 			reverse_proxy {args[1]} {
+				# See (appsite): the prefix this route just stripped, so an app that
+				# builds browser-facing URLs can put it back.
+				header_up X-Forwarded-Prefix {args[0]}
 				header_up X-Forwarded-Proto https
 				header_up Host {host}
 				header_up Cookie "sysible_sso=[^;]*;?\s*" ""

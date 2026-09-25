@@ -269,6 +269,33 @@ def test_every_forward_auth_strips_the_upgrade_headers(text):
         assert "header_up -Upgrade" in body, body
 
 
+def test_every_prefix_strip_tells_the_app_what_was_stripped(text):
+    """A route that hides its mount point from the app must hand it back.
+
+    `uri strip_prefix` is what lets an app serve its own root paths unchanged —
+    but the BROWSER still has to ask for /controller/assets/... and
+    /controller/api/.... An app that does not know it is mounted emits absolute
+    /assets and /api instead, which resolve to the PORTAL at the origin root, so
+    its own script and API 404 and the page comes up blank. That is exactly how
+    the Controller console behaved in SLOP. X-Forwarded-Prefix is the only thing
+    that tells the app otherwise, so every stripping route must send it.
+    """
+    lines = [_strip_comments(l) for l in text.splitlines()]
+    strips = [i for i, l in enumerate(lines) if l.startswith("uri strip_prefix ")]
+    assert strips, "no prefix-stripping route found at all"
+    for i in strips:
+        prefix_arg = lines[i].split()[-1]
+        # The reverse_proxy that follows this strip, up to the end of its block.
+        tail = "\n".join(lines[i:i + 40])
+        assert "header_up X-Forwarded-Prefix" in tail, (
+            f"the route stripping {prefix_arg} never tells the app what it "
+            f"stripped — an app that builds browser-facing URLs will send the "
+            f"browser to the portal root:\n{tail}")
+        assert f"header_up X-Forwarded-Prefix {prefix_arg}" in tail, (
+            f"X-Forwarded-Prefix must carry the SAME prefix that was stripped "
+            f"({prefix_arg}):\n{tail}")
+
+
 @needs_caddy
 def test_a_websocket_really_upgrades_through_the_shipping_appsite_snippet(tmp_path):
     """End to end against a real caddy: run the SHIPPING (appsite) snippet in
