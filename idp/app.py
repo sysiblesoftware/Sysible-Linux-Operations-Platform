@@ -482,6 +482,7 @@ border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
 h1{font-size:19px;margin:.2em 0 .1em}
 p.sub{color:var(--muted);margin:.1em 0 1.2em;font-size:13.5px;line-height:1.55}
 td.sub{color:var(--muted);font-size:12.5px}
+span.sub{color:var(--muted);font-size:12.5px}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px}
 label{display:block;font-size:12.5px;color:var(--muted);margin:.9em 0 .3em}
 input:not([type]),input[type=text],input[type=password],select{width:100%;padding:10px 12px;border-radius:10px;
@@ -530,6 +531,66 @@ background:none;border-radius:20px;padding:.15rem .6rem;font-size:12px;cursor:po
 font-family:inherit;text-decoration:none}
 .upd-pill.on{display:inline-flex}
 .upd-pill b{background:#e0a83a;color:#0d1117;border-radius:9px;padding:0 6px;font-size:11px}
+/* Buttons that are NOT a form's submit.
+   The base `button{}` rule above is the login form's full-width green submit, and
+   every button on every admin page inherited it — including the Software &
+   services controls, which ask for .btn/.ghost/.sm and found none of them defined
+   here. Four per product rendered as four full-width green bars, so the page was
+   2173px wide inside a 760px card: buttons ran up to 993px past its right edge
+   and every viewport had a horizontal scrollbar. This is the vocabulary those
+   pages were already written against. */
+.btn{width:auto;margin:0;padding:7px 13px;border-radius:9px;font-size:13px;
+font-weight:600;background:var(--accent);color:#04120a;border:1px solid transparent}
+.btn.ghost{background:var(--panel2);color:var(--text);border-color:var(--line);font-weight:500}
+.btn.ghost:hover{border-color:var(--accent);filter:none}
+.btn.sm{padding:5px 10px;font-size:12px}
+.btn.danger{background:transparent;color:var(--err);
+border-color:color-mix(in srgb,var(--err) 45%,var(--line))}
+.btn.danger:hover{border-color:var(--err);filter:none}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+
+/* Software & services — one line per product.
+   It was a table whose every row carried four equally loud buttons, so nothing
+   on the page said which of them mattered. A product needs at most ONE action
+   right now (update it, when there is one); restart/stop/start/recreate are
+   recovery, wanted rarely and dangerous to hit by accident, so they sit behind
+   the row's own toggle instead of competing with the thing you came for. */
+.prods{margin-top:.9rem;border:1px solid var(--line);border-radius:12px}
+.prod{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr) auto;
+gap:.35rem .9rem;align-items:center;padding:.8rem .95rem;border-top:1px solid var(--line)}
+.prod:first-child{border-top:0}
+.prod-name{font-weight:600;min-width:0;line-height:1.35}
+.prod-meta{grid-column:1;color:var(--muted);font-size:12px;min-width:0;line-height:1.4}
+.prod-state{min-width:0;font-size:13px;line-height:1.4}
+.prod-act{display:flex;gap:.4rem;align-items:center;justify-self:end;flex-wrap:wrap}
+.prod-controls{grid-column:1/-1;display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;
+margin-top:.45rem;padding-top:.6rem;border-top:1px dashed var(--line)}
+/* An author `display` beats the hidden attribute's UA `display:none`, so without
+   this every Manage panel renders permanently open — which is the busy row of
+   four buttons the toggle exists to put away. */
+.prod-controls[hidden]{display:none}
+.prod-controls .hint{color:var(--muted);font-size:12px;margin-left:.2rem}
+/* The row you came to act on. A tint, not another button. */
+.prod.due{background:color-mix(in srgb,#e0a83a 8%,transparent)}
+@media(max-width:640px){
+  .prod{grid-template-columns:1fr}
+  .prod-act{justify-self:start;margin-top:.3rem}
+}
+/* Status, as one readable phrase plus its detail underneath. */
+.st b{font-weight:600}
+.st.ok b{color:#4ec07a}
+.st.due b{color:#e0a83a}
+.st.unk b{color:var(--muted)}
+.st-note{display:block;color:var(--muted);font-size:12px;margin-top:2px;line-height:1.4}
+.st-note.warn{color:#e0a83a}
+/* The explanation, available without being in the way. */
+details.help{margin:.5rem 0 .2rem;font-size:12.5px;color:var(--muted)}
+details.help>summary{cursor:pointer;color:var(--accent2);list-style:none}
+details.help>summary::-webkit-details-marker{display:none}
+details.help>summary:hover{text-decoration:underline}
+details.help p{margin:.5rem 0 0;line-height:1.55}
+.toolbar{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.9rem 0 .2rem}
+.toolbar .sub{margin:0}
 .upd-row td{vertical-align:middle}
 /* Hosted app administration. The frame is the app's REAL settings UI on the same
    origin — sized generously because it contains a full console, not a widget. */
@@ -960,7 +1021,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software &amp; services</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
         f"{_msg(msg, kind)}"
         "<table><tr><th>User</th><th>Role</th><th>Password</th><th></th></tr>"
@@ -1244,7 +1305,7 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Configuration</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software updates</a> · <a href='/account'>Your account</a> · "
+        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software &amp; services</a> · <a href='/account'>Your account</a> · "
         "<a href='/'>Portal &rarr;</a></p>"
         "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
@@ -1332,7 +1393,7 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
         f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · "
         "<a href='/admin/settings'>Configuration</a> · "
-        "<a href='/admin/updates'>Software updates</a> · "
+        "<a href='/admin/updates'>Software &amp; services</a> · "
         "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
         "<p class=sub>Each app&rsquo;s own administration, hosted here &mdash; you are signed "
         "in once and stay in Administration. Accounts and password resets are NOT here per "
@@ -1369,35 +1430,47 @@ _UPDATES_JS = r"""
   var rows={}, polling=null;
   function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;
     if(x!=null)e.textContent=x;return e;}
+  // One line an operator can read at a glance: what state this product is in,
+  // with the version detail and any blocker underneath rather than crammed in
+  // beside it.
   function fmtRow(a){
     var td=document.getElementById('u-'+a.key); if(!td)return;
+    var row=document.getElementById('p-'+a.key);
     td.innerHTML='';
-    if(!a.installed){ td.appendChild(el('span','sub','not installed on this host')); return; }
-    if(a.checked===false){
-      td.appendChild(el('span','sub', "couldn't check" + (a.reason?(' \u2014 '+a.reason):'')));
+    if(row)row.classList.remove('due');
+    if(!a.installed){
+      td.appendChild(st('unk','Not installed', 'on this host'));
+      hide('b-'+a.key); hide('m-'+a.key);
+      paintServices(a); paintActions(a);
       return;
     }
-    if(a.available){
-      var s=el('span',null,'update available');
-      s.style.color='#e0a83a';
-      td.appendChild(s);
-      if(a.current&&a.latest)td.appendChild(el('span','sub','  '+a.current+' \u2192 '+a.latest));
+    if(a.checked===false){
+      td.appendChild(st('unk',"Couldn't check", a.reason||''));
+    } else if(a.available){
+      td.appendChild(st('due','Update available',
+        (a.current&&a.latest)?(a.current+' \u2192 '+a.latest):''));
+      if(row)row.classList.add('due');
     } else {
-      var ok=el('span',null,'\u2713 up to date'); ok.style.color='#4ec07a'; td.appendChild(ok);
-      if(a.current)td.appendChild(el('span','sub','  ('+a.current+')'));
+      td.appendChild(st('ok','Up to date', a.current?('at '+a.current):''));
+    }
+    // A reason alongside "up to date" is a BLOCKER (a dirty checkout), not a
+    // footnote — it is the thing standing between this row and being updatable.
+    if(a.reason && a.checked!==false){
+      var n=el('div','st-note warn', a.reason);
+      td.appendChild(n);
     }
     var btn=document.getElementById('b-'+a.key);
-    if(btn){
-      btn.hidden=!a.can_update;
-      btn.disabled=!a.can_update;
-    }
-    if(a.reason && a.checked!==false){
-      td.appendChild(document.createElement('br'));
-      td.appendChild(el('span','sub',a.reason));
-    }
+    if(btn){ btn.hidden=!a.can_update; btn.disabled=!a.can_update; }
     paintServices(a);
     paintActions(a);
   }
+  function st(kind, label, detail){
+    var w=el('div','st '+kind);
+    var b=el('b',null,label); w.appendChild(b);
+    if(detail)w.appendChild(el('span','st-note',detail));
+    return w;
+  }
+  function hide(id){ var e=document.getElementById(id); if(e)e.hidden=true; }
   // What is actually RUNNING. "Up to date" said nothing about whether the thing
   // was up, which is how a stack could sit dead behind a green row.
   function paintServices(a){
@@ -1419,15 +1492,45 @@ _UPDATES_JS = r"""
   }
   // Buttons come from the API's own allowlist, so a refused action can never be
   // offered — the rule and the button cannot disagree.
+  // Buttons come from the API's own allowlist, so a refused action can never be
+  // offered — the rule and the button cannot disagree. They live behind the row's
+  // Manage toggle: four of them per product, always on screen, gave every row the
+  // same weight as the one thing the page is for, and put Stop one stray click
+  // away. Rare and interrupting is exactly what a disclosure is for.
   function paintActions(a){
-    var box=document.getElementById('a-'+a.key); if(!box)return;
+    var box=document.getElementById('a-'+a.key);
+    var tog=document.getElementById('m-'+a.key);
+    if(!box)return;
     box.innerHTML='';
-    if(!a.installed) return;
-    (a.actions||[]).forEach(function(act){
-      var b=el('button','btn ghost sm', act.charAt(0).toUpperCase()+act.slice(1));
-      b.style.marginLeft='.4rem';
+    var acts=(a.installed && (a.actions||[]).length) ? a.actions : [];
+    if(tog){
+      tog.hidden = !acts.length;
+      if(!acts.length){ box.hidden=true; tog.setAttribute('aria-expanded','false'); }
+    }
+    if(!acts.length) return;
+    acts.forEach(function(act){
+      var cls = (act==='stop') ? 'btn danger sm' : 'btn ghost sm';
+      var b=el('button', cls, act.charAt(0).toUpperCase()+act.slice(1));
       b.onclick=function(){ runAction(a.key, act, b); };
       box.appendChild(b);
+    });
+    box.appendChild(el('span','hint', a.key==='slop'
+      ? 'Stopping the platform from here would take this page down with it.'
+      : 'Brief downtime while the containers come back.'));
+  }
+  // Bound once, on the list, so a repaint cannot lose the handler or stack a
+  // second one on top of it.
+  function bindManage(){
+    var list=document.getElementById('updtable'); if(!list||list._bound)return;
+    list._bound=true;
+    list.addEventListener('click',function(ev){
+      var t=ev.target.closest('button[data-manage]'); if(!t)return;
+      var key=t.getAttribute('data-manage');
+      var box=document.getElementById('a-'+key); if(!box)return;
+      var open=box.hidden;
+      box.hidden=!open;
+      t.setAttribute('aria-expanded', open?'true':'false');
+      t.textContent = open ? 'Hide' : 'Manage';
     });
   }
   function runAction(key, act, b){
@@ -1460,28 +1563,55 @@ _UPDATES_JS = r"""
   // that was added to the updater's allowlist afterwards.
   function ensureRow(a){
     if(document.getElementById('u-'+a.key)) return;
-    var tbl=document.getElementById('updtable'); if(!tbl) return;
-    var tr=el('tr','upd-row');
-    var td=el('td'); var b=el('b',null,a.label||a.key); td.appendChild(b);
-    var sub=el('div','sub'); sub.id='s-'+a.key; td.appendChild(sub);
-    var td2=el('td','sub'); td2.id='u-'+a.key;
-    var td3=el('td'); td3.style.textAlign='right'; td3.style.whiteSpace='nowrap';
+    var list=document.getElementById('updtable'); if(!list) return;
+    var row=el('div','prod'); row.id='p-'+a.key;
+    var name=el('div','prod-name', a.label||a.key);
+    var state=el('div','prod-state'); state.id='u-'+a.key;
+    var act=el('div','prod-act');
     var btn=el('button','btn','Update now'); btn.id='b-'+a.key;
     btn.setAttribute('data-app',a.key); btn.hidden=true; btn.disabled=true;
     btn.addEventListener('click',function(){ startUpdate(a.key, btn); });
-    var acts=el('span'); acts.id='a-'+a.key;
-    td3.appendChild(btn); td3.appendChild(acts);
-    tr.appendChild(td); tr.appendChild(td2); tr.appendChild(td3);
-    tbl.appendChild(tr);
+    var tog=el('button','btn ghost sm','Manage'); tog.id='m-'+a.key;
+    tog.setAttribute('data-manage',a.key); tog.setAttribute('aria-expanded','false');
+    tog.hidden=true;
+    act.appendChild(btn); act.appendChild(tog);
+    var meta=el('div','prod-meta'); meta.id='s-'+a.key;
+    var ctrls=el('div','prod-controls'); ctrls.id='a-'+a.key; ctrls.hidden=true;
+    row.appendChild(name); row.appendChild(state); row.appendChild(act);
+    row.appendChild(meta); row.appendChild(ctrls);
+    list.appendChild(row);
   }
   function paint(d){
+    bindManage();
     (d.apps||[]).forEach(ensureRow);
     (d.apps||[]).forEach(fmtRow);
+    resolveUnreported(d.apps||[]);
     var n=(d.apps||[]).filter(function(a){return a.available;}).length;
     var pill=document.getElementById('updpill');
     if(pill){pill.classList.toggle('on',n>0);
       var b=pill.querySelector('b'); if(b)b.textContent=n;}
     if(d.job)showJob(d.job);
+  }
+  // The skeleton names every product this platform knows about, so the list is
+  // still useful when the updater cannot be reached. But when the updater DOES
+  // answer and simply does not manage one of them, that row kept its initial
+  // "checking\u2026" forever \u2014 a row that looks like it is still working, on a
+  // page that has finished. Say what is actually true instead.
+  function resolveUnreported(apps){
+    var known={};
+    apps.forEach(function(a){ known[a.key]=1; });
+    var rows=document.querySelectorAll('#updtable .prod');
+    Array.prototype.forEach.call(rows, function(row){
+      var key=(row.id||'').replace(/^p-/,'');
+      if(!key||known[key]) return;
+      var td=document.getElementById('u-'+key); if(!td) return;
+      td.innerHTML='';
+      td.appendChild(st('unk','Not managed here',
+        'the updater does not track this product'));
+      hide('b-'+key); hide('m-'+key);
+      var box=document.getElementById('a-'+key);
+      if(box){ box.innerHTML=''; box.hidden=true; }
+    });
   }
   function showJob(j){
     var box=document.getElementById('joblog');
@@ -1497,10 +1627,10 @@ _UPDATES_JS = r"""
     return fetch('/admin/updates/status'+(fresh?'?refresh=1':''),{cache:'no-store'})
       .then(function(r){return r.ok?r.json():Promise.reject(new Error('HTTP '+r.status));})
       .then(function(d){
-        if(d.error){pushToast(d.error,{title:'Software updates',kind:'warn',ttl:0});return;}
+        if(d.error){pushToast(d.error,{title:'Software & services',kind:'warn',ttl:0});return;}
         paint(d);
       })
-      .catch(function(e){pushToast(String(e.message||e),{title:'Software updates',kind:'error'});});
+      .catch(function(e){pushToast(String(e.message||e),{title:'Software & services',kind:'error'});});
   }
   function poll(selfUpdate){
     if(polling)return;
@@ -1513,7 +1643,7 @@ _UPDATES_JS = r"""
           if(j.state!=='running'){
             clearInterval(polling); polling=null;
             pushToast(j.message||('Update '+j.state),
-                      {title:'Software updates',
+                      {title:'Software & services',
                        kind:j.state==='succeeded'?'success':'error',
                        ttl:j.state==='succeeded'?9000:0});
             load();
@@ -1525,7 +1655,7 @@ _UPDATES_JS = r"""
           if(selfUpdate){
             clearInterval(polling); polling=null;
             pushToast('SLOP is rebuilding and will restart \u2014 reload this page in a moment.',
-                      {title:'Software updates',kind:'warn',ttl:0});
+                      {title:'Software & services',kind:'warn',ttl:0});
           }
         });
     },2000);
@@ -1541,17 +1671,20 @@ _UPDATES_JS = r"""
           .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
           .then(function(res){
             if(!res.ok){pushToast(res.d.detail||'Could not start the update',
-                                  {title:'Software updates',kind:'error',ttl:0});
+                                  {title:'Software & services',kind:'error',ttl:0});
               b.disabled=false; return;}
-            pushToast(res.d.message||('Updating '+key),{title:'Software updates'});
+            pushToast(res.d.message||('Updating '+key),{title:'Software & services'});
             poll(key==='slop');
           })
           .catch(function(e){pushToast(String(e.message||e),
-                {title:'Software updates',kind:'error',ttl:0}); b.disabled=false;});
+                {title:'Software & services',kind:'error',ttl:0}); b.disabled=false;});
   }
   document.addEventListener('DOMContentLoaded',function(){
     load();
-    document.querySelectorAll('button[data-app]').forEach(function(b){
+    // Only the Update buttons. This used to be button[data-app] — "any button
+    // that knows which product it belongs to" — so any NEW control given that
+    // attribute silently became an update trigger.
+    document.querySelectorAll('button.btn[data-app][id^=\"b-\"]').forEach(function(b){
       b.addEventListener('click',function(){ startUpdate(b.getAttribute('data-app'), b); });
     });
     // The remote tip is memoised by the updater (browsing Administration would
@@ -1575,32 +1708,44 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
     for key, lbl in (("controller", "Sysible Controller"),
                      ("slep", "Sysible Linux Engineering Platform"),
                      ("connect", "Sysible Connect"),
-                     ("slop", "Sysible Linux Operations Platform (gateway, sign-in, "
-                              "Flashback, Visualizer)")):
+                     ("slop", "Sysible Linux Operations Platform"
+                              " — gateway, sign-in, Flashback, Visualizer")):
         rows.append(
-            f"<tr class=upd-row><td><b>{escape(lbl)}</b>"
-            f"<div id='s-{key}' class=sub></div></td>"
-            f"<td id='u-{key}' class=sub>checking&hellip;</td>"
-            f"<td style='text-align:right;white-space:nowrap'>"
-            f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>"
-            f"Update now</button>"
-            f"<span id='a-{key}'></span></td></tr>")
-    table = ("<table id=updtable><tr><th>Product</th><th>Update status</th>"
-             "<th style='text-align:right'>Controls</th></tr>"
-             + "".join(rows) + "</table>")
+            f"<div class=prod id='p-{key}'>"
+            f"<div class=prod-name>{escape(lbl)}</div>"
+            f"<div class=prod-state id='u-{key}'><span class=sub>checking&hellip;</span></div>"
+            f"<div class=prod-act>"
+            f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>Update now</button>"
+            # data-MANAGE, never data-app: the page binds startUpdate() to every
+            # button[data-app], so a toggle carrying it would post an update —
+            # on the platform row, behind the "you will be signed out" confirm.
+            f"<button class='btn ghost sm' id='m-{key}' data-manage='{key}' "
+            f"aria-expanded=false hidden>Manage</button>"
+            f"</div>"
+            f"<div class=prod-meta id='s-{key}'></div>"
+            f"<div class=prod-controls id='a-{key}' hidden></div>"
+            f"</div>")
+    table = f"<div class=prods id=updtable>{''.join(rows)}</div>"
 
+    # Two dense paragraphs used to sit between the operator and the page. They are
+    # worth having — they are the difference between "Recreate" being a guess and
+    # a decision — but not worth reading every visit, so they fold away.
     note = (
-        "<p class=sub>Each product is a git checkout on this host. "
-        "&ldquo;Update now&rdquo; pulls it and rebuilds its containers &mdash; the same thing "
-        "<code>sysible_ctl &lt;product&gt; update</code> does on the command line. "
-        "A checkout with local changes is reported and refused rather than overwritten.</p>"
-        "<p class=sub>The controls restart, stop, start or recreate a product's "
-        "containers &mdash; what <code>sysible_ctl &lt;product&gt; restart</code> does, "
-        "without needing a shell on the host. Recreate applies a compose or "
-        "environment change using the images already built, so it is much quicker "
-        "than a full update. SLOP cannot be STOPPED from here: that would take down "
-        "the gateway, this page and the updater together, leaving no way back except "
-        "the host &mdash; restart it instead.</p>")
+        "<p class=sub>Each product is a git checkout on this host, kept up to date "
+        "from here or with <code>sysible_ctl &lt;product&gt; update</code>.</p>"
+        "<details class=help><summary>What do these controls do?</summary>"
+        "<p><b>Update now</b> pulls the checkout and rebuilds its containers &mdash; "
+        "the same thing <code>sysible_ctl &lt;product&gt; update</code> does. A "
+        "checkout with local changes is reported and refused rather than "
+        "overwritten.</p>"
+        "<p><b>Manage</b> restarts, stops, starts or recreates a product's "
+        "containers, so a wedged service does not need a shell on the host. "
+        "<b>Recreate</b> applies a compose or environment change using the images "
+        "already built, so it is much quicker than a full update.</p>"
+        "<p>The Operations Platform itself cannot be STOPPED from here: that would "
+        "take down the gateway, this page and the updater together, leaving no way "
+        "back except the host. Restart it instead.</p>"
+        "</details>")
     if not updates.configured():
         note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
                  "updates can only be applied on the host with "
@@ -1618,9 +1763,9 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         # page's data endpoint from EVERY Administration page, and each product
         # costs a round-trip to its git remote. This button is how an operator says
         # "ask the remotes now" instead of taking the remembered answer.
-        "<p class=sub><button class='btn ghost sm' id=checknow>Check now</button>"
-        " <span class=sub>Update availability is remembered for a few minutes; "
-        "this re-asks every product&rsquo;s git remote.</span></p>"
+        "<div class=toolbar><button class='btn ghost sm' id=checknow>Check now</button>"
+        "<span class=sub>Availability is remembered for a few minutes; this re-asks "
+        "every product&rsquo;s git remote.</span></div>"
         f"{table}"
         "<div id=joblog-wrap>"
         "<div id=jobtitle class=sub style='margin-top:1rem'></div>"
