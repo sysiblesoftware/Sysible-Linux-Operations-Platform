@@ -448,3 +448,104 @@ def test_the_error_page_does_not_leak_where_the_upstream_lives(text):
     for leak in ("host.docker.internal", "8800", "8810", "8700", "idp:8080",
                  "SLOP_CONTROLLER_UPSTREAM", "reverse_proxy"):
         assert leak not in page, f"the error page leaks the upstream detail {leak!r}"
+
+
+# ---- a health probe that cannot fail is not a health probe ------------------
+def test_every_health_probe_is_bounded(text):
+    """Reported as "SLOP isn't coming up", with a portal whose every status dot
+    was GREY — the colour that means "still checking".
+
+    An upstream that is DOWN refuses the connection and the dot goes red at once.
+    An upstream that is WEDGED accepts it and never answers, and Caddy has no
+    default response timeout, so the proxy held the request open for as long as
+    the tab lived. The portal paints a dot when its fetch settles, so nothing ever
+    painted: a status board reporting nothing, in exactly the situation it exists
+    for."""
+    start = text.index("handle /healthz/controller")
+    end = text.index("# The three apps", start)
+    probes = text[start:end]
+    n = probes.count("reverse_proxy")
+    assert n >= 5, f"only found {n} health proxies — has the section moved?"
+    assert probes.count("dial_timeout") == n, \
+        "a health probe can still hang on a connect that is never accepted"
+    assert probes.count("response_header_timeout") == n, \
+        "a health probe can still hang on an upstream that never answers"
+
+
+def test_the_app_hops_are_not_bounded_the_same_way(text):
+    """Deliberately NOT copied downwards: /connect carries terminal websockets and
+    the apps stream logs, and a response-header timeout on those would cut a
+    working session. The probes are short-lived by definition; the app hops are
+    not."""
+    apps = text[text.index("(appsite) {"):text.index("(appsite_http)")]
+    assert "response_header_timeout" not in apps, \
+        "a terminal or log stream will now be cut off mid-session"
+
+
+@needs_caddy
+def test_a_wedged_upstream_answers_instead_of_hanging(tmp_path):
+    """The shipping probe block, run against an upstream that accepts the
+    connection and then says nothing at all — which is what a wedged container
+    does. Before the timeouts this never returned."""
+    import socket as _socket
+    import threading as _threading
+    import time as _time
+    import urllib.error
+    import urllib.request
+
+    # Accept, hold, never answer.
+    sink = _socket.socket()
+    sink.bind(("127.0.0.1", 0))
+    sink.listen(16)
+    held = []
+
+    def _hold():
+        while True:
+            try:
+                c, _ = sink.accept()
+            except OSError:
+                return
+            held.append(c)                       # keep it open; send nothing
+    _threading.Thread(target=_hold, daemon=True).start()
+
+    src = open(CADDYFILE, encoding="utf-8").read()
+    block = src[src.index("handle /healthz/flashback"):src.index("handle /healthz/visualizer")]
+    block = block.replace("{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}",
+                          f"127.0.0.1:{sink.getsockname()[1]}")
+
+    gw = _socket.socket()
+    gw.bind(("127.0.0.1", 0))
+    port = gw.getsockname()[1]
+    gw.close()
+    cfg = tmp_path / "Caddyfile"
+    cfg.write_text("{\n\tadmin off\n\tauto_https off\n}\n\n"
+                   f":{port} {{\n{block}}}\n")
+
+    proc = subprocess.Popen([caddy_bin, "run", "--config", str(cfg),
+                             "--adapter", "caddyfile"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                _socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                _time.sleep(0.1)
+        t0 = _time.time()
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz/flashback", timeout=20)
+            code = 200
+        except urllib.error.HTTPError as e:
+            code = e.code
+        except Exception as e:                                # pragma: no cover
+            pytest.fail(f"the probe did not come back at all: {e}")
+        took = _time.time() - t0
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        sink.close()
+
+    assert took < 15, (
+        f"the health probe took {took:.1f}s against a wedged upstream — the portal "
+        f"dot stays grey for that long, which is what 'nothing is coming up' looked like")
+    assert code in (502, 504), f"a wedged upstream reported HTTP {code}"

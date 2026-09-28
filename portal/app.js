@@ -40,10 +40,31 @@
     dot.title = state === "up" ? "online" : state === "down" ? "not reachable" : "unknown";
   }
 
+  // A probe that never settles leaves the dot GREY — the colour that means
+  // "still checking" — for as long as the tab is open. That is not hypothetical:
+  // an app whose container is up but wedged accepts the connection and never
+  // answers, and the gateway had no response timeout, so every dot on the portal
+  // sat grey while the platform was in trouble. The page is a status board; it
+  // has to reach a verdict, and "not reachable" IS a verdict. The gateway now
+  // bounds these too, but the page must not depend on the gateway's version to
+  // tell the truth about it.
+  var PROBE_MS = 8000;
   function poll(app) {
-    fetch("/healthz/" + app, { cache: "no-store" })
-      .then(function (r) { setDot(app, r.ok ? "up" : "down"); })
-      .catch(function () { setDot(app, "down"); });
+    var ctl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, PROBE_MS);
+    var done = false;
+    function settle(state) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      setDot(app, state);
+    }
+    // Without AbortController the fetch itself cannot be cancelled, so fall back
+    // to deciding without it rather than waiting forever.
+    if (!ctl) setTimeout(function () { settle("down"); }, PROBE_MS);
+    fetch("/healthz/" + app, { cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { settle(r.ok ? "up" : "down"); })
+      .catch(function () { settle("down"); });
   }
   // Which apps to poll comes from the dots the page actually renders, not from a
   // second hard-coded list: a card added here and forgotten there shows a dot that

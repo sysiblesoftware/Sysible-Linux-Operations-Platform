@@ -304,11 +304,22 @@ sysible.slop {
 	# proxy strips the IdP session cookie (sysible_sso) so the browser's SSO token
 	# is never exposed to an app host on this path; tls_insecure_skip_verify
 	# carries the same CE residual risk documented on the (appsite) hop above.
+	#
+	# BOUNDED, unlike the app hops below. Caddy has no default response timeout, so
+	# an upstream that accepts the connection and then never answers — a wedged
+	# container, not a stopped one — held these requests open indefinitely. The
+	# portal only paints a dot when its fetch settles, so every dot on the page
+	# stayed grey for as long as the tab was open: a status board that reported
+	# nothing at all, in exactly the situation it exists for. A health probe that
+	# cannot fail is not a health probe. The app hops must NOT copy this: they
+	# carry terminals and log streams that are supposed to stay open.
 	handle /healthz/controller {
 		rewrite * /api/health
 		reverse_proxy https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {
 			transport http {
 				tls_insecure_skip_verify
+				dial_timeout 4s
+				response_header_timeout 4s
 			}
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
@@ -318,6 +329,8 @@ sysible.slop {
 		reverse_proxy https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810} {
 			transport http {
 				tls_insecure_skip_verify
+				dial_timeout 4s
+				response_header_timeout 4s
 			}
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
@@ -327,6 +340,8 @@ sysible.slop {
 		reverse_proxy https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700} {
 			transport http {
 				tls_insecure_skip_verify
+				dial_timeout 4s
+				response_header_timeout 4s
 			}
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
@@ -338,6 +353,10 @@ sysible.slop {
 	handle /healthz/flashback {
 		rewrite * /api/health
 		reverse_proxy http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080} {
+			transport http {
+				dial_timeout 4s
+				response_header_timeout 4s
+			}
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
@@ -345,6 +364,10 @@ sysible.slop {
 	handle /healthz/visualizer {
 		rewrite * /api/health
 		reverse_proxy http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080} {
+			transport http {
+				dial_timeout 4s
+				response_header_timeout 4s
+			}
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
