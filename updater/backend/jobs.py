@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import git
+from . import detached, git
 
 # Bound the log: a --build pours out a lot, and this lives in memory.
 MAX_LOG_LINES = int(os.environ.get("SYSIBLE_UPDATER_MAX_LOG_LINES", "600"))
@@ -32,9 +32,46 @@ _job: dict | None = None            # the current or most recent job
 _job_lock = threading.Lock()
 
 
+# Which products' jobs would kill the process running them. SLOP's compose
+# project owns this container, so anything that recreates it is in this set.
+SELF_AFFECTING = {"slop"}
+
+
 def current() -> dict | None:
+    """The job in flight, or the most recent one.
+
+    A SLOP job runs in a container that outlives this process (see detached.py),
+    and after it restarts us there is no in-memory job left to report — so the
+    helper is asked. Without this the console loses every self-update the moment
+    it succeeds, which is the one outcome it should be able to state.
+    """
     with _job_lock:
-        return dict(_job) if _job else None
+        j = dict(_job) if _job else None
+    if j is None or (j.get("detached") and j.get("state") == "running"):
+        fresh = detached.status()
+        if fresh is not None:
+            _forget_after_detached_pull(fresh)
+            return fresh
+    return j
+
+
+_forgotten: set[str] = set()
+
+
+def _forget_after_detached_pull(job: dict) -> None:
+    """The helper did the `git pull`, not us, so nothing in THIS process knows the
+    checkout moved. Usually moot — the update restarts us and the memo starts
+    empty — but a `recreate` that leaves this container alone would otherwise keep
+    answering "update available" from a pre-pull memo, right after the operator
+    watched the update succeed."""
+    if job.get("state") != "succeeded" or job.get("action") is not None:
+        return
+    from . import apps
+    root = apps.checkout_dir("slop")
+    if root is None or str(root) in _forgotten:
+        return
+    _forgotten.add(str(root))
+    git.forget_remote(root)
 
 
 def _set(**fields) -> None:
@@ -103,17 +140,29 @@ def _worker(key: str, root: Path, compose: Path, actor: str) -> None:
 def start(key: str, root: Path, compose: Path, actor: str) -> tuple[bool, str]:
     """Begin an update. Returns (started, message). Refuses while one is running."""
     global _job
+    # The in-process lock cannot see a detached helper: it lives in another
+    # container, and a restart of this one resets the lock while the work carries
+    # on. Two `compose up --build` runs on the same project fight over container
+    # names, so ask the helper first.
+    if detached.running():
+        return False, ("An update of slop is already running — wait for it to finish.")
     if not _lock.acquire(blocking=False):
         running = current() or {}
         return False, (f"An update of {running.get('app', 'another product')} is already "
                        "running — wait for it to finish.")
+    if key in SELF_AFFECTING:
+        started, message = detached.spawn(detached.SCRIPT_UPDATE, compose)
+        _lock.release()                  # the helper is the lock from here on
+        if not started:
+            return False, f"could not start the update: {message}"
+        with _job_lock:
+            _job = None                  # current() reads the helper instead
+        return True, ("Updating slop… this service restarts as part of it, so the "
+                      "page will drop briefly.")
     with _job_lock:
         _job = {"app": key, "actor": actor, "state": "running",
                 "started": time.time(), "finished": None, "message": "", "log": [],
-                # Updating SLOP means `compose up` recreates THIS container part way
-                # through, so the job can never report its own success. Flag it so the
-                # console reads a dropped connection as "restarting", not "failed".
-                "self_update": key == "slop"}
+                "self_update": False}
     threading.Thread(target=_worker, args=(key, root, compose, actor),
                      name=f"update-{key}", daemon=True).start()
     return True, f"Updating {key}…"
@@ -171,17 +220,32 @@ def start_action(key: str, action: str, compose: Path, actor: str) -> tuple[bool
     if refusal:
         return False, refusal
     argv, verb = ACTIONS[action]
+    if detached.running():
+        return False, "An update of slop is already running — wait for it to finish."
     if not _lock.acquire(blocking=False):
         running = current() or {}
         return False, (f"An update of {running.get('app', 'another product')} is already "
                        "running — wait for it to finish.")
+    # Restarting or recreating SLOP takes this container down with it, exactly as
+    # an update does: `compose restart` stops every service in the project, and
+    # the client asking for it is inside one of them. Same hand-off.
+    if key in SELF_AFFECTING:
+        script = detached.SCRIPT_ACTIONS.get(action)
+        if script is None:                                   # pragma: no cover
+            _lock.release()
+            return False, f"'{action}' cannot be run on slop from here."
+        started, message = detached.spawn(script, compose, action)
+        _lock.release()
+        if not started:
+            return False, f"could not start {action}: {message}"
+        with _job_lock:
+            _job = None
+        return True, (f"{action.capitalize()}ing slop… this service restarts as part "
+                      "of it, so the page will drop briefly.")
     with _job_lock:
         _job = {"app": key, "actor": actor, "state": "running", "action": action,
                 "started": time.time(), "finished": None, "message": "", "log": [],
-                # Restarting SLOP recreates THIS container mid-request, so the job
-                # can never report its own success — the console must read a dropped
-                # connection as "restarting", not "failed".
-                "self_update": key == "slop"}
+                "self_update": False}
     threading.Thread(target=_action_worker, args=(key, compose, argv, verb),
                      name=f"{action}-{key}", daemon=True).start()
     return True, f"{action.capitalize()}ing {key}…"
