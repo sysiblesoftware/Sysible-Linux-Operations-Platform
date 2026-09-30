@@ -169,6 +169,24 @@ else
   die "the Controller checkout has no deploy/sysiblectl or deploy/sysible_ctl (older main?) — update and retry."
 fi
 
+# WHICH BUILD VERB THIS CLI SPEAKS.
+#
+# `rebuild` replaced `up`, but this installer and the Controller checkout it uses
+# are separate repositories that reach a host at different times. Hard-coding
+# either one means a window where the installer asks for a verb the CLI does not
+# have, and every product fails with "'rebuild' is not a command" — which is
+# exactly what happened the first time this was changed.
+#
+# So ASK IT, using its own parser and a product name that cannot exist. Both
+# answers are refusals that happen during argument parsing, before anything
+# touches Docker:
+#   new CLI: 'rebuild' is a command, '__probe__' is not a product
+#   old CLI: 'rebuild' is not a command at all
+CTL_BUILD_VERB=up
+if sysiblectl rebuild __probe__ 2>&1 | grep -q "is not a product"; then
+  CTL_BUILD_VERB=rebuild
+fi
+
 # Everything below runs in containers, so the Docker daemon MUST be up. Start it
 # and wait briefly, with a clear error (not a silent abort) if it never comes up.
 if ! docker info >/dev/null 2>&1; then
@@ -420,7 +438,7 @@ if [ "$WANT_APPS" -eq 1 ]; then
     # it's export'ed into this shell's environment (above) and persisted to the
     # app's 0600 .env (above), which docker compose auto-loads.
     if env "$var=$_dir" "$trust=1" \
-           SYSIBLE_BASE_PATH="/$p/" sysiblectl "$p" rebuild; then
+           SYSIBLE_BASE_PATH="/$p/" sysiblectl "$p" "$CTL_BUILD_VERB"; then
       say "  $p is up."
     else
       FAILED="$FAILED $p"; say "  WARNING: $p did not come up — continuing (scroll up for the error)."
@@ -434,7 +452,7 @@ if [ "$WANT_GW" -eq 1 ]; then
   say "============================================================"
   say " SLOP gateway — the single front door (this repo: $HERE)"
   say "============================================================"
-  if env SYSIBLE_SLOP_DIR="$HERE" sysiblectl slop rebuild; then
+  if env SYSIBLE_SLOP_DIR="$HERE" sysiblectl slop "$CTL_BUILD_VERB"; then
     say "  SLOP gateway is up."
   else
     FAILED="$FAILED slop-gateway"; say "  WARNING: the SLOP gateway did not come up (scroll up for the error)."
