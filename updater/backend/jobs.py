@@ -194,7 +194,7 @@ def action_refusal(key: str, action: str) -> str | None:
     if action == "stop" and key in _NO_STOP:
         return ("stopping SLOP would take down the gateway, this console and the "
                 "updater itself — there would be no way back except a shell on the "
-                "host. Use Restart, or stop it from the host with 'sysible_ctl slop stop'.")
+                "host. Use Restart, or stop it from the host with 'sysiblectl slop stop'.")
     return None
 
 

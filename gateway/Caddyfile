@@ -465,8 +465,8 @@ sysible.slop {
 				did not respond (HTTP {err.status_code}). Everything else keeps working,
 				which is why the rest of the portal still loads.</p>
 				<p>It is usually starting up, stopped, or was never installed on this
-				host. Check it with <code>sysible_ctl status</code>, or bring it up with
-				<code>sysible_ctl up</code>.</p>
+				host. Check it with <code>sysiblectl status</code>, or bring it up with
+				<code>sysiblectl start</code>.</p>
 				<p><a href="/">&larr; Back to the portal</a></p>
 				</div></body></html>
 				HTML 502

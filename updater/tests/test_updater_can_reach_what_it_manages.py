@@ -122,7 +122,7 @@ def test_the_allowlisted_products_all_have_a_directory_variable(updater_service)
 class TestFindingACheckoutWhoseNameIsCapitalised:
     """github.com/sysiblesoftware/Sysible-Controller clones to a CAPITALISED
     directory, so the conventional-path lookup missed it and the product read as
-    'not installed'. sysible_ctl hit this and was fixed with `find -iname`."""
+    'not installed'. sysiblectl hit this and was fixed with `find -iname`."""
 
     def test_a_capitalised_clone_is_still_found(self, tmp_path, monkeypatch):
         import importlib

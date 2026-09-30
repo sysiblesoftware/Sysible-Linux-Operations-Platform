@@ -111,7 +111,7 @@ def list_hosts(identity) -> tuple[list, str | None, dict]:
             r = c.get(f"{_url()}/api/hosts", headers=headers)
     except Exception as e:
         msg = (f"could not reach the Controller ({type(e).__name__}) — no host can back "
-               f"anything up until it is back. Check it with: sysible_ctl controller status")
+               f"anything up until it is back. Check it with: sysiblectl controller status")
         return [], msg, _blocked(msg)
     if r.status_code in (401, 403):
         # The capture request carries the SAME identity, so it will be refused

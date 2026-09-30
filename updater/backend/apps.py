@@ -43,7 +43,7 @@ def label(key: str) -> str:
 def checkout_dir(key: str) -> Path | None:
     """The product's checkout, or None when it isn't on this host.
 
-    An explicit SYSIBLE_<APP>_DIR wins (that is what sysible_ctl and install.sh
+    An explicit SYSIBLE_<APP>_DIR wins (that is what sysiblectl and install.sh
     honour), otherwise the conventional location under SYSIBLE_SRC_DIR.
     """
     if key not in ALLOWLIST:
@@ -58,7 +58,7 @@ def checkout_dir(key: str) -> Path | None:
     # lands in a CAPITALISED directory that the conventional path above misses —
     # and the product then reads as "not installed on this host" on a box where
     # it is plainly installed. Exact matches are tried first, above, so this only
-    # ever resolves a case variant. (sysible_ctl hit the same thing and answers
+    # ever resolves a case variant. (sysiblectl hit the same thing and answers
     # it with `find -iname`.)
     try:
         for child in sorted(SRC_DIR.iterdir()):

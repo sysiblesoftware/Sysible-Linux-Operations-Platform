@@ -1309,7 +1309,7 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<a href='/'>Portal &rarr;</a></p>"
         "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
-        "(<code>sysible_ctl &lt;app&gt; up</code>). This page shows the running values and "
+        "(<code>sysiblectl &lt;app&gt; up</code>). This page shows the running values and "
         "documents every parameter &mdash; stored passwords and the shared secret are never "
         "displayed (only whether each is set; a one-time temp password from a reset is shown "
         "once, on the reset screen). "
@@ -1732,10 +1732,10 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
     # a decision — but not worth reading every visit, so they fold away.
     note = (
         "<p class=sub>Each product is a git checkout on this host, kept up to date "
-        "from here or with <code>sysible_ctl &lt;product&gt; update</code>.</p>"
+        "from here or with <code>sysiblectl &lt;product&gt; update</code>.</p>"
         "<details class=help><summary>What do these controls do?</summary>"
         "<p><b>Update now</b> pulls the checkout and rebuilds its containers &mdash; "
-        "the same thing <code>sysible_ctl &lt;product&gt; update</code> does. A "
+        "the same thing <code>sysiblectl &lt;product&gt; update</code> does. A "
         "checkout with local changes is reported and refused rather than "
         "overwritten.</p>"
         "<p><b>Manage</b> restarts, stops, starts or recreates a product's "
@@ -1749,7 +1749,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
     if not updates.configured():
         note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
                  "updates can only be applied on the host with "
-                 "<code>sysible_ctl &lt;product&gt; update</code>.</p>")
+                 "<code>sysiblectl &lt;product&gt; update</code>.</p>")
 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"

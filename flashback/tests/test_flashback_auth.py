@@ -803,7 +803,7 @@ def test_an_unreachable_controller_withdraws_the_backup_buttons(cl, monkeypatch)
     assert d["config_backup_configured"] is False, d
     assert "could not reach the Controller" in (d["config_backup_reason"] or ""), d
     # and it names the command that says what is wrong with it
-    assert "sysible_ctl controller status" in d["config_backup_reason"], d
+    assert "sysiblectl controller status" in d["config_backup_reason"], d
 
 
 def test_a_batch_that_asked_nobody_is_a_failure_not_a_calm_status_line(cl, monkeypatch):

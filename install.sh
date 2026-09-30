@@ -5,9 +5,9 @@
 # of them so a standalone `git clone` of this repo is all you need:
 #
 #   1. Controller, SLEP and Connect are cloned to /opt/sysible-src/<repo> and
-#      brought up as containers via the suite's unified `sysible_ctl` CLI (which
+#      brought up as containers via the suite's unified `sysiblectl` CLI (which
 #      this script installs, from the Controller checkout, so you can manage
-#      everything afterward: sysible_ctl status | update all | logs …).
+#      everything afterward: sysiblectl status | update all | logs …).
 #   2. The SLOP gateway (Caddy + portal) is brought up FROM THIS CHECKOUT, in
 #      front of the apps — and it now bundles the Flashback module (the config time
 #      machine) as a service in its own compose, so that comes up with the gateway.
@@ -125,15 +125,15 @@ if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev
     || die "the Docker Compose plugin is required and could not be installed automatically. Install it (https://docs.docker.com/compose/install/) and re-run."
 fi
 
-# Let the human who ran this (via sudo) drive Docker — and therefore sysible_ctl —
+# Let the human who ran this (via sudo) drive Docker — and therefore sysiblectl —
 # WITHOUT sudo going forward, the standard Docker post-install step. The
-# membership only takes effect on their next login; until then, sysible_ctl
+# membership only takes effect on their next login; until then, sysiblectl
 # transparently re-runs itself with sudo when it hits the root-owned socket.
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
   getent group docker >/dev/null 2>&1 || groupadd docker 2>/dev/null || true
   if id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then :; else
     usermod -aG docker "$SUDO_USER" 2>/dev/null \
-      && say "Added '$SUDO_USER' to the docker group — log out/in (or run 'newgrp docker') to use docker/sysible_ctl without sudo."
+      && say "Added '$SUDO_USER' to the docker group — log out/in (or run 'newgrp docker') to use docker/sysiblectl without sudo."
   fi
 fi
 
@@ -149,15 +149,24 @@ clone_one() {  # clone_one <repo-url>
 
 mkdir -p "$SRC_DIR"
 
-# The Controller checkout ships the unified sysible_ctl — clone it regardless (we
+# The Controller checkout ships the unified sysiblectl — clone it regardless (we
 # need the CLI to drive every product, including this gateway) and put it on PATH.
 CTL_DIR="$SRC_DIR/$(dirname_for "$CTL_REPO")"
 clone_one "$CTL_REPO" || die "could not clone the Controller repo (check network/DNS) — nothing was installed."
-if [ -x "$CTL_DIR/deploy/sysible_ctl" ]; then
-  ln -sf "$CTL_DIR/deploy/sysible_ctl" /usr/local/bin/sysible_ctl
-  say "Installed sysible_ctl -> /usr/local/bin/sysible_ctl"
+# `sysiblectl` is the name; `sysible_ctl` is linked beside it because it is in
+# every runbook, every shell history and this installer's own older copies. A
+# Controller checkout from before the rename only ships the underscore name, so
+# take whichever is there.
+_ctl_src=""
+for _c in "$CTL_DIR/deploy/sysiblectl" "$CTL_DIR/deploy/sysible_ctl"; do
+  [ -x "$_c" ] && { _ctl_src="$_c"; break; }
+done
+if [ -n "$_ctl_src" ]; then
+  ln -sf "$_ctl_src" /usr/local/bin/sysiblectl
+  ln -sf "$_ctl_src" /usr/local/bin/sysible_ctl
+  say "Installed sysiblectl -> /usr/local/bin/sysiblectl (and sysible_ctl, the old name)"
 else
-  die "the Controller checkout has no deploy/sysible_ctl (older main?) — update and retry."
+  die "the Controller checkout has no deploy/sysiblectl or deploy/sysible_ctl (older main?) — update and retry."
 fi
 
 # Everything below runs in containers, so the Docker daemon MUST be up. Start it
@@ -225,7 +234,7 @@ _upsert_env() {
 }
 
 # _app_compose_dir DIR — echo the directory that holds the app's compose file
-# (its own root, or a deploy/ subdir), matching how sysible_ctl finds it. That is
+# (its own root, or a deploy/ subdir), matching how sysiblectl finds it. That is
 # the directory docker compose loads .env from, so it's where the SSO env must live.
 _app_compose_dir() {
   for _d in "$1" "$1/deploy"; do
@@ -343,7 +352,7 @@ _upsert_kv "$ENV_FILE" SYSIBLE_FLASHBACK_AGENT_BIND "$FB_BIND" 2>/dev/null || tr
 # so SLOP can be updated from its own Administration page, and the mount target has
 # to be the path the checkout has on the HOST — the `docker compose` the updater
 # runs is resolved by the host daemon. It was previously passed only as a one-shot
-# env var on the `sysible_ctl slop up` line below, so every LATER recreate fell back
+# env var on the `sysiblectl slop rebuild` line below, so every LATER recreate fell back
 # to the conventional /opt/sysible-src path, which is not where install.sh is run
 # from: the updater then saw no checkout and Administration reported SLOP as "not
 # installed on this host". Persisted here so it survives every future recreate.
@@ -354,7 +363,7 @@ _upsert_kv "$ENV_FILE" SYSIBLE_SLOP_DIR "$HERE" 2>/dev/null || true
 FAILED=""
 if [ "$WANT_APPS" -eq 1 ]; then
   # The host's LAN IP — where the Controller publishes its backend/agent API on :9000.
-  # Same detection sysible_ctl uses when it seeds the Controller's advertised address.
+  # Same detection sysiblectl uses when it seeds the Controller's advertised address.
   # Connect (all-in-one SLOP host) auto-attaches to the local Controller at this address
   # over SSO, so the operator never has to "log in to the Controller" from Connect.
   HOST_ADDR="${SYSIBLE_CONTROLLER_ADDR:-}"
@@ -378,7 +387,7 @@ if [ "$WANT_APPS" -eq 1 ]; then
     # PERSIST the SSO secret + trust flag + base path into the app's OWN compose
     # .env, so they survive EVERY future recreate. Without this the values only
     # existed in the ambient env of the single install-time `up` below; any later
-    # `docker compose up -d` / `sysible_ctl up`/`update`/rebuild brought the app up
+    # `docker compose up -d` / `sysiblectl rebuild`/`update` brought the app up
     # with an empty secret and trust=0 (docker resolves ${VAR:-default}), so it
     # failed closed and fell back to its OWN login — the SSO "stopped working after
     # a redeploy" bug. docker compose auto-loads this .env from the compose dir.
@@ -411,7 +420,7 @@ if [ "$WANT_APPS" -eq 1 ]; then
     # it's export'ed into this shell's environment (above) and persisted to the
     # app's 0600 .env (above), which docker compose auto-loads.
     if env "$var=$_dir" "$trust=1" \
-           SYSIBLE_BASE_PATH="/$p/" sysible_ctl "$p" up; then
+           SYSIBLE_BASE_PATH="/$p/" sysiblectl "$p" rebuild; then
       say "  $p is up."
     else
       FAILED="$FAILED $p"; say "  WARNING: $p did not come up — continuing (scroll up for the error)."
@@ -425,7 +434,7 @@ if [ "$WANT_GW" -eq 1 ]; then
   say "============================================================"
   say " SLOP gateway — the single front door (this repo: $HERE)"
   say "============================================================"
-  if env SYSIBLE_SLOP_DIR="$HERE" sysible_ctl slop up; then
+  if env SYSIBLE_SLOP_DIR="$HERE" sysiblectl slop rebuild; then
     say "  SLOP gateway is up."
   else
     FAILED="$FAILED slop-gateway"; say "  WARNING: the SLOP gateway did not come up (scroll up for the error)."
@@ -435,5 +444,5 @@ fi
 if [ -n "$FAILED" ]; then
   say
   say "Finished WITH PROBLEMS — these did not come up:$FAILED"
-  say "Inspect with 'sysible_ctl status'; the errors above are usually network, DNS, or a Docker build."
+  say "Inspect with 'sysiblectl status'; the errors above are usually network, DNS, or a Docker build."
 fi

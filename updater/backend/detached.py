@@ -102,7 +102,7 @@ def spawn(script: str, cwd: Path, action: str = "update") -> tuple[bool, str]:
     image = _own_image()
     if not image:
         return False, ("cannot find this service's own image to run the update "
-                       "with — update from the host instead: sysible_ctl slop update")
+                       "with — update from the host instead: sysiblectl slop update")
     _docker("rm", "-f", HELPER)          # a finished helper from last time
     argv = [
         "run", "-d", "--name", HELPER,

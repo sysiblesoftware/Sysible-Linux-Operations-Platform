@@ -7,7 +7,7 @@
 #                sign-on for the three apps via forward_auth to the IdP.
 #
 # The three apps — Controller, SLEP, Connect — run as their OWN container stacks
-# (install them with `install-sysible`, or manage with `sysible_ctl`); the gateway
+# (install them with `install-sysible`, or manage with `sysiblectl`); the gateway
 # proxies to them on the host ports they publish (8800 / 8810 / 8700). For SSO to
 # reach INTO the apps, each app must run with the SAME SYSIBLE_SSO_SHARED_SECRET
 # and its trust flag on — `install.sh` wires that automatically.
@@ -180,7 +180,7 @@ services:
   # whole API is "update product <key>" against a fixed allowlist — it accepts no
   # path, repo, branch, image or command (see updater/backend/apps.py).
   #
-  # Remove this service if you would rather run `sysible_ctl <app> update` on the
+  # Remove this service if you would rather run `sysiblectl <app> update` on the
   # host: Administration then simply shows the update state and the command,
   # which needs no socket at all.
   updater:

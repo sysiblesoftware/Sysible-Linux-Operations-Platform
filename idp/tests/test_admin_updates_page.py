@@ -145,7 +145,7 @@ def test_the_long_explanation_is_behind_a_disclosure(page):
         "the two paragraphs are back in front of the controls"
     assert "What do these controls do?" in page
     # ...but the detail itself must still be there to be read.
-    for kept in ("Recreate", "sysible_ctl", "cannot be STOPPED"):
+    for kept in ("Recreate", "sysiblectl", "cannot be STOPPED"):
         assert kept in page, f"the explanation lost {kept!r}"
 
 

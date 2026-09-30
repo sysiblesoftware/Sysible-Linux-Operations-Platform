@@ -74,27 +74,27 @@ Connect as containers, with the SLOP gateway in front of them:
 #    install.sh generates the secret for you, so you can skip this entirely.
 cp .env.example .env
 
-# 2. Install everything (installs Docker + git if missing, plus sysible_ctl):
+# 2. Install everything (installs Docker + git if missing, plus sysiblectl):
 sudo ./install.sh                 # the whole stack (apps + gateway + IdP)
 #   sudo ./install.sh apps        # only Controller + SLEP + Connect
 #   sudo ./install.sh gateway     # only the gateway + IdP (apps already running)
-#   sudo ./deploy/sysible_ctl install   # same thing, if you reach for sysible_ctl
+#   sudo ./deploy/sysiblectl install   # same thing, if you reach for sysiblectl
 
 # 3. Open the portal at this host's IP — no domain, no subdomains, no DNS:
 open https://<server-ip>/
 ```
 
 `install.sh` clones each app from its own official repo, builds it, and manages
-everything through the unified `sysible_ctl` (`sysible_ctl status | update all |
+everything through the unified `sysiblectl` (`sysiblectl status | update all |
 logs …`). Already have the apps running and only want the front door? Use
 `sudo ./install.sh gateway`.
 
-**To pick up a new release, use `sysible_ctl slop update`** — not a bare
+**To pick up a new release, use `sysiblectl slop update`** — not a bare
 `git pull && docker compose up -d --build`. The gateway is the stock Caddy image
 with a *bind-mounted* Caddyfile, so `up --build` rebuilds the other services and
 leaves Caddy running the config it started with: a Caddyfile the pull just
 brought in sits on disk, unloaded, and the front door keeps serving the previous
-one. `sysible_ctl` validates the new config, loads it, proves the deny path still
+one. `sysiblectl` validates the new config, loads it, proves the deny path still
 fires, and waits for :443 to actually answer before it reports success.
 
 TLS is Caddy's **internal CA** by default (self-signed, like the apps today) — your
