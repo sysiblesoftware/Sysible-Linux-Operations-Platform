@@ -413,6 +413,15 @@ if [ "$WANT_APPS" -eq 1 ]; then
     # (host LAN IP + the Controller's published :9000). No machine API key needed:
     # Connect authenticates to the Controller with the shared secret. Persisted into
     # the app's .env (which docker compose auto-loads), so it survives every recreate.
+    #
+    # This is a SEED, not a permanent answer, and the persistence that makes it
+    # survive a recreate is exactly what made it dangerous: HOST_ADDR is one
+    # `ip route get` from install time, so when a host came back on a different
+    # subnet this file kept pointing Connect at an address nobody answers at.
+    # Connect now treats an IP in this variable as a starting value only and moves
+    # onto whatever host the portal is actually reached at (backend/controller.py's
+    # note_gateway_host / _preferred_url). Writing it is still right: on a fresh
+    # install, before any browser has arrived, it is the only address we know.
     if _cdir="$(_app_compose_dir "$_dir")"; then
       _aenv="$_cdir/.env"
       _upsert_kv "$_aenv" SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
