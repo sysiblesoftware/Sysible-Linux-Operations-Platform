@@ -264,3 +264,24 @@ def test_the_page_fits_its_card_and_the_toggle_is_inert(tmp_path):
     finally:
         server.should_exit = True
         t.join(timeout=10)
+
+
+def test_a_finished_update_reloads_the_page():
+    """The containers were just recreated with new code, so the page and every
+    asset it is holding come from the build that was replaced. Without this the
+    operator is told it updated while still looking at the old one."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    block = src[src.index("if(j.state!=='running'){"):]
+    block = block[:block.index("function startUpdate")]
+    assert "location.reload()" in block, "a finished update never refreshes the page"
+    # The reload must sit INSIDE the success branch. Checking only that the string
+    # "succeeded" appears nearby passes even when the reload is unconditional — the
+    # toast two lines above mentions it too, which is how the first version of this
+    # test stayed green while the guard was removed.
+    m = re.search(r"if\(j\.state==='succeeded'\)\{\s*"
+                  r"setTimeout\(function\(\)\{location\.reload\(\);\},(\d+)\);\s*\}", block)
+    assert m, "the reload is not guarded by the update having SUCCEEDED"
+    # Not instant: the toast carrying the outcome has to be readable first.
+    assert int(m.group(1)) >= 1500, "reloads before the result can be read"

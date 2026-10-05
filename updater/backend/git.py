@@ -113,16 +113,47 @@ def status(root: Path, fresh: bool = False) -> dict:
         if error:
             return {"checked": False, "current": _short(cur), "branch": branch,
                     "reason": error}
-        return {"checked": True, "available": latest != cur, "current": _short(cur),
-                "latest": _short(latest), "branch": branch}
+        return {"checked": True, "available": _behind(root, latest, cur),
+                "current": _short(cur), "latest": _short(latest), "branch": branch}
     except subprocess.TimeoutExpired:
         return {"checked": False, "reason": f"the remote did not answer within {REMOTE_TIMEOUT:g}s"}
     except Exception as e:                                   # pragma: no cover
         return {"checked": False, "reason": str(e)[:160]}
 
 
+def _behind(root: Path, latest: str, cur: str) -> bool:
+    """Is there actually something to pull?
+
+    `latest != cur` is not that question. It is true whenever the two differ for
+    ANY reason — including a checkout that is AHEAD of its remote, or on a line of
+    history the remote does not have. Those report "update available" forever
+    while `git pull` correctly answers "Already up to date", which is precisely
+    the contradiction an operator cannot resolve from the console.
+
+    So ask git: is the remote tip already an ancestor of what we have? If the
+    object is unknown here we have never fetched it, which does mean we are
+    behind.
+    """
+    if not latest or latest == cur:
+        return False
+    r = _git(root, "merge-base", "--is-ancestor", latest, "HEAD")
+    if r.returncode == 0:
+        return False          # we already contain it: up to date, or ahead of it
+    if r.returncode == 1:
+        return True           # a real divergence, or genuinely behind
+    return True               # unknown object — never fetched, so behind
+
+
 def dirty(root: Path) -> bool:
-    """True when the checkout has local modifications. A pull would fail or
-    clobber them, so the console refuses instead of trying."""
-    r = _git(root, "status", "--porcelain")
+    """True when the checkout has local modifications to TRACKED files.
+
+    Untracked files are deliberately not counted. A pull cannot lose one: git
+    either leaves it alone, or refuses the merge naming the exact file that would
+    be overwritten and changes nothing. Counting them blocked updates on files
+    this platform generates itself — SLOP's installer writes deploy/.env into
+    every app's compose dir, so an app that did not gitignore it could never be
+    updated again from the day it was installed, and the fix for that (a
+    .gitignore) could only arrive through the update it was blocking.
+    """
+    r = _git(root, "status", "--porcelain", "--untracked-files=no")
     return r.returncode == 0 and bool(r.stdout.strip())

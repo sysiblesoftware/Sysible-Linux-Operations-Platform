@@ -1647,6 +1647,13 @@ _UPDATES_JS = r"""
                        kind:j.state==='succeeded'?'success':'error',
                        ttl:j.state==='succeeded'?9000:0});
             load();
+            // The containers were just recreated with new code, so this page and
+            // every asset it is holding are from the build that was replaced.
+            // Reloading is the difference between "it updated" and "it updated and
+            // I am looking at it". Long enough for the toast to be read first.
+            if(j.state==='succeeded'){
+              setTimeout(function(){location.reload();},2500);
+            }
           }
         })
         .catch(function(){

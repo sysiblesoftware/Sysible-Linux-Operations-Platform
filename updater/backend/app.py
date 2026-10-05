@@ -112,6 +112,11 @@ def status(request: Request, refresh: bool = False) -> dict:
             out.append(row)
             continue
         row["installed"] = True
+        # WHICH checkout this is. When a pull on the host disagrees with what this
+        # panel says, the first thing to establish is whether they are even looking
+        # at the same directory — SLEP_DIR and friends can point somewhere other
+        # than /opt/sysible-src/<repo>.
+        row["path"] = str(root)
         row.update(git.status(root, fresh=refresh))
         row["dirty"] = git.dirty(root)
         # Resolved ONCE: this used to be four separate probes of the filesystem
@@ -120,7 +125,8 @@ def status(request: Request, refresh: bool = False) -> dict:
         row["can_update"] = bool(row.get("available")) and not row["dirty"] \
             and compose is not None
         if row["dirty"]:
-            row["reason"] = "the checkout has local changes — resolve them on the host first"
+            row["reason"] = ("the checkout has local changes to tracked files — "
+                             f"`git -C {root} status` on the host shows them")
         elif compose is None:
             row["reason"] = "no compose file found in the checkout"
         row["services"] = jobs.services(compose) if compose else []
