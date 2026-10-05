@@ -113,7 +113,34 @@ def _source_for(actor, given=None) -> str:
     return "automation" if str(actor or "").strip().lower() in _SERVICE_ACTORS else "user"
 
 
+# The fleet's own sweeps. The Controller runs these against EVERY host on a timer,
+# so on a twenty-host fleet they are not merely the majority of the feed — they are
+# effectively all of it. The reported symptom was an activity view in which every
+# visible row was "collected host posture" or "checked for available package
+# updates", each carrying the full shell command. That is the platform working, not
+# anybody doing anything.
+#
+# Hidden by DEFAULT but never dropped: the toggle beside the source chips says how
+# many there are and brings them straight back. A forensic view that silently
+# discarded rows would be worse than a noisy one.
+#
+# These are the phrases the Controller stamps in backend/app.py's
+# _COMMAND_SIGNATURES — exactly the entries it marks "automation", which are the
+# ones it runs on a timer. A new sweep there needs a line here.
+ROUTINE_ACTIONS = frozenset({
+    "collected host posture",
+    "checked for available package updates",
+    "ran a fleet health check",
+    "collected host metrics",
+})
+
+
+def _is_routine(action, source) -> bool:
+    return source == "automation" and str(action or "").strip().lower() in ROUTINE_ACTIONS
+
+
 def _ev(ts, actor, action, target="", detail="", _id=None, source=None) -> dict:
+    src = _source_for(actor, source)
     return {
         "id": _id,
         "ts": float(ts or 0),
@@ -121,7 +148,9 @@ def _ev(ts, actor, action, target="", detail="", _id=None, source=None) -> dict:
         "action": str(action or ""),
         "target": str(target or ""),
         "detail": str(detail or ""),
-        "source": _source_for(actor, source),
+        "source": src,
+        # Fleet housekeeping, as opposed to a scheduled job somebody created.
+        "routine": _is_routine(action, src),
     }
 
 

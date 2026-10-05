@@ -85,23 +85,41 @@ border-radius:10px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-h
 /* The Topology tab is pushed to the right of the per-app tabs: it is a view of
    the FLEET, not of one app's activity, and sitting in the same row unqualified
    made it read as a fifth app. */
-/* Fleet Topology is not a fifth app — it is a different KIND of view, so it sits
-at the right of the strip rather than in the run of app tabs. It used to be a bare
-.tab there: muted text, no border, no icon, which reads as a stray word rather than
-something to press. Once the app tabs grew to their full product names it also
-wrapped onto a row of its own, alone. Give it the shape of a button, an icon, and
-a filled selected state. */
-.tab.topo{margin-left:auto;align-self:center;display:inline-flex;align-items:center;
-gap:.45em;padding:.42em .8em;margin-bottom:.45em;border:1px solid var(--line);
-border-radius:8px;background:var(--panel2)}
-.tab.topo svg{width:15px;height:15px;flex:0 0 auto;display:block}
-.tab.topo:hover{color:var(--text);border-color:var(--muted)}
-.tab.topo.sel{background:var(--accent);border-color:var(--accent);color:#fff}
 .bar .seg{display:flex;gap:2px}
 .bar .seg button.on{border-color:var(--accent);color:var(--text)}
 .bar .seg .n{color:var(--faint);font-size:11px;margin-left:.3em}
+.bar .chip{border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+border-radius:8px;padding:.4em .7em;font:inherit;font-size:13px;cursor:pointer}
+.bar .chip .n{color:var(--faint);font-size:11px;margin-left:.3em}
+.bar .chip:hover{color:var(--text);border-color:var(--muted)}
+.bar .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.bar .chip.on .n{color:#fff;opacity:.8}
 td.src{color:var(--muted);white-space:nowrap}
 .bar label.chk{display:flex;align-items:center;gap:.35em;color:var(--muted);font-size:12.5px;cursor:pointer}
+/* The home view. Fleet Topology used to be a fifth .tab shoved to the right of the
+app list with margin-left:auto — a different KIND of view wearing the clothes of
+"activity for one more app", which is why it read as an afterthought wherever it
+was put. The honest shape is a chooser: the app tabs belong INSIDE Activity, and
+topology and logs are peers of Activity, not of Connect. */
+.home{padding:1.4em 1em 2em;max-width:1000px;margin:0 auto}
+.home h2{margin:.2em 0 .15em;font-size:19px}
+.home .lede{color:var(--muted);font-size:13.5px;margin:0 0 1.3em}
+.home-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:14px}
+.vcard{display:flex;flex-direction:column;gap:.45em;text-align:left;padding:1em 1.05em;
+border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);
+font:inherit;cursor:pointer}
+.vcard:hover{border-color:var(--accent);background:var(--panel2)}
+.vcard .vc-top{display:flex;align-items:center;gap:.55em}
+.vcard svg{width:19px;height:19px;flex:0 0 auto;color:var(--accent)}
+.vcard b{font-size:14.5px;font-weight:600}
+.vcard .vc-sub{color:var(--muted);font-size:12.5px;line-height:1.45}
+.vcard .vc-meta{color:var(--faint);font-size:11.5px;margin-top:.15em}
+.crumb{display:flex;align-items:center;gap:.5em;padding:.55em 1em;border-bottom:1px solid var(--line);
+background:var(--panel)}
+.crumb button{border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+border-radius:8px;padding:.35em .7em;font:inherit;font-size:12.5px;cursor:pointer}
+.crumb button:hover{color:var(--text);border-color:var(--muted)}
+.crumb .where{font-size:13px;color:var(--text);font-weight:600}
 .topo-card{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
 .topo-card svg{display:block;width:100%;max-height:74vh;cursor:grab;touch-action:none}
 .topo-card svg.grabbing{cursor:grabbing}
@@ -126,6 +144,11 @@ let APPS=[], cur=null, rows=[], limit=100, lastFailed=false;
 // forensic view, so it starts on 'all' — nothing is hidden unless asked — but
 // the chips let an operator drop the sweeps and read just what people did.
 let srcFilter='all';
+// The fleet's own sweeps (posture, package checks) run against every host on a
+// timer, so on any real fleet they are effectively the whole feed — the reported
+// symptom was an activity view where every visible row was one of them. Hidden to
+// begin with, never dropped: the toggle says how many and brings them back.
+let showRoutine=false;
 const SRC_LABEL={user:'Person',api:'API',automation:'Automation'};
 const TOPO='__topology__';
 // The Controller console is a sibling of this one behind the SLOP gateway
@@ -137,29 +160,77 @@ function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=nu
 function fmt(t){if(!t)return '—';const d=new Date(t*1000);return d.toLocaleString();}
 async function jget(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json();}
 
+// ------------------------------------------------------------------- the views
+//
+// Three things this console does, and they are peers. Fleet Topology was a fifth
+// .tab in the app row with margin-left:auto — "activity for one more app" was the
+// only shape available, so it looked bolted on wherever it was put, because it
+// was. Activity owns the app tabs; topology and logs do not have apps.
+const ICON_ACTIVITY='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" '
+  +'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  +'<path d="M1.5 9.5h2.6l1.7-5 2.6 9 1.8-6.4 1.3 2.4h3"/></svg>';
+const ICON_TOPO='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" '
+  +'stroke-linecap="round" aria-hidden="true"><path d="M7.1 4.6 4 10.9M8.9 4.6 12 10.9M5.1 12.4h5.8"/>'
+  +'<circle cx="8" cy="3" r="2"/><circle cx="3" cy="12.4" r="2"/><circle cx="13" cy="12.4" r="2"/></svg>';
+const ICON_LOG='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" '
+  +'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  +'<path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.2 1.6v3.2h3.2M5.5 8h5M5.5 10.5h5"/></svg>';
+
+function card(icon, title, sub, meta, onclick){
+  const b=el('button','vcard');
+  const top=el('div','vc-top'); top.innerHTML=icon;
+  top.appendChild(el('b',null,title));
+  b.appendChild(top);
+  b.appendChild(el('div','vc-sub',sub));
+  if(meta)b.appendChild(el('div','vc-meta',meta));
+  b.onclick=onclick;
+  return b;
+}
+
+function showHome(){
+  cur=null;
+  $('#home').hidden=false; $('#crumb').hidden=true; $('#tabs').hidden=true;
+  $('#bar-activity').hidden=true; $('#bar-topo').hidden=true;
+  $('#body').hidden=true; $('#log').hidden=true; $('#topo').hidden=true;
+  topoAuto(false);
+  const g=$('#home-grid'); g.innerHTML='';
+  g.appendChild(card(ICON_ACTIVITY,'Activity',
+    'Who did what, across every app on this platform \u2014 people, API callers and '
+    +'scheduled work, with the routine fleet sweeps folded away.',
+    APPS.length?(APPS.length+' apps: '+APPS.map(a=>a.label).join(' \u00b7 ')):'',
+    ()=>select(APPS.length?APPS[0].key:null)));
+  g.appendChild(card(ICON_TOPO,'Fleet Topology',
+    'The fleet as a picture \u2014 hosts grouped by environment or by network, with '
+    +'posture as a second lens. Click a host to open it in the Controller.',
+    '', ()=>select(TOPO)));
+  g.appendChild(card(ICON_LOG,'Logs',
+    'The run and service logs the apps expose, read in place \u2014 SLEP run logs '
+    +'and the Controller\u2019s own service log.',
+    'Opened from a row in Activity', ()=>{ select(APPS.length?APPS[0].key:null); }));
+}
+
 async function boot(){
-  try{APPS=(await jget(U('/api/apps'))).apps;}catch(e){$('#tabs').appendChild(el('div','empty','Not signed in.'));return;}
+  try{APPS=(await jget(U('/api/apps'))).apps;}catch(e){
+    $('#home-grid').appendChild(el('div','empty','Not signed in.'));
+    $('#home').hidden=false; return;
+  }
   APPS.forEach((a,i)=>{
     const b=el('button','tab',a.label);b.dataset.key=a.key;
     b.onclick=()=>select(a.key);
     $('#tabs').appendChild(b);
     if(i===0)b.classList.add('sel');
   });
-  const t=el('button','tab topo');t.dataset.key=TOPO;
-  // A node-graph glyph, so the control reads as "show me the fleet as a picture"
-  // before the label is read. currentColor, so it follows the selected state.
-  t.innerHTML='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" '
-    +'stroke-linecap="round" aria-hidden="true"><path d="M7.1 4.6 4 10.9M8.9 4.6 12 10.9M5.1 12.4h5.8"/>'
-    +'<circle cx="8" cy="3" r="2"/><circle cx="3" cy="12.4" r="2"/><circle cx="13" cy="12.4" r="2"/></svg>';
-  t.appendChild(document.createTextNode('Fleet Topology'));
-  t.title='Show the fleet as a topology map';
-  t.onclick=()=>select(TOPO); $('#tabs').appendChild(t);
-  select(APPS[0].key);
+  $('#home-btn').onclick=showHome;
+  showHome();
 }
 function select(key){
+  if(!key){ showHome(); return; }
   cur=key;
   [...document.querySelectorAll('.tab')].forEach(t=>t.classList.toggle('sel',t.dataset.key===key));
   const isTopo = key===TOPO;
+  // The app tabs are Activity's, so they only exist inside it.
+  $('#home').hidden=true; $('#crumb').hidden=false; $('#tabs').hidden=isTopo;
+  $('#crumb-where').textContent = isTopo ? 'Fleet Topology' : 'Activity';
   $('#bar-activity').hidden=isTopo; $('#bar-topo').hidden=!isTopo;
   $('#body').hidden=isTopo; $('#log').hidden=isTopo; $('#topo').hidden=!isTopo;
   $('#log').innerHTML=''; $('#msgs').innerHTML='';
@@ -208,6 +279,17 @@ function srcCounts(list){
   list.forEach(r=>{const k=r.source||'api'; if(k in c)c[k]++;});
   return c;
 }
+// What the routine toggle is hiding right now, so the number on it is the number
+// of rows you would get back by pressing it.
+function routineCount(list){ return list.filter(r=>r.routine).length; }
+function paintRoutine(n){
+  const b=$('#routine'); if(!b)return;
+  b.classList.toggle('on',showRoutine);
+  b.setAttribute('aria-pressed',String(showRoutine));
+  b.querySelector('.n').textContent = n ? n : '';
+  // Nothing routine in this app's feed — a toggle for nothing is just clutter.
+  b.hidden = !n && !showRoutine;
+}
 function paintChips(counts){
   [...document.querySelectorAll('#srcf button')].forEach(b=>{
     const k=b.dataset.src;
@@ -220,13 +302,20 @@ function render(){
   const q=($('#q').value||'').toLowerCase();
   const body=$('#body'); body.innerHTML='';
   const matched=rows.filter(r=>!q || (r.actor+' '+r.action+' '+r.target+' '+r.detail).toLowerCase().includes(q));
-  paintChips(srcCounts(matched));
-  const list=matched.filter(r=>srcFilter==='all' || (r.source||'api')===srcFilter);
+  paintRoutine(routineCount(matched));
+  // Routine first, so every chip count below is of what the table can actually
+  // show. Chips that counted hidden rows would never add up.
+  const kept=showRoutine?matched:matched.filter(r=>!r.routine);
+  paintChips(srcCounts(kept));
+  const list=kept.filter(r=>srcFilter==='all' || (r.source||'api')===srcFilter);
   if(!list.length){
     // Distinguish "this app has recorded nothing" from "we could not read it" —
     // the same blank table otherwise reads as a quiet, healthy fleet. And say so
     // when it is our own source chip doing the hiding, not the upstream.
-    const why = matched.length ? 'No '+(SRC_LABEL[srcFilter]||srcFilter).toLowerCase()+' rows — try another filter.'
+    const why = (matched.length && !kept.length && !showRoutine)
+                ? 'Everything here is a routine fleet sweep — press “Routine” to show them.'
+              : kept.length ? 'No '+(SRC_LABEL[srcFilter]||srcFilter).toLowerCase()+' rows — try another filter.'
+              : matched.length ? 'No '+(SRC_LABEL[srcFilter]||srcFilter).toLowerCase()+' rows — try another filter.'
               : rows.length ? 'No rows match that filter.'
               : lastFailed  ? 'Could not read this app’s activity — see the message above.'
                             : 'No activity recorded yet.';
@@ -591,6 +680,8 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('#q').addEventListener('input',render);
   [...document.querySelectorAll('#srcf button')].forEach(b=>
     b.addEventListener('click',()=>{srcFilter=b.dataset.src;render();}));
+  const rb=$('#routine');
+  if(rb)rb.addEventListener('click',()=>{showRoutine=!showRoutine;render();});
   $('#refresh').addEventListener('click',load);
   $('#logbtn').addEventListener('click',showLog);
   $('#limit').addEventListener('change',e=>{limit=parseInt(e.target.value,10)||100;load();});
@@ -663,7 +754,18 @@ def page(user: str, role: str) -> str:
         f"<style>{_CSS}</style></head><body>"
         "<header class=head><div class=brand>Sysible <b>Visualizer</b> — activity, logs &amp; fleet topology</div>"
         f"<span class=who>{who}</span></header>"
-        "<div class=tabs id=tabs></div>"
+        "<div class=home id=home>"
+        "<h2>What would you like to look at?</h2>"
+        "<p class=lede>Visualizer reads the rest of the platform. It changes nothing "
+        "and stores nothing \u2014 every view below is somebody else\u2019s data, "
+        "shown as you are allowed to see it.</p>"
+        "<div class=home-grid id=home-grid></div>"
+        "</div>"
+        "<div class=crumb id=crumb hidden>"
+        "<button id=home-btn>\u2190 All views</button>"
+        "<span class=where id=crumb-where></span>"
+        "</div>"
+        "<div class=tabs id=tabs hidden></div>"
         "<div class=bar id=bar-activity>"
         "<input type=search id=q placeholder='Filter this app&rsquo;s activity…'>"
         "<select id=limit><option value=100>100 rows</option>"
@@ -674,6 +776,12 @@ def page(user: str, role: str) -> str:
         "<button data-src=api aria-pressed=false>API <span class=n></span></button>"
         "<button data-src=automation aria-pressed=false>Automation <span class=n></span></button>"
         "</span>"
+        # Separate from the source chips on purpose: those pick ONE kind to look
+        # at, this adds a kind back in. Folding it into the segment would have made
+        # "Routine" mutually exclusive with "People", which is not the question.
+        "<button id=routine class='chip' aria-pressed=false hidden "
+        "title='The posture and package-update sweeps the Controller runs against "
+        "every host on a timer'>Routine <span class=n></span></button>"
         "<button id=refresh>Refresh</button>"
         "<button id=logbtn>Log&hellip;</button>"
         "</div>"
