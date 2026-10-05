@@ -45,13 +45,17 @@ a choice, and resize() below remembers it. */
 .wrap{display:grid;
   grid-template-columns:var(--c1,300px) 6px var(--c2,320px) 6px var(--c3,250px) 6px 1fr;
   gap:0;height:calc(100vh - 49px)}
-.filesearch{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:.5em;
+/* One search control, used by both the hosts and the files column. They had
+drifted: files had none at all, and the hosts one was a bare input that scrolled
+away under the list it was filtering — which is why it did not read as a search
+bar even though it was there. */
+.colsearch{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:.5em;
 padding:.15em .1em .45em;background:var(--bg)}
-.filesearch input{flex:1 1 auto;min-width:0;padding:.42em .6em;border-radius:8px;
+.colsearch input{flex:1 1 auto;min-width:0;padding:.42em .6em;border-radius:8px;
 border:1px solid var(--line);background:var(--field,var(--panel2));color:var(--text);
 font-family:inherit;font-size:12.5px}
-.filesearch input:focus{outline:none;border-color:var(--accent)}
-.filesearch .sub{flex:0 0 auto;font-size:11px;white-space:nowrap}
+.colsearch input:focus{outline:none;border-color:var(--accent)}
+.colsearch .sub{flex:0 0 auto;font-size:11px;white-space:nowrap}
 .fileview{margin-top:.8em;border:1px solid var(--line);border-radius:12px;overflow:hidden;
 background:var(--panel)}
 .fv-head{display:flex;align-items:center;gap:.6em;flex-wrap:wrap;padding:.5em .7em;
@@ -134,9 +138,6 @@ _CSS += """
    write. */
 .pickbox{flex:0 0 auto;width:15px;height:15px;margin:0;accent-color:var(--accent);cursor:pointer}
 .hostwrap .pickbox{margin-top:.55rem}
-.hostfilter{display:block;width:calc(100% - 1rem);margin:.1rem .5rem .5rem;
-  padding:.4em .6em;border:1px solid var(--line);border-radius:8px;
-  background:var(--field);color:var(--text);font:inherit;font-size:12.5px}
 .hostfilter:focus{outline:none;border-color:var(--accent)}
 .envempty{margin:.1rem .55rem .5rem 1.6rem;color:var(--faint);font-size:11.5px;font-style:italic}
 /* One row per host: name and address on one line, the status under it, and the
@@ -222,7 +223,10 @@ function saveCollapsed(){
 // Big fleets start folded. Rendering 300 rows the operator has to scroll past to
 // reach the environment they came for is the problem this whole section fixes.
 const AUTO_COLLAPSE_HOSTS=25;
-const FILTER_FROM=8;
+// Past this many hosts the column stops being scannable. It used to be 8, which
+// meant a nine-host fleet got a filter and an eight-host fleet had no way to
+// narrow the list at all — and nobody with eight hosts knows the control exists.
+const FILTER_FROM=4;
 
 function envGroups(hosts){
   const groups={};
@@ -235,6 +239,25 @@ function envGroups(hosts){
     return a.toLowerCase()<b.toLowerCase()?-1:1;
   }).map(function(name){return [name,groups[name]];});
 }
+// The search control both columns use. Returning the input lets the caller keep
+// focus across a re-render, which the hosts column needs because it repaints the
+// whole column on every keystroke.
+function colSearch(placeholder, label, value, onInput){
+  const wrap=el('div','colsearch');
+  const inp=document.createElement('input');
+  inp.type='search'; inp.placeholder=placeholder; inp.value=value||'';
+  inp.setAttribute('aria-label',label);
+  const count=el('span','sub faint');
+  inp.addEventListener('input',function(){onInput(inp.value,count);});
+  // Escape clears rather than closing anything, which is what a search box in a
+  // column is expected to do.
+  inp.addEventListener('keydown',function(e){
+    if(e.key==='Escape'&&inp.value){e.stopPropagation();inp.value='';onInput('',count);}
+  });
+  wrap.appendChild(inp); wrap.appendChild(count);
+  return {wrap:wrap, input:inp, count:count};
+}
+
 function matchesFilter(h,q){
   if(!q)return true;
   return [h.label,h.host_id,h.address,h.environment]
@@ -343,16 +366,18 @@ function renderHosts(){
   // A filter, once the list is long enough that scanning it stops working.
   const q=(state.filter||'').trim().toLowerCase();
   if(hosts.length>FILTER_FROM){
-    const f=el('input','hostfilter');
-    f.type='search';
-    f.placeholder='Filter hosts or environments…';
-    f.value=state.filter||'';
     // A filtered view has to show what it found, so a match inside a folded
     // environment is not silently withheld.
-    f.oninput=function(){state.filter=f.value;renderHosts();
-      const again=col.querySelector('.hostfilter');
-      if(again){again.focus();try{again.setSelectionRange(again.value.length,again.value.length);}catch(e){}}};
-    col.appendChild(f);
+    const sb=colSearch('Filter '+hosts.length+' hosts or environments\u2026',
+                       'Filter hosts or environments', state.filter||'',
+                       function(v){ state.filter=v; renderHosts();
+                         const again=col.querySelector('.colsearch input');
+                         if(again){again.focus();
+                           try{again.setSelectionRange(again.value.length,again.value.length);}catch(e){}}
+                       });
+    col.appendChild(sb.wrap);
+    if(q) sb.count.textContent = hosts.filter(function(h){return matchesFilter(h,q);}).length
+                                 + ' of ' + hosts.length;
   }
 
   // Grouped by ENVIRONMENT, the way the EE panel groups them. A flat list of
@@ -529,13 +554,10 @@ async function loadFiles(){
   // A host here has 800-1000 captured files. Scrolling to /etc/X11/Xreset is not a
   // thing anybody should be asked to do, so the column gets a filter — sticky, so
   // it stays put while a thousand rows move under it.
-  const search=el('div','filesearch');
-  const inp=el('input');
-  inp.type='search'; inp.placeholder='Filter ' + files.length + ' files\u2026';
-  inp.setAttribute('aria-label','Filter this host\u2019s config files');
-  const count=el('span','sub faint');
-  search.appendChild(inp); search.appendChild(count);
-  col.appendChild(search);
+  const sb=colSearch('Filter '+files.length+' files\u2026',
+                     'Filter this host\u2019s config files', '', function(){ paint(); });
+  const inp=sb.input, count=sb.count;
+  col.appendChild(sb.wrap);
 
   const list=el('div','filelist');
   col.appendChild(list);
@@ -565,12 +587,6 @@ async function loadFiles(){
       list.appendChild(b);
     });
   }
-  inp.addEventListener('input',paint);
-  // Escape clears rather than closing anything, which is what a search box in a
-  // column is expected to do.
-  inp.addEventListener('keydown',e=>{
-    if(e.key==='Escape'&&inp.value){e.stopPropagation();inp.value='';paint();}
-  });
   paint();
 }
 async function loadVersions(){

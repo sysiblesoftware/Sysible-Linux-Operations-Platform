@@ -10,12 +10,15 @@ import pytest
 
 UI = (Path(__file__).resolve().parents[1] / "backend" / "ui.py").read_text(encoding="utf-8")
 FN = UI[UI.index("async function loadFiles"):UI.index("async function loadVersions")]
+# Both columns share one control (colSearch). The behaviour that used to live in
+# loadFiles — Escape, the count — lives there now.
+BUILDER = UI[UI.index("function colSearch("):UI.index("function matchesFilter")]
 
 
 def test_the_column_has_a_filter():
-    assert "class='filesearch'" in FN or "'filesearch'" in FN, "no search control"
-    assert "inp.type='search'" in FN
-    assert "aria-label" in FN, "the box is unlabelled for a screen reader"
+    assert "colSearch(" in FN, "no search control"
+    assert "inp.type='search'" in BUILDER
+    assert "setAttribute('aria-label'" in BUILDER, "the box is unlabelled for a screen reader"
 
 
 def test_it_filters_the_list_it_already_has():
@@ -46,12 +49,12 @@ def test_no_match_says_so_rather_than_going_blank():
 
 
 def test_escape_clears_the_box():
-    assert "e.key==='Escape'" in FN and "inp.value=''" in FN
+    assert "e.key==='Escape'" in BUILDER and "inp.value=''" in BUILDER
 
 
 def test_the_box_stays_put_while_the_list_scrolls():
     """A filter that scrolls away with 900 rows is a filter you have to go back for."""
-    css = UI[UI.index(".filesearch{"):UI.index(".filesearch input{")]
+    css = UI[UI.index(".colsearch{"):UI.index(".colsearch input{")]
     assert "position:sticky" in css and "top:0" in css
 
 
