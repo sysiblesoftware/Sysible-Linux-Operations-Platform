@@ -36,8 +36,24 @@ background:var(--panel);position:sticky;top:0;z-index:5}
 .head .brand{font-size:16px}.head .brand b{color:var(--accent)}
 .head .who{margin-left:auto;color:var(--muted);font-size:12.5px}
 .head a.back{color:var(--muted);font-size:12.5px}
-.wrap{display:grid;grid-template-columns:300px 250px 230px 1fr;gap:0;height:calc(100vh - 49px)}
-@media(max-width:900px){.wrap{grid-template-columns:1fr;height:auto}.col{max-height:40vh}}
+/* Four columns whose widths the operator sets, not three fixed numbers and a
+remainder. The fixed layout gave the files column 250px — too narrow for the paths
+it holds, so "/etc/alternatives/builtins.7.gz" wrapped onto two lines — while the
+content pane took everything left over and sat empty until a version was picked.
+Which column needs the room depends entirely on what is being looked at, so it is
+a choice, and resize() below remembers it. */
+.wrap{display:grid;
+  grid-template-columns:var(--c1,300px) 6px var(--c2,320px) 6px var(--c3,250px) 6px 1fr;
+  gap:0;height:calc(100vh - 49px)}
+.gutter{cursor:col-resize;background:var(--line);opacity:.45;
+  /* A 6px target is a 6px target; widen what the pointer can grab without
+     widening what is drawn. */
+  position:relative;touch-action:none}
+.gutter::after{content:"";position:absolute;top:0;bottom:0;left:-3px;right:-3px}
+.gutter:hover,.gutter.dragging{opacity:1;background:var(--accent)}
+body.resizing{cursor:col-resize;user-select:none}
+@media(max-width:900px){.wrap{grid-template-columns:1fr;height:auto}.col{max-height:40vh}
+  .gutter{display:none}}
 .col{overflow:auto;border-right:1px solid var(--line);padding:.5em}
 .col:last-child{border-right:none}
 .col h3{margin:.3em .4em .6em;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
@@ -657,6 +673,92 @@ async function showCompareDiff(path, a, b){
   pane.appendChild(el('pre','diff', txt || '(identical)'));
 }
 
+
+// ---------------------------------------------------------------- column sizes
+//
+// Which column needs the room depends on what is being looked at: a host with
+// deep paths wants the files column wide, a diff wants everything else narrow.
+// The old fixed widths picked one answer for everyone — 250px of files column,
+// which wrapped "/etc/alternatives/builtins.7.gz" onto two lines, next to a
+// content pane that held the rest of the screen and nothing else.
+const COLS = ['--c1', '--c2', '--c3'];
+const COL_MIN = 160, COL_MAX = 760, COL_KEY = 'flashback-cols';
+
+function colsLoad(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(COL_KEY) || '{}');
+    COLS.forEach(function(v){
+      const px = Number(saved[v]);
+      if(px >= COL_MIN && px <= COL_MAX) document.documentElement.style.setProperty(v, px + 'px');
+    });
+  }catch(e){ /* a blocked or cleared store just means the defaults */ }
+}
+
+function colsSave(){
+  try{
+    const out = {};
+    COLS.forEach(function(v){
+      const px = parseInt(getComputedStyle(document.documentElement).getPropertyValue(v), 10);
+      if(px) out[v] = px;
+    });
+    localStorage.setItem(COL_KEY, JSON.stringify(out));
+  }catch(e){ /* not worth failing a drag over */ }
+}
+
+function colWidth(v){
+  const px = parseInt(getComputedStyle(document.documentElement).getPropertyValue(v), 10);
+  return px || 300;
+}
+
+function setCol(v, px){
+  document.documentElement.style.setProperty(v,
+    Math.max(COL_MIN, Math.min(COL_MAX, Math.round(px))) + 'px');
+}
+
+function colsInit(){
+  colsLoad();
+  document.querySelectorAll('.gutter').forEach(function(g){
+    const v = COLS[Number(g.dataset.resize) - 1];
+    if(!v) return;
+    g.addEventListener('pointerdown', function(e){
+      e.preventDefault();
+      const startX = e.clientX, startW = colWidth(v);
+      g.setPointerCapture(e.pointerId);
+      g.classList.add('dragging');
+      document.body.classList.add('resizing');
+      function move(ev){ setCol(v, startW + (ev.clientX - startX)); }
+      function up(){
+        g.classList.remove('dragging');
+        document.body.classList.remove('resizing');
+        g.removeEventListener('pointermove', move);
+        g.removeEventListener('pointerup', up);
+        g.removeEventListener('pointercancel', up);
+        colsSave();
+      }
+      g.addEventListener('pointermove', move);
+      g.addEventListener('pointerup', up);
+      g.addEventListener('pointercancel', up);
+    });
+    // A splitter that only answers to a mouse is a splitter half the operators
+    // here cannot use. Arrows nudge, Home resets this column to its default.
+    g.addEventListener('keydown', function(e){
+      const step = e.shiftKey ? 48 : 12;
+      if(e.key === 'ArrowLeft') setCol(v, colWidth(v) - step);
+      else if(e.key === 'ArrowRight') setCol(v, colWidth(v) + step);
+      else if(e.key === 'Home') document.documentElement.style.removeProperty(v);
+      else return;
+      e.preventDefault();
+      colsSave();
+    });
+    // Double-click resets, the way every splitter does.
+    g.addEventListener('dblclick', function(){
+      document.documentElement.style.removeProperty(v);
+      colsSave();
+    });
+  });
+}
+colsInit();
+
 """
 
 
@@ -716,13 +818,19 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<header class=head><div class=brand>Sysible <b>Flashback</b> — config time machine</div>"
         f"<span class=who>{who}</span></header>"
         "<div class=msg id=msg hidden></div>"
-        "<div class=wrap>"
+        "<div class=wrap id=wrap>"
         "<div class=col id=hosts></div>"
+        "<div class=gutter data-resize=1 role=separator aria-orientation=vertical"
+        " aria-label='Resize the hosts column' tabindex=0></div>"
         "<div class=col id=files>"
         "<div class=placeholder>Click a host on the left to see the config files "
         "it has captured.</div>"
         "</div>"
+        "<div class=gutter data-resize=2 role=separator aria-orientation=vertical"
+        " aria-label='Resize the files column' tabindex=0></div>"
         "<div class=col id=versions></div>"
+        "<div class=gutter data-resize=3 role=separator aria-orientation=vertical"
+        " aria-label='Resize the versions column' tabindex=0></div>"
         "<div class=col id=diff>"
         "<div class=placeholder>Every version of every tracked config file, per host.<br><br>"
         "Click a host, then a file, then a version \u2014 from there you can "
