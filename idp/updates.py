@@ -97,6 +97,12 @@ def apply(key: str, user: str, role: str):
     return _call(f"/api/update/{key.strip()}", user, role, method="POST")
 
 
+def apply_all(user: str, role: str):
+    """Update every product that can be. No key to pass: the updater works the
+    list out from its own checks, so this side cannot name a product at all."""
+    return _call("/api/update-all", user, role, method="POST")
+
+
 def action(key: str, act: str, user: str, role: str):
     """Restart / stop / start / recreate one product's containers.
 

@@ -110,27 +110,74 @@ def _run(argv: list[str], cwd: Path) -> int:
         return 124
 
 
+def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
+    """Pull one checkout forward and rebuild its containers. (ok, message).
+
+    Factored out of _worker so the all-products run executes exactly the same
+    steps — a queue that drifted from the single update would be a second code
+    path nobody tests.
+    """
+    rc = _run(["git", "-C", str(root), "-c", f"safe.directory={root}",
+               "pull", "--ff-only"], root)
+    # The pull moved HEAD, so whatever was memoised about this checkout's remote
+    # describes the world before it. Drop it either way: a failed pull may still
+    # have fetched.
+    git.forget_remote(root)
+    if rc != 0:
+        return False, ("git pull failed — the checkout may have local changes "
+                       "or its branch may have diverged.")
+    # --build so the image actually picks the new code up; -d so we return.
+    rc = _run(["docker", "compose", "up", "-d", "--build"], compose)
+    if rc != 0:
+        return False, "docker compose up --build failed — see the log."
+    return True, f"{key} updated and restarted."
+
+
 def _worker(key: str, root: Path, compose: Path, actor: str) -> None:
     try:
-        rc = _run(["git", "-C", str(root), "-c", f"safe.directory={root}",
-                   "pull", "--ff-only"], root)
-        # The pull moved HEAD, so whatever was memoised about this checkout's
-        # remote describes the world before it. Drop it either way: a failed pull
-        # may still have fetched.
-        git.forget_remote(root)
-        if rc != 0:
-            _set(state="failed", finished=time.time(),
-                 message="git pull failed — the checkout may have local changes "
-                         "or its branch may have diverged.")
-            return
-        # --build so the image actually picks the new code up; -d so we return.
-        rc = _run(["docker", "compose", "up", "-d", "--build"], compose)
-        if rc != 0:
-            _set(state="failed", finished=time.time(),
-                 message="docker compose up --build failed — see the log.")
-            return
-        _set(state="succeeded", finished=time.time(),
-             message=f"{key} updated and restarted.")
+        ok, message = _update_one(key, root, compose)
+        _set(state="succeeded" if ok else "failed", finished=time.time(), message=message)
+    except Exception as e:                                   # pragma: no cover
+        _set(state="failed", finished=time.time(), message=str(e)[:200])
+    finally:
+        _lock.release()
+
+
+def _queue_worker(items: list, actor: str) -> None:
+    """Update several products, one after another, in this one job.
+
+    One failure does not strand the rest. A host where SLEP's checkout has local
+    edits should still get Connect and the Controller updated — stopping at the
+    first problem is how "update everything" becomes "update nothing".
+    """
+    done = []
+    try:
+        for i, (key, root, compose) in enumerate(items):
+            _set(app=key, index=i)
+            if key in SELF_AFFECTING:
+                # SLOP recreates this very container, so nothing can follow it and
+                # nothing here can report the outcome — the detached helper owns
+                # the job from this point (see detached.py and current()).
+                started, message = detached.spawn(detached.SCRIPT_UPDATE, compose)
+                done.append({"key": key, "ok": bool(started), "message": message})
+                _set(done=list(done))
+                if started:
+                    with _job_lock:
+                        globals()["_job"] = None     # current() reads the helper
+                return
+            try:
+                ok, message = _update_one(key, root, compose)
+            except Exception as e:                           # pragma: no cover
+                ok, message = False, str(e)[:200]
+            _log(("+ " if ok else "! ") + message)
+            done.append({"key": key, "ok": ok, "message": message})
+            _set(done=list(done))
+        failed = [d["key"] for d in done if not d["ok"]]
+        _set(state="failed" if failed else "succeeded", finished=time.time(),
+             message=(f"{len(done) - len(failed)} of {len(done)} updated; "
+                      f"{', '.join(failed)} failed — see the log."
+                      if failed else
+                      f"All {len(done)} updated and restarted."))
     except Exception as e:                                   # pragma: no cover
         _set(state="failed", finished=time.time(), message=str(e)[:200])
     finally:
@@ -166,6 +213,32 @@ def start(key: str, root: Path, compose: Path, actor: str) -> tuple[bool, str]:
     threading.Thread(target=_worker, args=(key, root, compose, actor),
                      name=f"update-{key}", daemon=True).start()
     return True, f"Updating {key}…"
+
+def start_many(items: list, actor: str) -> tuple[bool, str]:
+    """Begin an update of several products, in the order given.
+
+    One job, not several: the lock allows one at a time, so a client that fired
+    them off in parallel would simply get refusals, and one that chained them from
+    the browser would strand the rest the moment the tab was closed or reloaded.
+    """
+    global _job
+    if not items:
+        return False, "Nothing to update."
+    if detached.running():
+        return False, "An update of slop is already running — wait for it to finish."
+    if not _lock.acquire(blocking=False):
+        running = current() or {}
+        return False, (f"An update of {running.get('app', 'another product')} is already "
+                       "running — wait for it to finish.")
+    keys = [k for k, _r, _c in items]
+    with _job_lock:
+        _job = {"app": keys[0], "actor": actor, "state": "running",
+                "started": time.time(), "finished": None, "message": "", "log": [],
+                "self_update": False, "queue": keys, "index": 0, "done": []}
+    threading.Thread(target=_queue_worker, args=(items, actor),
+                     name="update-all", daemon=True).start()
+    return True, f"Updating {len(keys)} products…"
+
 
 # ---- container lifecycle -----------------------------------------------------
 # Restart/stop/start, so an operator can recover a wedged service from the GUI

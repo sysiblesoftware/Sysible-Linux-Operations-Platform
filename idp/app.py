@@ -1590,6 +1590,16 @@ _UPDATES_JS = r"""
     var pill=document.getElementById('updpill');
     if(pill){pill.classList.toggle('on',n>0);
       var b=pill.querySelector('b'); if(b)b.textContent=n;}
+    // "Update all" offers exactly what the rows say is updatable — a blocked
+    // checkout is not silently swept in, and the count on the button is the
+    // number of rows that would actually move.
+    var able=(d.apps||[]).filter(function(a){return a.can_update;});
+    var all=document.getElementById('updateall');
+    if(all){
+      all.hidden = able.length < 2;
+      all.textContent = 'Update all (' + able.length + ')';
+      all.dataset.slop = able.some(function(a){return a.key==='slop';}) ? '1' : '';
+    }
     if(d.job)showJob(d.job);
   }
   // The skeleton names every product this platform knows about, so the list is
@@ -1617,9 +1627,13 @@ _UPDATES_JS = r"""
     var box=document.getElementById('joblog');
     if(!box||!j)return;
     box.hidden=false;
+    // In a batch, "Update of connect — running" alone hides how far along it is,
+    // which on a four-product run is the only thing worth knowing.
+    var where = (j.queue && j.queue.length>1)
+      ? (' (' + ((j.index||0)+1) + ' of ' + j.queue.length + ')') : '';
     document.getElementById('jobtitle').textContent =
       (j.action ? (j.action.charAt(0).toUpperCase()+j.action.slice(1)+' of ')
-                : 'Update of ')+j.app+' \u2014 '+j.state;
+                : 'Update of ')+j.app+where+' \u2014 '+j.state;
     box.textContent=(j.log||[]).join('\n');
     box.scrollTop=box.scrollHeight;
   }
@@ -1686,8 +1700,37 @@ _UPDATES_JS = r"""
           .catch(function(e){pushToast(String(e.message||e),
                 {title:'Software & services',kind:'error',ttl:0}); b.disabled=false;});
   }
+  function startUpdateAll(b){
+    // SLOP is updated LAST by the server, so the sign-out comes at the end — but
+    // it still happens, and it is the one consequence worth confirming.
+    if(b.dataset.slop && !confirm('This updates every product, SLOP last. '
+        +'Updating SLOP rebuilds the gateway and this console, so you will be '
+        +'signed out briefly at the end. Continue?'))return;
+    b.disabled=true;
+    var fd=new FormData();
+    fd.append('csrf',document.getElementById('csrf').value);
+    fetch('/admin/updates/apply-all',{method:'POST',body:fd})
+      .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+      .then(function(res){
+        if(!res.ok){pushToast(res.d.detail||'Could not start the updates',
+                              {title:'Software & services',kind:'error',ttl:0});
+          b.disabled=false; return;}
+        pushToast(res.d.message||'Updating everything',{title:'Software & services'});
+        if((res.d.skipped||[]).length){
+          pushToast('Skipped (blocked): '+res.d.skipped.join(', '),
+                    {title:'Software & services',kind:'warn',ttl:0});
+        }
+        // Tell the poller SLOP is in the batch, so losing the connection at the
+        // end reads as the expected restart rather than a failure.
+        poll((res.d.products||[]).indexOf('slop')>=0);
+      })
+      .catch(function(e){pushToast(String(e.message||e),
+            {title:'Software & services',kind:'error',ttl:0}); b.disabled=false;});
+  }
   document.addEventListener('DOMContentLoaded',function(){
     load();
+    var ua=document.getElementById('updateall');
+    if(ua)ua.addEventListener('click',function(){ startUpdateAll(ua); });
     // Only the Update buttons. This used to be button[data-app] — "any button
     // that knows which product it belongs to" — so any NEW control given that
     // attribute silently became an update trigger.
@@ -1771,6 +1814,9 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         # costs a round-trip to its git remote. This button is how an operator says
         # "ask the remotes now" instead of taking the remembered answer.
         "<div class=toolbar><button class='btn ghost sm' id=checknow>Check now</button>"
+        # Hidden until the status poll finds more than one updatable product —
+        # with one, the row's own button is the clearer thing to press.
+        "<button class='btn sm' id=updateall hidden>Update all</button>"
         "<span class=sub>Availability is remembered for a few minutes; this re-asks "
         "every product&rsquo;s git remote.</span></div>"
         f"{table}"
@@ -1825,6 +1871,23 @@ def admin_updates_apply(request: Request, csrf: str = Form(""), app: str = Form(
         return JSONResponse({"detail": "Request blocked (bad origin or token)."},
                             status_code=403)
     data, error = updates.apply(app, sess["username"], "superuser")
+    if error:
+        return JSONResponse({"detail": error}, status_code=409)
+    return JSONResponse(data)
+
+
+@app.post("/admin/updates/apply-all")
+def admin_updates_apply_all(request: Request, csrf: str = Form("")):
+    """Update everything that can be updated, in one sequential job."""
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    tok = _csrf_token(request)
+    guard = _admin_guard(request, sess, csrf, tok)
+    if guard is not None:
+        return JSONResponse({"detail": "Request blocked (bad origin or token)."},
+                            status_code=403)
+    data, error = updates.apply_all(sess["username"], "superuser")
     if error:
         return JSONResponse({"detail": error}, status_code=409)
     return JSONResponse(data)

@@ -285,3 +285,27 @@ def test_a_finished_update_reloads_the_page():
     assert m, "the reload is not guarded by the update having SUCCEEDED"
     # Not instant: the toast carrying the outcome has to be readable first.
     assert int(m.group(1)) >= 1500, "reloads before the result can be read"
+
+
+def test_update_all_offers_only_what_is_updatable():
+    """The button must mirror the rows. Offering a blocked product would start a
+    job that cannot touch it, and the count would be a lie."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "id=updateall hidden" in src, "the button is visible before anything is known"
+    block = src[src.index("var able=(d.apps||[])"):src.index("if(d.job)showJob(d.job);")]
+    assert "a.can_update" in block, "it counts rows that cannot actually be updated"
+    assert "able.length < 2" in block, "it shows for a single product, where the row's own button is clearer"
+
+
+def test_update_all_posts_without_naming_a_product():
+    """The updater works the list out itself; this side must not be able to name
+    one, or the allowlist stops being the only way in."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    block = src[src.index("function startUpdateAll"):src.index("document.addEventListener('DOMContentLoaded'")]
+    assert "/admin/updates/apply-all" in block
+    assert "fd.append('csrf'" in block, "no CSRF token on a state-changing POST"
+    assert "fd.append('app'" not in block, "it names a product"
+    assert "confirm(" in block and "signed out" in block, "no warning that SLOP signs you out"
+    assert "res.d.skipped" in block, "a blocked product is skipped silently"

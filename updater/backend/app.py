@@ -161,6 +161,45 @@ def update(key: str, request: Request):
     return {"started": True, "message": message}
 
 
+@app.post("/api/update-all")
+def update_all(request: Request):
+    """Update every product that CAN be updated, in one sequential job.
+
+    The caller does not choose the list — this works it out from the same checks
+    the status endpoint renders, so "update all" can never reach a product the
+    console is refusing to update, and the key still only ever comes from the
+    allowlist.
+    """
+    actor = _authorized(request)
+    items, skipped = [], []
+    for key in apps.keys():
+        root = apps.checkout_dir(key)
+        if root is None:
+            continue
+        st = git.status(root)
+        compose = apps.compose_dir(root)
+        if not st.get("available"):
+            continue
+        if git.dirty(root) or compose is None:
+            skipped.append(key)
+            continue
+        items.append((key, root, compose))
+    # SLOP last, always: updating it recreates the gateway, this console and the
+    # updater itself, so anything queued behind it would be killed mid-pull.
+    items.sort(key=lambda it: it[0] in jobs.SELF_AFFECTING)
+    if not items:
+        raise HTTPException(status_code=409,
+                            detail=("Nothing can be updated right now."
+                                    + (f" Blocked: {', '.join(skipped)}." if skipped else "")))
+    started, message = jobs.start_many(items, actor)
+    if not started:
+        raise HTTPException(status_code=409, detail=message)
+    names = ", ".join(apps.label(k) for k, _r, _c in items)
+    print(f"[sysible-updater] {actor} started an update of {names}", flush=True)
+    return {"started": True, "message": message,
+            "products": [k for k, _r, _c in items], "skipped": skipped}
+
+
 @app.post("/api/action/{key}/{action}")
 def action(key: str, action: str, request: Request):
     """Restart / stop / start / recreate one product's containers.
