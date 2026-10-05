@@ -85,7 +85,18 @@ border-radius:10px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-h
 /* The Topology tab is pushed to the right of the per-app tabs: it is a view of
    the FLEET, not of one app's activity, and sitting in the same row unqualified
    made it read as a fifth app. */
-.tab.topo{margin-left:auto}
+/* Fleet Topology is not a fifth app — it is a different KIND of view, so it sits
+at the right of the strip rather than in the run of app tabs. It used to be a bare
+.tab there: muted text, no border, no icon, which reads as a stray word rather than
+something to press. Once the app tabs grew to their full product names it also
+wrapped onto a row of its own, alone. Give it the shape of a button, an icon, and
+a filled selected state. */
+.tab.topo{margin-left:auto;align-self:center;display:inline-flex;align-items:center;
+gap:.45em;padding:.42em .8em;margin-bottom:.45em;border:1px solid var(--line);
+border-radius:8px;background:var(--panel2)}
+.tab.topo svg{width:15px;height:15px;flex:0 0 auto;display:block}
+.tab.topo:hover{color:var(--text);border-color:var(--muted)}
+.tab.topo.sel{background:var(--accent);border-color:var(--accent);color:#fff}
 .bar .seg{display:flex;gap:2px}
 .bar .seg button.on{border-color:var(--accent);color:var(--text)}
 .bar .seg .n{color:var(--faint);font-size:11px;margin-left:.3em}
@@ -134,7 +145,14 @@ async function boot(){
     $('#tabs').appendChild(b);
     if(i===0)b.classList.add('sel');
   });
-  const t=el('button','tab topo','Fleet Topology');t.dataset.key=TOPO;
+  const t=el('button','tab topo');t.dataset.key=TOPO;
+  // A node-graph glyph, so the control reads as "show me the fleet as a picture"
+  // before the label is read. currentColor, so it follows the selected state.
+  t.innerHTML='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" '
+    +'stroke-linecap="round" aria-hidden="true"><path d="M7.1 4.6 4 10.9M8.9 4.6 12 10.9M5.1 12.4h5.8"/>'
+    +'<circle cx="8" cy="3" r="2"/><circle cx="3" cy="12.4" r="2"/><circle cx="13" cy="12.4" r="2"/></svg>';
+  t.appendChild(document.createTextNode('Fleet Topology'));
+  t.title='Show the fleet as a topology map';
   t.onclick=()=>select(TOPO); $('#tabs').appendChild(t);
   select(APPS[0].key);
 }
