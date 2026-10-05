@@ -45,6 +45,13 @@ a choice, and resize() below remembers it. */
 .wrap{display:grid;
   grid-template-columns:var(--c1,300px) 6px var(--c2,320px) 6px var(--c3,250px) 6px 1fr;
   gap:0;height:calc(100vh - 49px)}
+.filesearch{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:.5em;
+padding:.15em .1em .45em;background:var(--bg)}
+.filesearch input{flex:1 1 auto;min-width:0;padding:.42em .6em;border-radius:8px;
+border:1px solid var(--line);background:var(--field,var(--panel2));color:var(--text);
+font-family:inherit;font-size:12.5px}
+.filesearch input:focus{outline:none;border-color:var(--accent)}
+.filesearch .sub{flex:0 0 auto;font-size:11px;white-space:nowrap}
 .fileview{margin-top:.8em;border:1px solid var(--line);border-radius:12px;overflow:hidden;
 background:var(--panel)}
 .fv-head{display:flex;align-items:center;gap:.6em;flex-wrap:wrap;padding:.5em .7em;
@@ -499,8 +506,14 @@ function hostRow(h,d,col,canPick){
   }
   return wrap;
 }
+// Every file this host has captured, kept so the filter runs over the list rather
+// than re-fetching a thousand rows on every keystroke.
+let allFiles=[];
+
 async function loadFiles(){
-  const col=$('#files');col.innerHTML='';col.appendChild(el('h3',null,'Files'));
+  const col=$('#files');col.innerHTML='';
+  allFiles=[];
+  col.appendChild(el('h3',null,'Files'));
   if(!state.host)return;
   let files;
   // A silent `return` here emptied the column and said nothing — indistinguishable
@@ -511,15 +524,54 @@ async function loadFiles(){
     +String(e&&e.message||e)));return;}
   if(!files.length){col.appendChild(el('div','empty',
     'Nothing captured for this host yet.'));return;}
-  files.forEach(f=>{
-    const b=el('button','item');
-    const p=el('div','mono');p.textContent=f.path;b.appendChild(p);
-    b.appendChild(el('div','sub', f.versions+' versions · last '+fmtTs(f.last_ts)));
-    b.onclick=()=>{state.path=f.path;state.a=null;state.b=null;
-      [...col.children].forEach(c=>c.classList&&c.classList.remove('sel'));b.classList.add('sel');
-      loadVersions();$('#diff').innerHTML='';};
-    col.appendChild(b);
+  allFiles=files;
+
+  // A host here has 800-1000 captured files. Scrolling to /etc/X11/Xreset is not a
+  // thing anybody should be asked to do, so the column gets a filter — sticky, so
+  // it stays put while a thousand rows move under it.
+  const search=el('div','filesearch');
+  const inp=el('input');
+  inp.type='search'; inp.placeholder='Filter ' + files.length + ' files\u2026';
+  inp.setAttribute('aria-label','Filter this host\u2019s config files');
+  const count=el('span','sub faint');
+  search.appendChild(inp); search.appendChild(count);
+  col.appendChild(search);
+
+  const list=el('div','filelist');
+  col.appendChild(list);
+
+  function paint(){
+    // Match on the whole path, so "nginx", "/etc/ssh" and "conf.d" all work. Space
+    // separates terms and ALL must match — "x11 session" finds Xsession without
+    // caring which order they appear in.
+    const terms=(inp.value||'').toLowerCase().split(/\s+/).filter(Boolean);
+    const hits=terms.length
+      ? allFiles.filter(f=>{const p=f.path.toLowerCase();return terms.every(t=>p.includes(t));})
+      : allFiles;
+    count.textContent = terms.length ? hits.length+' of '+allFiles.length : '';
+    list.innerHTML='';
+    if(!hits.length){
+      list.appendChild(el('div','empty','No file on this host matches that.'));
+      return;
+    }
+    hits.forEach(f=>{
+      const b=el('button','item');
+      const p=el('div','mono');p.textContent=f.path;b.appendChild(p);
+      b.appendChild(el('div','sub', f.versions+' versions \u00b7 last '+fmtTs(f.last_ts)));
+      if(f.path===state.path)b.classList.add('sel');
+      b.onclick=()=>{state.path=f.path;state.a=null;state.b=null;
+        [...list.children].forEach(c=>c.classList&&c.classList.remove('sel'));b.classList.add('sel');
+        loadVersions();$('#diff').innerHTML='';};
+      list.appendChild(b);
+    });
+  }
+  inp.addEventListener('input',paint);
+  // Escape clears rather than closing anything, which is what a search box in a
+  // column is expected to do.
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Escape'&&inp.value){e.stopPropagation();inp.value='';paint();}
   });
+  paint();
 }
 async function loadVersions(){
   const col=$('#versions');col.innerHTML='';col.appendChild(el('h3',null,'Versions'));
