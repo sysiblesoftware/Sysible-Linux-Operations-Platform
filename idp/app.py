@@ -1826,7 +1826,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "</div>"
         f"<script>{_UPDATES_JS}</script>"
     )
-    return _page("Software &amp; services · SLOP", body, wide=True)
+    return _page("Software & services · SLOP", body, wide=True)
 
 
 @app.get("/admin/updates", response_class=HTMLResponse)
