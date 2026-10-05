@@ -45,6 +45,14 @@ a choice, and resize() below remembers it. */
 .wrap{display:grid;
   grid-template-columns:var(--c1,300px) 6px var(--c2,320px) 6px var(--c3,250px) 6px 1fr;
   gap:0;height:calc(100vh - 49px)}
+.fileview{margin-top:.8em;border:1px solid var(--line);border-radius:12px;overflow:hidden;
+background:var(--panel)}
+.fv-head{display:flex;align-items:center;gap:.6em;flex-wrap:wrap;padding:.5em .7em;
+border-bottom:1px solid var(--line);background:var(--panel2)}
+.badge.warn{color:var(--amber,#e0a83b);border-color:#5b4a2f}
+.filebody{margin:0;padding:.7em .9em;max-height:62vh;overflow:auto;white-space:pre;
+font-family:var(--mono);font-size:12.5px;line-height:1.55;color:var(--text);
+background:var(--log-bg,var(--bg))}
 .gutter{cursor:col-resize;background:var(--line);opacity:.45;
   /* A 6px target is a 6px target; widen what the pointer can grab without
      widening what is drawn. */
@@ -550,6 +558,12 @@ async function renderDetail(v){
   const dl=el('button','btn','Download this version');
   dl.onclick=()=>{window.location=U('/api/hosts/'+encodeURIComponent(state.host)+'/download?path='+encodeURIComponent(state.path)+'&sha='+encodeURIComponent(v.sha256));};
   bar.appendChild(dl);
+  // Reading the file is the obvious thing to want and the one thing the pane did
+  // not offer: you could download it, restore it, or diff it against another
+  // version — but not simply look at it.
+  const vw=el('button','btn','View this version');
+  vw.onclick=()=>showVersion(v);
+  bar.appendChild(vw);
   if(CAN_WRITE){
     const rb=el('button','btn primary','Restore this version');
     rb.onclick=()=>doRestore(v.sha256);
@@ -570,6 +584,38 @@ async function renderDetail(v){
     d.appendChild(pre);
   }
 }
+async function showVersion(v){
+  const d=$('#diff');
+  const old=d.querySelector('.fileview'); if(old)old.remove();
+  const box=el('div','fileview');
+  box.appendChild(el('div','sub faint','Loading…'));
+  d.appendChild(box);
+  let r;
+  try{ r=await jget(U('/api/hosts/'+encodeURIComponent(state.host)+'/view?path='
+      +encodeURIComponent(state.path)+'&sha='+encodeURIComponent(v.sha256))); }
+  catch(e){ box.innerHTML=''; box.appendChild(el('div','empty','Could not read this version.')); return; }
+  box.innerHTML='';
+  const head=el('div','fv-head');
+  head.appendChild(el('span','badge', state.path));
+  head.appendChild(el('span','sub faint', fmtSize(r.size)+(r.binary?'':' · '+r.lines+' lines')));
+  if(r.truncated)head.appendChild(el('span','badge warn','showing the first '+fmtSize(512*1024)+' — download for the rest'));
+  box.appendChild(head);
+  if(r.binary){
+    box.appendChild(el('div','empty','This version is binary, so there is nothing to read. Download it instead.'));
+    return;
+  }
+  // textContent, never innerHTML: this is an arbitrary file off a managed host.
+  const pre=el('pre','filebody');
+  pre.textContent = r.text;
+  box.appendChild(pre);
+}
+
+function fmtSize(n){
+  if(n<1024)return n+' B';
+  if(n<1024*1024)return (n/1024).toFixed(n<10240?1:0)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+
 async function doRestore(sha){
   if(!confirm('Queue a restore of this version to '+state.host+'? The host agent will write it back on its next check-in (backing up the current file first).'))return;
   setMsg('','');

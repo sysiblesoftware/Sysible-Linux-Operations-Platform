@@ -387,6 +387,37 @@ def api_download(request: Request, host_id: str, path: str = Query(...), sha: st
     )
 
 
+# How much of a file is rendered inline. A config this big is pathological, and a
+# browser asked to lay out megabytes of <pre> stops responding — the download is
+# still right there for the whole thing.
+_VIEW_MAX = 512 * 1024
+
+
+@app.get("/api/hosts/{host_id}/view")
+def api_view(request: Request, host_id: str, path: str = Query(...), sha: str = Query(...)) -> dict:
+    """One version's content, as JSON, for reading in the browser.
+
+    JSON rather than serving the bytes: a stored config is somebody else's file,
+    and handing it back as a document the browser renders would run whatever is in
+    it on this origin. The console puts the text in a <pre> via textContent, so it
+    is read as text no matter what it contains. (That is also why /download sets
+    octet-stream and an attachment disposition.)
+    """
+    _require_identity(request)
+    data = store.version_content(host_id, path, sha)
+    if data is None:
+        raise HTTPException(status_code=404, detail="No such version.")
+    size = len(data)
+    # A NUL in the first block is the usual tell, and the only one that matters
+    # here: showing a binary as replacement characters helps nobody.
+    if b"\x00" in data[:8192]:
+        return {"binary": True, "size": size, "truncated": False, "text": "", "lines": 0}
+    head = data[:_VIEW_MAX]
+    text = head.decode("utf-8", "replace")
+    return {"binary": False, "size": size, "truncated": size > _VIEW_MAX,
+            "text": text, "lines": text.count("\n") + (0 if text.endswith("\n") else 1)}
+
+
 @app.get("/api/hosts/{host_id}/diff")
 def api_diff(request: Request, host_id: str, path: str = Query(...),
              a: str = Query(...), b: str = Query(...)) -> dict:
