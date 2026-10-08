@@ -1,0 +1,35 @@
+# Every module pins its dependencies exactly — which is right, and is also how a
+# pin goes quietly stale. Nothing was refreshing them, so a CVE in fastapi,
+# uvicorn, httpx or python-multipart would sit in a pinned requirements file
+# indefinitely with nobody looking.
+#
+# Weekly, grouped per ecosystem so four modules pinning the same versions produce
+# one pull request rather than twelve.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directories:
+      - /idp
+      - /updater
+      - /flashback
+      - /visualizer
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  # The base images each module builds on, and the pinned caddy the gateway runs.
+  - package-ecosystem: docker
+    directories:
+      - /idp
+      - /updater
+      - /flashback
+      - /visualizer
+      - /
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
