@@ -128,3 +128,20 @@ def test_a_normal_sign_in_is_not_affected(booted, tmp_path):
                    headers={"Origin": "http://slop.lan", "Referer": "http://slop.lan/login"},
                    follow_redirects=False)
         assert r.status_code == 302, r.status_code
+
+
+def test_the_configuration_page_does_not_send_you_to_the_log(booted, tmp_path):
+    """Administration → Configuration documented SLOP_ADMIN_PASSWORD as "printed
+    once to the idp logs". It has not been in the log since it moved to a 0600
+    file, so the page was sending the operator somewhere the password is not."""
+    from starlette.testclient import TestClient
+    mod, _out = booted
+    pw = (tmp_path / "initial-password").read_text().strip()
+    with TestClient(mod.app, base_url="http://slop.lan") as c:
+        c.get("/login")
+        tok = re.search(r"name=csrf value='([^']+)'", c.get("/login").text).group(1)
+        c.post("/login", data={"username": "admin", "password": pw, "csrf": tok},
+               headers={"Origin": "http://slop.lan", "Referer": "http://slop.lan/login"})
+        body = c.get("/admin/settings").text.split("</style>", 1)[1]
+    assert "printed once to the idp logs" not in body
+    assert "initial-password" in body and "0600" in body

@@ -602,6 +602,75 @@ border-color:color-mix(in srgb,var(--err) 45%,var(--line))}
 .btn.danger:hover{border-color:var(--err);filter:none}
 .btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
 
+/* A section heading inside a card. The accounts page used a <fieldset>+<legend>
+   for "Add a user" and nothing at all for the list above it, so the two halves of
+   the page were labelled in two different ways and only one of them was labelled.
+   One heading style for both. */
+h2.sect{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;
+letter-spacing:.06em;margin:1.6em 0 .2em}
+h2.sect:first-of-type{margin-top:1.1em}
+/* Accounts — one line per account, same shape as the product list below.
+   It was a four-column table, and the columns were the problem: with one account
+   the Password header sat 300px from the button it labelled, because column 4
+   (Delete) is empty for your own row and the widths come from the content. Worse,
+   the role form was a .row, so `.row>*{flex:1}` made the Set button exactly as
+   wide and as loud as the select it confirms — the accent green, the strongest
+   colour on the page, spent on the least consequential control.
+   Here the account is the row, the role sits with its confirm, and the actions
+   that change nothing by themselves are quiet. The only accent button on the page
+   is the one that creates an account. */
+/* ONE grid for the whole list, with each row as display:contents, so the three
+   columns are tracks of a single grid and line up down the page. A grid per row
+   does not: the tracks are then sized per row, so with seven accounts every
+   select started at a different x depending on how long the name above it was,
+   which is the jitter that made the old table feel untidy in the first place. */
+.accts{display:grid;grid-template-columns:minmax(0,1fr) auto auto;
+margin-top:.9rem;border:1px solid var(--line);border-radius:12px}
+.acct{display:contents}
+/* NOT align-self:center. Each cell draws the row's separator, so a cell only as
+   tall as its own content puts its border at its own top edge — with a wrapped
+   name beside a single-line select, one row's rule came out as three disconnected
+   segments at three different heights. Stretched, every cell is the row's height,
+   the three borders meet, and the cells centre their own content instead. */
+/* The spacing BETWEEN cells is padding inside them, never a margin or a grid
+   column-gap. Each cell draws its own slice of the row's separator, and a gap
+   between cells is a gap with no border in it: the rule came out as three
+   segments with two notches punched through it. */
+.accts>.acct>*{padding:.7rem .45rem;border-top:1px solid var(--line)}
+.accts>.acct>*:first-child{padding-left:.95rem}
+.accts>.acct>*:last-child{padding-right:.95rem}
+.accts>.acct:first-child>*{border-top:0}
+.acct-name{font-weight:600;min-width:0;line-height:1.35;font-size:14px;
+display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}
+/* Left-aligned inside their track, not right: your own row has no Delete, and
+   pushing its cluster to the right edge moved its Reset password 63px out of
+   line with every other row's. Aligning left keeps the Reset buttons a column
+   and leaves the gap where the missing Delete actually is. */
+.acct-role,.acct-act{display:flex;gap:.4rem;align-items:center;justify-content:flex-start}
+.acct select{width:auto;min-width:140px;padding:6px 10px;font-size:13px}
+/* A badge, not the bare muted text .pill gives: "must change" is a state of the
+   account and reads as one. */
+.tag{display:inline-block;border:1px solid var(--line);border-radius:20px;
+padding:.05rem .5rem;font-size:11px;color:var(--muted);background:var(--panel2)}
+/* No .tag.warn for "must change password". Every account created here starts
+   that way, so amber on all of them paints a list of perfectly healthy accounts
+   as a wall of warnings and leaves no colour for something actually wrong. */
+/* The form's one real action. Full width is the LOGIN form's shape and it was
+   inherited here, so "Create user" was a 672px green bar under three fields. */
+.formact{display:flex;justify-content:flex-end;align-items:center;gap:.7rem;margin-top:1.1em}
+.formact .hint{color:var(--muted);font-size:12px;margin-right:auto}
+@media (max-width:640px){
+  /* One column: the row's three cells stack, and the padding/border rules above
+     would then draw a line between a name and its own controls. */
+  .accts{grid-template-columns:minmax(0,1fr)}
+  .accts>.acct>*{padding:.15rem .95rem;border-top:0}
+  .accts>.acct>*:first-child{padding-top:.7rem;border-top:1px solid var(--line)}
+  .accts>.acct>*:last-child{padding-bottom:.7rem}
+  .accts>.acct:first-child>*:first-child{border-top:0}
+  .acct-role,.acct-act{justify-content:flex-start;margin-left:0;flex-wrap:wrap}
+  .formact{flex-wrap:wrap}
+  .formact .hint{margin-right:0;flex:1 0 100%}
+}
 /* Software & services — one line per product.
    It was a table whose every row carried four equally loud buttons, so nothing
    on the page said which of them mattered. A product needs at most ONE action
@@ -718,6 +787,27 @@ window.pushToast=function(msg,opts){
 # below only when a product is genuinely behind, so a current platform shows
 # nothing — a permanently-lit badge is noise, not information.
 _PILL = "<a class=upd-pill id=updpill href='/admin/updates' title='A product has an update available'>&#11014; Updates available <b>0</b></a> "
+# "Set" confirms a role change, so with nothing changed it has nothing to do.
+# Disabling it says that, and keeps the row quiet until there is something to
+# apply. Rendered ENABLED and disabled from here, so a browser with no JavaScript
+# gets a working button rather than a dead one.
+_SETROLE_JS = (
+    "<script>(function(){"
+    "document.querySelectorAll('form.acct-role').forEach(function(f){"
+    "var sel=f.querySelector('select'),btn=f.querySelector('.js-setrole');"
+    "if(!sel||!btn)return;"
+    "function sync(){btn.disabled=(sel.value===btn.dataset.was);}"
+    "sel.addEventListener('change',sync);sync();});"
+    # Deleting an account was one click with nothing between it and the deletion.
+    # window.confirm is what this codebase already uses for the destructive things
+    # (updating SLOP, restoring a config in Flashback), so it is what this uses.
+    "document.querySelectorAll('form.js-del').forEach(function(f){"
+    "f.addEventListener('submit',function(e){"
+    "if(!window.confirm('Delete the account \"'+f.dataset.user+'\"? They lose access to "
+    "every app immediately. This cannot be undone.'))e.preventDefault();});});"
+    "})();</script>"
+)
+
 _PILL_POLL = "<script>fetch('/admin/updates/status',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d.apps)return;var n=d.apps.filter(function(a){return a.available;}).length;var p=document.getElementById('updpill');if(p&&n>0){p.classList.add('on');p.querySelector('b').textContent=n;}}).catch(function(){});</script>"
 
 
@@ -1102,48 +1192,73 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
     with _db() as c:
         rows = c.execute("SELECT username, role, must_change FROM users ORDER BY username").fetchall()
     hidden = _hidden_csrf(csrf)
-    trs = ""
+    accts = ""
     for r in rows:
         opts = "".join(
             f"<option value='{ro}'{' selected' if ro == r['role'] else ''}>{ro}</option>"
             for ro in ROLES
         )
+        user = escape(r["username"])
         is_self = r["username"] == sess["username"]
-        flag = " · must change" if r["must_change"] else ""
-        trs += (
-            f"<tr><td>{escape(r['username'])}<span class=pill>{flag}</span></td>"
-            f"<td><form method=post action='/admin/users/{escape(r['username'])}/role' class=row "
-            f"style='align-items:center;margin:0'>"
-            f"{hidden}<select name=role>{opts}</select>"
-            f"<button class=mini type=submit>Set</button></form></td>"
-            f"<td><form method=post action='/admin/users/{escape(r['username'])}/reset' style='margin:0'>"
-            f"{hidden}<button class='mini sec' type=submit>Reset password</button></form></td>"
-            f"<td style='text-align:right'>"
+        # Beside the name, not under it: a badge is a property of the account, and
+        # on its own line it pushed the row's controls off the name's baseline for
+        # the sake of two words. "this is you" is also the only explanation this
+        # row has for its missing Delete, which is a rule rather than an accident.
+        tags = ""
+        if is_self:
+            tags += "<span class=tag>this is you</span>"
+        if r["must_change"]:
+            tags += "<span class='tag warn'>must change password</span>"
+        accts += (
+            f"<div class=acct>"
+            f"<div class=acct-name>{user}{tags}</div>"
+            + f"<form class=acct-role method=post action='/admin/users/{user}/role'>"
+            f"{hidden}<select name=role aria-label='Role for {user}'>{opts}</select>"
+            # Enabled in the markup and disabled by the script below, so the page
+            # still works with no JavaScript at all.
+            f"<button class='btn ghost sm js-setrole' type=submit "
+            f"data-was='{escape(r['role'])}'>Set</button></form>"
+            f"<div class=acct-act>"
+            f"<form method=post action='/admin/users/{user}/reset'>"
+            f"{hidden}<button class='btn ghost sm' type=submit>Reset password</button></form>"
             + ("" if is_self else
-               f"<form method=post action='/admin/users/{escape(r['username'])}/delete' style='margin:0'>"
-               f"{hidden}<button class=danger type=submit>Delete</button></form>")
-            + "</td></tr>"
+               f"<form method=post action='/admin/users/{user}/delete' class=js-del "
+               f"data-user='{user}'>"
+               # Ghost, not danger-red. Red on every row of a seven-account list is
+               # a wall of alarm over the ordinary act of removing a user, and it
+               # leaves nothing louder for the confirm. The confirm is where the
+               # weight belongs — and there was none at all before, so one misclick
+               # removed an account outright.
+               f"{hidden}<button class='btn ghost sm' type=submit>Delete</button></form>")
+            + "</div></div>"
         )
     role_opts = "".join(f"<option value='{ro}'>{ro}</option>" for ro in ROLES)
+    n = len(rows)
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
         f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software &amp; services</a> · <a href='/account'>Your account</a> · "
-        "<a href='/'>Portal →</a> · one credential signs a user into all three apps.</p>"
+        "<a href='/'>Portal →</a><br>One credential signs a user into all three apps, "
+        "and the role set here is the role every app enforces.</p>"
         f"{_msg(msg, kind)}"
-        "<table><tr><th>User</th><th>Role</th><th>Password</th><th></th></tr>"
-        f"{trs}</table>"
-        "<fieldset><legend>Add a user</legend>"
-        "<form method=post action='/admin/users'>"
+        f"<h2 class=sect>{n} account{'' if n == 1 else 's'}</h2>"
+        f"<div class=accts>{accts}</div>"
+        "<h2 class=sect>Add a user</h2>"
+        "<form method=post action='/admin/users' autocomplete=off>"
         f"{hidden}"
-        "<div class=row><div><label>Username</label>"
-        "<input name=username required></div>"
-        f"<div><label>Role</label><select name=role>{role_opts}</select></div></div>"
-        "<label>Temporary password (they'll be asked to change it)</label>"
-        "<input type=password name=password required>"
-        "<button type=submit>Create user</button></form></fieldset>"
+        "<div class=row><div><label for=nu>Username</label>"
+        # autocomplete: without it the browser treats this as a sign-in form and
+        # fills it with the SIGNED-IN admin's own saved credentials — one stray
+        # submit away from a second superuser holding your password. new-password
+        # is the token that actually stops it; off on the username is advisory.
+        "<input id=nu name=username required autocomplete=off spellcheck=false></div>"
+        f"<div><label for=nr>Role</label><select id=nr name=role>{role_opts}</select></div></div>"
+        "<label for=np>Temporary password</label>"
+        "<input id=np type=password name=password required autocomplete=new-password>"
+        "<div class=formact><span class=hint>They are asked to change it at first sign-in.</span>"
+        "<button class=btn type=submit>Create user</button></div></form>"
     )
-    return _page("Accounts · SLOP", body + _PILL_POLL, wide=True)
+    return _page("Accounts · SLOP", body + _PILL_POLL + _SETROLE_JS, wide=True)
 
 
 def _require_super(request: Request):
@@ -1316,7 +1431,12 @@ def _config_page(sess: sqlite3.Row) -> str:
          "Username of the first-run bootstrap superuser."),
         ("SLOP_ADMIN_PASSWORD",
          "<span class=pill>set</span>" if _admin_pw_set else "<span class=pill>auto-generated</span>",
-         "Bootstrap admin password. Empty = a random one is generated and printed once to the idp logs."),
+         # It is no longer printed anywhere: this page was still sending the
+         # operator to the logs for a password that has not been in them since
+         # it moved to a 0600 file.
+         "Bootstrap admin password. Empty = a random one is generated into "
+         "<span class=mono>$SLOP_DATA_DIR/initial-password</span> (mode 0600), never the log. "
+         "It is deleted the first time that account signs in."),
         ("SLOP_ADMIN_FORCE_CHANGE",
          "on" if os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "1") == "1" else "off",
          "Force the bootstrap admin to change the password at first login."),
