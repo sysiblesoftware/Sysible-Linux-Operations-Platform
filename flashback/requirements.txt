@@ -9,6 +9,6 @@
 # off and says so, rather than taking the whole service down. It did exactly that
 # once — the import was added here before the dependency was, so uvicorn could
 # not start and the gateway served 502 for every Flashback page.
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
 httpx==0.28.1
