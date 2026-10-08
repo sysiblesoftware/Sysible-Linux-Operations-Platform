@@ -356,11 +356,14 @@ FB_URL="${SYSIBLE_FLASHBACK_URL:-http://host.docker.internal:${SYSIBLE_FLASHBACK
 # Ask docker for the real gateway rather than assuming 172.17.0.1 — a host with a
 # customised default bridge subnet has a different one, and guessing there fails
 # exactly as silently.
+_bridge_gateway() {
+  docker network inspect bridge \
+    -f '{{ range .IPAM.Config }}{{ .Gateway }}{{ end }}' 2>/dev/null \
+    | awk '{print $1}'
+}
 FB_BIND="${SYSIBLE_FLASHBACK_AGENT_BIND:-}"
 if [ -z "$FB_BIND" ]; then
-  FB_BIND="$(docker network inspect bridge \
-             -f '{{ range .IPAM.Config }}{{ .Gateway }}{{ end }}' 2>/dev/null \
-             | awk '{print $1}')"
+  FB_BIND="$(_bridge_gateway)"
   [ -n "$FB_BIND" ] || FB_BIND="172.17.0.1"
 fi
 export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"
@@ -437,6 +440,29 @@ if [ "$WANT_APPS" -eq 1 ]; then
       fi
       if [ "$p" = "connect" ] && [ -n "$HOST_ADDR" ]; then
         _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
+      fi
+      # Take the app's CONSOLE off every interface. SLOP is meant to be the front
+      # door, but each app also published its console on 0.0.0.0 — so the gateway's
+      # HSTS/CSP/frame headers and the IdP's central login throttle could all be
+      # skipped by going straight to :8800 / :8810 / :8700. (Not an authentication
+      # bypass: the apps fail closed without the shared secret, and SLEP refuses a
+      # local login under SSO. This is surface area, not a way in.)
+      #
+      # Bound to the docker bridge gateway, which is how Caddy reaches them
+      # (host.docker.internal) — reachable from this host and its containers, not
+      # from the network. Exactly what the Flashback agent port already does, and
+      # what connect's own compose comment has always said the installer would do.
+      #
+      # NOT the Controller's :9000. That is the agent/CLI API and managed hosts on
+      # the network must reach it; binding it here would strand the whole fleet.
+      case "$p" in
+        controller) _bind_var=SYSIBLE_CONTROLLER_CONSOLE_BIND ;;
+        slep)       _bind_var=SYSIBLE_SLEP_BIND ;;
+        connect)    _bind_var=SYSIBLE_CONNECT_BIND ;;
+        *)          _bind_var="" ;;
+      esac
+      if [ -n "$_bind_var" ] && [ -n "$FB_BIND" ]; then
+        _upsert_kv "$_aenv" "$_bind_var" "$FB_BIND"
       fi
     fi
     # Pass the app dir, turn its SSO trust flag on, and build its front end under
