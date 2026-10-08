@@ -65,6 +65,31 @@ def agent_configured() -> bool:
     return bool(_AGENT_TOKEN)
 
 
+# The agent API takes host_id from the CALLER and authenticates with ONE token
+# shared by whoever posts snapshots. That is safe as shipped, and only because of
+# where it listens: the installer binds the agent port to the docker bridge, and
+# only the Controller holds the token — managed hosts never see it, they talk to
+# the Controller and it relays.
+#
+# Both of those are configuration. Bind the port to a wildcard so agents can post
+# directly, which the compose file offers as an override, and the picture changes
+# completely: any agent holding the token can then write ANY host's config
+# history, and read the restore payloads queued for it. Demonstrated, not
+# theorised — a snapshot posted under another host's id is accepted.
+#
+# So say so at startup rather than letting an override be a quiet cliff.
+def _warn_if_agent_port_is_wide_open() -> None:
+    bind = (os.getenv("SYSIBLE_FLASHBACK_AGENT_BIND", "") or "").strip()
+    if bind in ("0.0.0.0", "::", "*"):
+        print(
+            "[flashback] SYSIBLE_FLASHBACK_AGENT_BIND=" + bind + " publishes the agent "
+            "endpoint on EVERY interface. That endpoint takes host_id from the caller "
+            "and authenticates with one fleet-wide token, so anything that obtains the "
+            "token can write any host's config history and read restore payloads queued "
+            "for it. Bind it to the docker bridge (the installer's default) unless you "
+            "have given each agent its own credential.", flush=True)
+
+
 def agent_auth_ok(request) -> bool:
     """True if the request carries the correct agent bearer token.
 

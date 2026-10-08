@@ -102,6 +102,7 @@ async def _security_headers(request: Request, call_next):
 
 @app.on_event("startup")
 def _startup() -> None:
+    identity._warn_if_agent_port_is_wide_open()
     store.init_db()
     print(identity.startup_notice(), flush=True)
 
