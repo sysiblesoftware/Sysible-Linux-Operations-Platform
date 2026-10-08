@@ -33,6 +33,60 @@ from . import apps, git, jobs
 
 app = FastAPI(title="Sysible updater", docs_url=None, redoc_url=None, openapi_url=None)
 
+# ---------------------------------------------------------------------------
+# Request body cap. Same shape as Flashback's and the Visualizer's, which both
+# had one while this service did not: without it an unauthenticated POST can make
+# the process buffer an arbitrarily large body before any handler — and before any
+# authentication — runs. Small here on purpose: everything this service accepts is
+# a short form or a small JSON object.
+# ---------------------------------------------------------------------------
+_MAX_REQUEST_BYTES = int(os.environ.get("SYSIBLE_UPDATER_MAX_REQUEST_BYTES", str(256 * 1024)))
+
+
+class _BodyLimitASGI:
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        for k, v in scope.get("headers") or []:
+            if k == b"content-length" and v.isdigit() and int(v) > self.max_bytes:
+                return await self._too_large(scope, send)
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+            # A chunked body never declares its length, so the running total is
+            # the only thing that can stop it.
+            if len(body) > self.max_bytes:
+                return await self._too_large(scope, send)
+        sent = False
+
+        async def replay_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    async def _too_large(self, scope, send):
+        async def _noop_receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await JSONResponse({"detail": "Request body too large."}, status_code=413)(
+            scope, _noop_receive, send)
+
+
+app.add_middleware(_BodyLimitASGI, max_bytes=_MAX_REQUEST_BYTES)
+
+
 # ITS OWN SECRET, not the platform-wide one. Every service on this network carries
 # SYSIBLE_SSO_SHARED_SECRET, and this service holds the host's Docker socket — so
 # authenticating it with that shared value made a flaw in ANY of them (Flashback,
