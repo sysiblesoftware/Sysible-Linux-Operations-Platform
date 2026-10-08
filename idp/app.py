@@ -169,6 +169,36 @@ def _get_user(username: str) -> sqlite3.Row | None:
         return c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
 
 
+_INITIAL_PW_FILE = "initial-password"
+
+
+def _initial_password_path() -> str:
+    return os.path.join(os.environ.get("SLOP_DATA_DIR", "/data"), _INITIAL_PW_FILE)
+
+
+def _write_initial_password(pw: str) -> str | None:
+    """Drop the generated bootstrap password where only root in this container can
+    read it. Returns the path, or None if it could not be written."""
+    path = _initial_password_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(pw + "\n")
+        os.chmod(path, 0o600)
+        return path
+    except OSError:
+        return None
+
+
+def _clear_initial_password() -> None:
+    """Once the bootstrap account has signed in, the file has done its job."""
+    try:
+        os.unlink(_initial_password_path())
+    except OSError:
+        pass
+
+
 def _upsert_user(username: str, password: str, role: str, must_change: bool) -> None:
     now = int(time.time())
     with _db() as c:
@@ -268,7 +298,20 @@ def _bootstrap_admin() -> None:
     print(" SLOP IdP: created the initial superuser account.")
     print(f"   username: {user}")
     if generated:
-        print(f"   password: {pw}    <-- shown ONCE; change it at /account on first login")
+        # NOT printed. "Shown once" was never once: a container log is kept, and
+        # `docker compose logs` replays it to anyone who can read it, for as long
+        # as the service lives. Forced change mitigates that only if somebody
+        # actually signs in — until then it is a live credential sitting in a log.
+        # Write it 0600 instead and print the PATH, so retrieving it is a
+        # deliberate act that leaves the secret out of the log entirely.
+        where = _write_initial_password(pw)
+        if where:
+            print("   password: written to " + where + " (mode 0600)")
+            print("   read it with:  docker compose exec idp cat " + where)
+            print("   it is deleted the first time this account signs in.")
+        else:
+            # A read-only data dir is the one case where the log is all there is.
+            print(f"   password: {pw}    <-- could not write the password file")
     else:
         print("   password: (from SLOP_ADMIN_PASSWORD)")
     print(banner, flush=True)
@@ -430,6 +473,16 @@ def _safe_next(raw: str | None) -> str:
     # shipped Starlette happens to percent-encode "\" in the Location and defang it,
     # but that's an implementation detail one dependency bump could remove, so we
     # refuse backslashes here rather than lean on it.
+    # Control characters, for the same reason the backslash is refused above and
+    # with the same caveat. Browsers STRIP tab/CR/LF out of a URL before parsing
+    # it, so "/<TAB>//evil.example.com" becomes "///evil.example.com" and
+    # navigates off-origin — verified in Chromium, which left the origin entirely
+    # when a raw tab reached the Location header. Starlette happens to
+    # percent-encode them on the way out, exactly as it defangs the backslash, so
+    # this is not reachable today; that is a dependency's behaviour and not a
+    # guarantee, which is precisely why the backslash is not left to it either.
+    if any(c in raw for c in "\t\r\n\x0b\x0c\x00"):
+        return "/"
     if not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
         return "/"
     parts = urlsplit(raw)
@@ -708,6 +761,59 @@ def _msg(text: str, kind: str = "err") -> str:
 # ---------------------------------------------------------------------------
 app = FastAPI(title="SLOP IdP", docs_url=None, redoc_url=None, openapi_url=None)
 
+# ---------------------------------------------------------------------------
+# Request body cap. Same shape as Flashback's and the Visualizer's, which both
+# had one while this service did not: without it an unauthenticated POST can make
+# the process buffer an arbitrarily large body before any handler — and before any
+# authentication — runs. Small here on purpose: everything this service accepts is
+# a short form or a small JSON object.
+# ---------------------------------------------------------------------------
+_MAX_REQUEST_BYTES = int(os.environ.get("SLOP_MAX_REQUEST_BYTES", str(1 * 1024 * 1024)))
+
+
+class _BodyLimitASGI:
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        for k, v in scope.get("headers") or []:
+            if k == b"content-length" and v.isdigit() and int(v) > self.max_bytes:
+                return await self._too_large(scope, send)
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+            # A chunked body never declares its length, so the running total is
+            # the only thing that can stop it.
+            if len(body) > self.max_bytes:
+                return await self._too_large(scope, send)
+        sent = False
+
+        async def replay_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    async def _too_large(self, scope, send):
+        async def _noop_receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await JSONResponse({"detail": "Request body too large."}, status_code=413)(
+            scope, _noop_receive, send)
+
+
+app.add_middleware(_BodyLimitASGI, max_bytes=_MAX_REQUEST_BYTES)
+
 
 # Content-Security-Policy for the IdP's own pages. The single-origin SLOP model
 # means an XSS in ANY app runs at the same origin as this admin console, so a real
@@ -877,6 +983,7 @@ def login_post(
         _record_fail(ip, uname)
         return _csrf_html(_login_form(nxt, "Invalid username or password.", tok), tok, 401)
     _clear_fails(ip, uname)
+    _clear_initial_password()
     token = _new_session(user["username"], user["role"])
     # A forced password change (fresh account / admin reset) routes to /account first.
     dest = "/account?first=1" if user["must_change"] else nxt
