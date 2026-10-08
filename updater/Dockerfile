@@ -8,7 +8,7 @@
 # It runs as ROOT and is handed the host's Docker socket. That is unavoidable for
 # what it does and is why its API surface is one allowlisted key (see
 # backend/apps.py) and why it is expose-only with a shared-secret gate.
-FROM docker:27-cli
+FROM docker:28-cli
 
 RUN apk add --no-cache python3 py3-pip git
 
