@@ -107,11 +107,41 @@
         // entry point to /admin — superuser-only, revealed here.
         var adminCard = document.getElementById("card-admin");
         if (adminCard) adminCard.hidden = false;
+        // Only now: /admin/updates/status answers 403 to anyone else, and the
+        // tile the badge lives on is superuser-only anyway.
+        checkUpdates();
+        // Hourly, so a portal left open overnight notices a release without a
+        // reload. NOT on the 15s health cadence: an update is not a heartbeat,
+        // and this reads git state for every product.
+        setInterval(checkUpdates, 3600000);
       }
       var box = document.getElementById("userbox");
       if (box) box.hidden = false;
     })
     .catch(function () { /* not signed in / IdP unreachable — leave chip hidden */ });
+
+  // How many products have an update waiting, shown on the Administration tile.
+  // Without this the only way to find out was to open Administration and look —
+  // so the one screen everybody lands on said nothing, and an update sat unseen.
+  // Deliberately NOT a refresh=1 call: that forces a git fetch per product, and
+  // the portal is loaded far too often to pay for that. The cached answer is the
+  // same answer a moment later.
+  function checkUpdates() {
+    fetch("/admin/updates/status", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var el = document.getElementById("upd-admin");
+        if (!el) return;
+        // An error payload carries no apps, so this reads as "nothing to say"
+        // rather than as zero updates — the badge simply stays hidden.
+        var n = (d && d.apps ? d.apps : []).filter(function (a) {
+          return a && a.available;
+        }).length;
+        el.textContent = n === 1 ? "1 update" : n + " updates";
+        el.hidden = n === 0;
+      })
+      .catch(function () { /* best effort, exactly like the health dots */ });
+  }
 
   // Theme toggle, persisted; default follows the OS until the user chooses.
   var KEY = "slop-theme";
