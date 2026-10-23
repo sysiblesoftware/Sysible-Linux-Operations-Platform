@@ -17,7 +17,7 @@ These tests cover both halves of that, because only one of them is code:
 The browser test at the bottom is the real proof — it clicks the row the way an
 operator does — and skips itself when playwright is not installed.
 
-Run: pip install -r ../requirements.txt pytest ; pytest    (from the flashback/ dir)
+Run: pip install -r ../requirements.txt pytest ; pytest    (from the baseline/ dir)
 """
 import importlib
 import importlib.util
@@ -46,9 +46,9 @@ def cl(tmp_path):
     from starlette.testclient import TestClient
 
     os.environ.update(
-        SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
+        SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="1",
         SYSIBLE_SSO_SHARED_SECRET=SECRET,
-        SYSIBLE_FLASHBACK_DATA=str(tmp_path),
+        SYSIBLE_BASELINE_DATA=str(tmp_path),
     )
     os.environ.pop("SLOP_CONTROLLER_UPSTREAM", None)
     for mod in ("backend.identity", "backend.store", "backend.app"):
@@ -155,8 +155,8 @@ def test_clicking_a_host_row_opens_its_files_and_offers_restore(tmp_path):
     from playwright.sync_api import sync_playwright
 
     os.environ.update(
-        SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="0",      # standalone local identity
-        SYSIBLE_FLASHBACK_DATA=str(tmp_path),
+        SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="0",      # standalone local identity
+        SYSIBLE_BASELINE_DATA=str(tmp_path),
     )
     os.environ.pop("SLOP_CONTROLLER_UPSTREAM", None)
     for mod in ("backend.identity", "backend.store", "backend.app"):

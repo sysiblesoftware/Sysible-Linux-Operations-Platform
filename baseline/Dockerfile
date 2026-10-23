@@ -1,8 +1,8 @@
-# Sysible Flashback — the standalone SLOP module.
+# Sysible Baseline — the standalone SLOP module.
 FROM python:3.12-slim
 
 # Non-root runtime user; the version store lives on a mounted volume at /data.
-RUN useradd --system --uid 10072 --home-dir /app --shell /usr/sbin/nologin flashback
+RUN useradd --system --uid 10072 --home-dir /app --shell /usr/sbin/nologin baseline
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
@@ -10,9 +10,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend /app/backend
 
-ENV SYSIBLE_FLASHBACK_DATA=/data
-RUN mkdir -p /data && chown -R flashback:flashback /data /app
-USER flashback
+ENV SYSIBLE_BASELINE_DATA=/data
+RUN mkdir -p /data && chown -R baseline:baseline /data /app
+USER baseline
 
 EXPOSE 8080
 # TLS is terminated by the SLOP gateway; the app serves plain HTTP on 8080 inside

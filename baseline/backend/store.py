@@ -1,4 +1,4 @@
-"""Sysible Flashback — the versioned, content-addressed config store.
+"""Sysible Baseline — the versioned, content-addressed config store.
 
 A standalone store (stdlib sqlite3, no ORM) that keeps a time machine of every
 managed host's config files:
@@ -25,11 +25,25 @@ import sqlite3
 import threading
 import time
 
-# Keep at most this many CHANGED versions per (host, path); older ones are pruned.
-MAX_VERSIONS_PER_FILE = int(os.environ.get("SYSIBLE_FLASHBACK_KEEP", "50"))
+from . import env
 
-_DATA_DIR = os.environ.get("SYSIBLE_FLASHBACK_DATA", "/data")
-_DB_PATH = os.environ.get("SYSIBLE_FLASHBACK_DB", os.path.join(_DATA_DIR, "flashback.db"))
+# Keep at most this many CHANGED versions per (host, path); older ones are pruned.
+MAX_VERSIONS_PER_FILE = int(env.getenv("KEEP", "50"))
+
+_DATA_DIR = env.getenv("DATA", "/data")
+
+# THE DATABASE FILE IS STILL CALLED flashback.db, ON PURPOSE.
+#
+# This file IS the product: every version of every config file on every host,
+# and the one thing in the stack that cannot be rebuilt from anything else. It
+# lives in the `flashback-data` volume, which keeps its name for the same
+# reason. Renaming either would not migrate the history — it would hide it, and
+# the console would come up pristine and empty on a fleet with years of
+# captures, which reads exactly like "Baseline deleted everything".
+#
+# Nobody sees this name: it is a file inside a Docker volume. The rebrand is for
+# the humans, and no human reads this path.
+_DB_PATH = env.getenv("DB", os.path.join(_DATA_DIR, "flashback.db"))
 
 # Serialise writers in-process; SQLite itself serialises across processes.
 _LOCK = threading.RLock()
@@ -361,7 +375,7 @@ def compare_path(path: str, baseline: str | None = None) -> dict:
                                ORDER BY v2.captured_at DESC, v2.id DESC LIMIT 1)
                 ORDER BY h.label COLLATE NOCASE""", (path,)).fetchall()
         newest = [dict(r) for r in rows]
-        # Hosts Flashback knows about that have NO version of this path at all.
+        # Hosts Baseline knows about that have NO version of this path at all.
         known = c.execute("SELECT host_id, label FROM hosts").fetchall()
     have = {r["host_id"] for r in newest}
     if not newest:

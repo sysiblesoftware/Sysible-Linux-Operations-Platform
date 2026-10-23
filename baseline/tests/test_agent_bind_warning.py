@@ -20,9 +20,9 @@ sys.path.insert(0, HERE)
 
 def _warn(monkeypatch, bind, capsys):
     if bind is None:
-        monkeypatch.delenv("SYSIBLE_FLASHBACK_AGENT_BIND", raising=False)
+        monkeypatch.delenv("SYSIBLE_BASELINE_AGENT_BIND", raising=False)
     else:
-        monkeypatch.setenv("SYSIBLE_FLASHBACK_AGENT_BIND", bind)
+        monkeypatch.setenv("SYSIBLE_BASELINE_AGENT_BIND", bind)
     from backend import identity
     importlib.reload(identity)
     identity._warn_if_agent_port_is_wide_open()
@@ -45,7 +45,7 @@ def test_a_safe_bind_says_nothing(monkeypatch, capsys, bind):
 
 
 def test_the_token_still_fails_closed_when_unset(monkeypatch):
-    monkeypatch.delenv("SYSIBLE_FLASHBACK_AGENT_TOKEN", raising=False)
+    monkeypatch.delenv("SYSIBLE_BASELINE_AGENT_TOKEN", raising=False)
     from backend import identity
     importlib.reload(identity)
 

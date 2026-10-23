@@ -1,4 +1,4 @@
-"""Sysible Flashback — the server-rendered console (dependency-free).
+"""Sysible Baseline — the server-rendered console (dependency-free).
 
 One HTML page whose left rail lists hosts; picking a host lists its tracked files,
 picking a file shows its version timeline, and picking two versions renders a
@@ -197,9 +197,9 @@ _JS = r"""
 const $=s=>document.querySelector(s);
 const CAN_WRITE = document.body.dataset.canWrite === '1';
 // The console is served at the app root, but behind the SLOP gateway that root is
-// /flashback/ (the gateway strips the prefix before the app sees it). So every API
+// /baseline/ (the gateway strips the prefix before the app sees it). So every API
 // URL is built relative to the page's own directory: standalone -> /api/..., behind
-// the gateway -> /flashback/api/..., with no build-time base to configure.
+// the gateway -> /baseline/api/..., with no build-time base to configure.
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const U = p => BASE + String(p).replace(/^\//,'');
 let state={host:null,path:null,a:null,b:null,
@@ -212,7 +212,7 @@ function setMsg(t,kind){const m=$('#msg');m.textContent=t||'';m.className='msg '
 // Collapse state lives per browser: which environments an operator keeps folded
 // is a view preference, not fleet data, and it must survive a reload or the
 // drill-down is worthless on the fleet it exists for.
-const COLLAPSE_KEY='sysible-flashback-collapsed';
+const COLLAPSE_KEY='sysible-baseline-collapsed';
 function loadCollapsed(){
   try{const v=JSON.parse(localStorage.getItem(COLLAPSE_KEY)||'[]');
       return new Set(Array.isArray(v)?v:[]);}catch(e){return new Set();}
@@ -353,7 +353,7 @@ function renderHosts(){
   // which is what sent operators off updating agents that were already current.
   if(blocked){
     col.appendChild(el('div','note err',
-      d.config_backup_reason||'The Controller has no Flashback wiring, so no host can capture.'));
+      d.config_backup_reason||'The Controller has no Baseline wiring, so no host can capture.'));
     // Withdraw the fleet-wide buttons too, not just the per-host ones. Leaving
     // them there is the same broken promise one row wider: every host would be
     // asked, and every host would fail.
@@ -796,7 +796,7 @@ async function showCompareDiff(path, a, b){
 // which wrapped "/etc/alternatives/builtins.7.gz" onto two lines, next to a
 // content pane that held the rest of the screen and nothing else.
 const COLS = ['--c1', '--c2', '--c3'];
-const COL_MIN = 160, COL_MAX = 760, COL_KEY = 'flashback-cols';
+const COL_MIN = 160, COL_MAX = 760, COL_KEY = 'baseline-cols';
 
 function colsLoad(){
   try{
@@ -883,19 +883,19 @@ colsInit();
 # because nothing here ever declared an icon: with no <link rel=icon> a browser
 # falls back to /favicon.ico at the ORIGIN ROOT, which behind the SLOP gateway is
 # the portal's path, not ours. The mark is the canonical one from
-# portal/marks/flashback.svg — but the portal is not in this image's Docker build
+# portal/marks/baseline.svg — but the portal is not in this image's Docker build
 # context (the Dockerfile copies only backend/), so it is embedded here rather
 # than shared by file. If the mark changes there, re-copy it here; the family
 # rules live in portal/marks/README.md.
 FAVICON_SVG = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Sysible Flashback — canonical mark. Family tile (dark rounded square + thin
-  brand-green ring, see controller.svg); the glyph says what Flashback IS: a
+  Sysible Baseline — canonical mark. Family tile (dark rounded square + thin
+  brand-green ring, see controller.svg); the glyph says what Baseline IS: a
   time machine for config. A brand-green clock face whose hand points BACK,
   wrapped by a blue counter-clockwise arrow — rewind, not just history.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Flashback">
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Baseline">
   <defs>
     <linearGradient id="fb-tile" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
@@ -923,13 +923,13 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<link rel=icon type='image/svg+xml' href='favicon.svg'>"
-        "<title>Sysible Flashback</title>"
+        "<title>Sysible Baseline</title>"
         "<script>try{var t=localStorage.getItem('slop-theme');"
         "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
         "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
         f"<style>{_CSS}</style></head>"
         f"<body data-can-write='{'1' if can_write else '0'}'>"
-        "<header class=head><div class=brand>Sysible <b>Flashback</b> — config time machine</div>"
+        "<header class=head><div class=brand>Sysible <b>Baseline</b> — config history and restore</div>"
         f"<span class=who>{who}</span></header>"
         "<div class=msg id=msg hidden></div>"
         "<div class=wrap id=wrap>"
@@ -963,7 +963,7 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
     """The page a BROWSER gets instead of raw `{"detail":"Not signed in."}`.
 
     Landing on a bare JSON error is a dead end: from the portal tile it just looks
-    like "Flashback does nothing". This says what happened, which of the three
+    like "Baseline does nothing". This says what happened, which of the three
     wiring faults caused it, and where to go next. `reason` is generated by
     identity.deny_reason() and never contains a secret.
     """
@@ -972,7 +972,7 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
         "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<link rel=icon type='image/svg+xml' href='favicon.svg'>"
-        "<title>Sysible Flashback — " + escape(head) + "</title>"
+        "<title>Sysible Baseline — " + escape(head) + "</title>"
         "<script>try{var t=localStorage.getItem('slop-theme');"
         "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
         "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
@@ -985,13 +985,13 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
         ".gate code{font-family:var(--mono);font-size:12.5px;color:var(--accent2)}"
         ".gate a{color:var(--accent)}"
         "</style></head><body>"
-        "<header class=head><div class=brand>Sysible <b>Flashback</b> — config time machine</div></header>"
+        "<header class=head><div class=brand>Sysible <b>Baseline</b> — config history and restore</div></header>"
         "<div class=gate>"
         f"<h1>{escape(head)}</h1>"
         f"<div class=why>{escape(reason)}</div>"
-        "<p>Flashback has no login of its own — it takes your identity from the "
+        "<p>Baseline has no login of its own — it takes your identity from the "
         "Sysible Linux Operations Platform gateway. Open it from the portal tile at "
-        "<code>/flashback/</code> after signing in at <a href='/login'>/login</a>.</p>"
+        "<code>/baseline/</code> after signing in at <a href='/login'>/login</a>.</p>"
         f"<p><code>{escape(code)}</code></p>"
         "</div></body></html>"
     )

@@ -1,6 +1,6 @@
-"""Sysible Flashback — the gateway trust boundary and how it REFUSES.
+"""Sysible Baseline — the gateway trust boundary and how it REFUSES.
 
-Flashback has no login of its own: it trusts the identity the SLOP gateway stamps,
+Baseline has no login of its own: it trusts the identity the SLOP gateway stamps,
 guarded by a shared secret. These tests pin both halves of that:
 
   * the boundary itself — a request without the secret is never authenticated,
@@ -9,7 +9,7 @@ guarded by a shared secret. These tests pin both halves of that:
     {"detail":"Not signed in."} made the portal tile look simply broken), while API
     and agent callers keep the JSON contract. The page must never echo the secret.
 
-Run: pip install -r ../requirements.txt pytest ; pytest   (from the flashback/ dir)
+Run: pip install -r ../requirements.txt pytest ; pytest   (from the baseline/ dir)
 """
 import importlib
 import os
@@ -33,9 +33,9 @@ def cl(tmp_path):
     from starlette.testclient import TestClient
 
     os.environ.update(
-        SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
+        SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="1",
         SYSIBLE_SSO_SHARED_SECRET=SECRET,
-        SYSIBLE_FLASHBACK_DATA=str(tmp_path),
+        SYSIBLE_BASELINE_DATA=str(tmp_path),
     )
     for mod in ("backend.identity", "backend.store", "backend.app"):
         if mod in sys.modules:
@@ -110,7 +110,7 @@ def test_the_refusal_never_echoes_the_secret(cl):
 
 def test_signed_in_browser_gets_the_console(cl):
     r = cl.get("/", headers={**BROWSER, **GOOD})
-    assert r.status_code == 200 and "config time machine" in r.text
+    assert r.status_code == 200 and "Sysible <b>Baseline</b>" in r.text
 
 
 def test_health_stays_open_for_the_portal_dot(cl):
@@ -129,9 +129,9 @@ def test_the_console_declares_a_tab_icon(cl):
 
 
 def test_the_icon_href_is_relative_so_it_survives_the_gateway_prefix(cl):
-    """The gateway serves this app under /flashback and STRIPS the prefix. An
+    """The gateway serves this app under /baseline and STRIPS the prefix. An
     absolute href would resolve to the portal's root and 404; a relative one
-    resolves to /flashback/favicon.svg and reaches us."""
+    resolves to /baseline/favicon.svg and reaches us."""
     html = cl.get("/", headers={**GOOD, **BROWSER}).text
     assert "href='/favicon.svg'" not in html
     assert "href='favicon.svg'" in html
@@ -145,12 +145,12 @@ def test_the_refusal_page_carries_the_icon_too(cl):
     assert "favicon.svg" in r.text
 
 
-def test_the_icon_is_served_and_is_the_flashback_mark(cl):
+def test_the_icon_is_served_and_is_the_baseline_mark(cl):
     r = cl.get("/favicon.svg")
     assert r.status_code == 200
     assert "image/svg+xml" in r.headers["content-type"]
-    # The canonical mark from portal/marks/flashback.svg, not some other app's.
-    assert 'aria-label="Sysible Flashback"' in r.text
+    # The canonical mark from portal/marks/baseline.svg, not some other app's.
+    assert 'aria-label="Sysible Baseline"' in r.text
     assert "#6ddb73" in r.text                     # the family's brand-green ring
 
 
@@ -174,7 +174,7 @@ def test_agent_endpoints_are_closed_when_no_token_is_configured(cl, monkeypatch)
     assert r.status_code == 503
     # ...and it says WHICH fault, so a blank token is diagnosable rather than
     # looking identical to a wrong one.
-    assert "SYSIBLE_FLASHBACK_AGENT_TOKEN" in r.json()["detail"]
+    assert "SYSIBLE_BASELINE_AGENT_TOKEN" in r.json()["detail"]
     assert cl.get("/api/agent/restores", params={"host_id": "h"}).status_code == 503
 
 
@@ -251,7 +251,7 @@ def test_the_host_list_still_needs_an_identity(cl):
 # ---- an enrichment must never take the service down ------------------------
 # The host-import module imported httpx at module scope before httpx was in
 # requirements.txt. backend.app imports that module, so the app failed to import,
-# uvicorn never started, and EVERY Flashback page became a 502 at the gateway —
+# uvicorn never started, and EVERY Baseline page became a 502 at the gateway —
 # a feature that only adds rows to a list took the whole service out.
 def test_the_app_still_serves_when_httpx_is_missing(monkeypatch, tmp_path):
     """Simulate the dependency being absent and re-import the app from scratch."""
@@ -266,9 +266,9 @@ def test_the_app_still_serves_when_httpx_is_missing(monkeypatch, tmp_path):
             raise ImportError("simulated: httpx not installed")
         return real_import(name, *a, **kw)
 
-    os.environ.update(SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
+    os.environ.update(SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="1",
                       SYSIBLE_SSO_SHARED_SECRET=SECRET,
-                      SYSIBLE_FLASHBACK_DATA=str(tmp_path))
+                      SYSIBLE_BASELINE_DATA=str(tmp_path))
     for m in [m for m in list(_sys.modules) if m.startswith("backend")]:
         del _sys.modules[m]
     monkeypatch.setattr(builtins, "__import__", no_httpx)
@@ -610,11 +610,11 @@ def test_stored_history_proves_capability_whatever_the_controller_says(cl, monke
 #
 # The per-host signal ("this agent has never asked for config-backup work") is
 # only meaningful if the Controller can relay snapshots at all. On a Controller
-# with no Flashback wiring NO agent ever asks, so every row rendered "agent
+# with no Baseline wiring NO agent ever asks, so every row rendered "agent
 # doesn't do config backup — update this host's agent" — and the operator went
 # and updated agents that were already current, which changed nothing.
 # ---------------------------------------------------------------------------
-_CB_OFF = {"configured": False, "reason": "this controller has no Flashback wiring"}
+_CB_OFF = {"configured": False, "reason": "this controller has no Baseline wiring"}
 _CB_ON = {"configured": True, "reason": None}
 
 
@@ -627,7 +627,7 @@ def test_an_unwired_controller_is_reported_once_not_per_host(cl, monkeypatch):
     ], cb=_CB_OFF)
     d = cl.get("/api/hosts", headers=GOOD).json()
     assert d["config_backup_configured"] is False
-    assert "Flashback wiring" in (d["config_backup_reason"] or "")
+    assert "Baseline wiring" in (d["config_backup_reason"] or "")
     # None = unknown. Not False, which the console renders as "update this agent".
     assert [h["capture_capable"] for h in d["hosts"]] == [None, None]
 
@@ -761,7 +761,7 @@ def test_the_console_folds_environments_and_remembers_it(cl):
     page = _console(cl)
     assert "envtoggle" in page
     assert "state.collapsed" in page
-    assert "sysible-flashback-collapsed" in page          # persisted per browser
+    assert "sysible-baseline-collapsed" in page          # persisted per browser
     assert "AUTO_COLLAPSE_HOSTS" in page                  # big fleets start folded
 
 
@@ -782,7 +782,7 @@ def test_selection_boxes_are_withheld_from_a_reader(cl):
 
 
 # ---- a Controller that cannot be USED is blocking, not "unknown" -------------
-# Reported as "Flashback isn't backing things up", and reproduced exactly: with
+# Reported as "Baseline isn't backing things up", and reproduced exactly: with
 # the Controller container down, /api/hosts returned can_request=True and
 # config_backup_configured=None, so the console kept offering "Back up now" and
 # "Back up all" — buttons that could not possibly work — with the explanation

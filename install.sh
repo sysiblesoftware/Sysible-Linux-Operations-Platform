@@ -9,7 +9,7 @@
 #      this script installs, from the Controller checkout, so you can manage
 #      everything afterward: sysiblectl status | update all | logs …).
 #   2. The SLOP gateway (Caddy + portal) is brought up FROM THIS CHECKOUT, in
-#      front of the apps — and it now bundles the Flashback module (the config time
+#      front of the apps — and it now bundles the Baseline module (the config time
 #      machine) as a service in its own compose, so that comes up with the gateway.
 #
 # Usage (run from the repo root):
@@ -26,8 +26,8 @@ set -eu
 CTL_REPO="https://github.com/sysiblesoftware/sysible-controller"
 SLEP_REPO="https://github.com/sysiblesoftware/sysible-linux-engineering-platform"
 CONNECT_REPO="https://github.com/sysiblesoftware/sysible-connect"
-# Flashback is NOT cloned/run as a separate app — it's baked into the SLOP gateway
-# stack (docker-compose.yml service `flashback`, built from ./flashback) and comes
+# Baseline is NOT cloned/run as a separate app — it's baked into the SLOP gateway
+# stack (docker-compose.yml service `baseline`, built from ./baseline) and comes
 # up with the gateway below.
 SRC_DIR="${SYSIBLE_SRC_DIR:-/opt/sysible-src}"
 
@@ -251,6 +251,47 @@ _upsert_env() {
   _upsert_kv "$ENV_FILE" "$1" "$2"
 }
 
+# ---- rename pre-rebrand keys in the operator's .env ------------------------
+# Baseline was called Baseline. Both spellings are honoured at runtime (the
+# compose file falls back, the service falls back), so nothing here is required
+# for the stack to work — it is required for the stack to stay READABLE.
+#
+# The last rename did not do this. Baseline was called D3lorean, the rename
+# changed the product name and left the variables, and the Controller still
+# reads SYSIBLE_D3LOREAN_PATHS today: an operator reading today's manual finds
+# their running stack configured in the vocabulary of two dead products. One
+# more layer and the .env becomes a dig site.
+#
+# So rename the KEY and keep the VALUE, exactly once, and only where the new key
+# is not already present — never clobber a value the operator set deliberately
+# under the current name.
+_migrate_env_key() {
+  _old="$1"; _new="$2"
+  [ -f "$ENV_FILE" ] || return 0
+  # Already on the new name? Leave both alone: the new one wins at runtime and
+  # the operator's explicit choice is not ours to overwrite.
+  grep -q "^${_new}=" "$ENV_FILE" 2>/dev/null && return 0
+  _val="$(sed -n "s/^${_old}=\(.*\)$/\1/p" "$ENV_FILE" | tail -n1)"
+  [ -n "$_val" ] || return 0
+  _upsert_env "$_new" "$_val" || return 1
+  # Drop the old line now that the value lives under the new key.
+  _mt="$ENV_FILE.mig.$$"
+  ( umask 077; : > "$_mt" )
+  if _mk="$_old" awk 'index($0, ENVIRON["_mk"] "=") == 1 { next } { print }' \
+       "$ENV_FILE" > "$_mt"; then
+    mv "$_mt" "$ENV_FILE"; chmod 600 "$ENV_FILE" 2>/dev/null || true
+    say "Renamed $_old to $_new in $ENV_FILE (same value)"
+  else
+    rm -f "$_mt"
+  fi
+}
+
+for _k in AGENT_TOKEN AGENT_BIND AGENT_PORT KEEP URL DATA DB LOCAL_USER \
+          LOCAL_ROLE MAX_REQUEST_BYTES TRUST_GATEWAY_AUTH CONTROLLER_TIMEOUT_S; do
+  _migrate_env_key "SYSIBLE_FLASHBACK_$_k" "SYSIBLE_BASELINE_$_k"
+done
+_migrate_env_key SLOP_FLASHBACK_UPSTREAM SLOP_BASELINE_UPSTREAM
+
 # _app_compose_dir DIR — echo the directory that holds the app's compose file
 # (its own root, or a deploy/ subdir), matching how sysiblectl finds it. That is
 # the directory docker compose loads .env from, so it's where the SSO env must live.
@@ -292,7 +333,7 @@ export SYSIBLE_SSO_SHARED_SECRET="$SSO_SECRET"
 # The updater holds the host's DOCKER SOCKET — root-equivalent — and it is the one
 # component whose whole job is to run privileged commands on the host. Every other
 # service on this network carries SYSIBLE_SSO_SHARED_SECRET, so authenticating the
-# updater with that same value made a flaw in ANY of them (Flashback, the
+# updater with that same value made a flaw in ANY of them (Baseline, the
 # Visualizer, the gateway) a one-hop path to the socket: read the secret out of
 # your own environment, POST to updater:8080, done. This secret is known only to
 # the IdP and the updater, so that hop no longer exists.
@@ -315,17 +356,22 @@ if [ -z "$UPD_SECRET" ]; then
 fi
 export SYSIBLE_UPDATER_SECRET="$UPD_SECRET"
 
-# ---- Flashback agent token (one per install; persisted in this repo's .env) ----
-# Flashback's snapshot-ingest and restore endpoints are authenticated by a bearer
+# ---- Baseline agent token (one per install; persisted in this repo's .env) ----
+# Baseline's snapshot-ingest and restore endpoints are authenticated by a bearer
 # token, and they FAIL CLOSED when it is unset — so without this, config backups
 # silently never happen and the console stays on "No host has reported a config
 # backup yet". Minted here exactly like the SSO secret, and handed to the
 # Controller below, which is the only thing that talks to those endpoints.
+# BOTH spellings, and the old one is not optional. If an upgrade failed to find
+# the existing token it would mint a FRESH one — and the token is what every
+# host's config backup authenticates with. The console would go quiet across the
+# whole fleet, with both halves looking correctly configured.
 _fb_token_from_env() {
   [ -f "$ENV_FILE" ] || return 0
-  sed -n 's/^SYSIBLE_FLASHBACK_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+  sed -n 's/^SYSIBLE_BASELINE_AGENT_TOKEN=\(..*\)$/\1/p
+          s/^SYSIBLE_FLASHBACK_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
 }
-FB_TOKEN="${SYSIBLE_FLASHBACK_AGENT_TOKEN:-$(_fb_token_from_env || true)}"
+FB_TOKEN="${SYSIBLE_BASELINE_AGENT_TOKEN:-${SYSIBLE_FLASHBACK_AGENT_TOKEN:-$(_fb_token_from_env || true)}}"
 if [ -z "$FB_TOKEN" ]; then
   FB_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # Same reasoning as the SSO secret: /bin/sh has no pipefail, so a partial
@@ -333,20 +379,21 @@ if [ -z "$FB_TOKEN" ]; then
   # AND write access to every host's stored configuration, so refuse anything
   # that is not the full 64 hex chars rather than shipping a weak one.
   case "$FB_TOKEN" in
-    *[!0-9a-f]* | "") die "failed to generate a valid Flashback agent token (need 64 hex chars)." ;;
+    *[!0-9a-f]* | "") die "failed to generate a valid Baseline agent token (need 64 hex chars)." ;;
   esac
-  [ "${#FB_TOKEN}" -eq 64 ] || die "generated Flashback agent token is not 64 hex chars (got ${#FB_TOKEN})."
-  _upsert_env SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
-  say "Generated a Flashback agent token into $ENV_FILE"
+  [ "${#FB_TOKEN}" -eq 64 ] || die "generated Baseline agent token is not 64 hex chars (got ${#FB_TOKEN})."
+  _upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$FB_TOKEN"
+  say "Generated a Baseline agent token into $ENV_FILE"
 fi
-export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"
-# Where the Controller reaches Flashback's agent API: the loopback port the
+export SYSIBLE_BASELINE_AGENT_TOKEN="$FB_TOKEN"
+export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"   # pre-rebrand name, for an older Controller
+# Where the Controller reaches Baseline's agent API: the loopback port the
 # compose file publishes (see docker-compose.yml). Overridable for a split host.
 # host.docker.internal, NOT 127.0.0.1: the Controller runs in a container here,
 # and inside it loopback is the container itself. Its compose maps that name to
 # the host gateway. Override for a Controller on a different machine.
-FB_URL="${SYSIBLE_FLASHBACK_URL:-http://host.docker.internal:${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}"
-# ...and the address Flashback must LISTEN on for that to be reachable. These two
+FB_URL="${SYSIBLE_BASELINE_URL:-${SYSIBLE_FLASHBACK_URL:-http://host.docker.internal:${SYSIBLE_BASELINE_AGENT_PORT:-${SYSIBLE_FLASHBACK_AGENT_PORT:-8770}}}}"
+# ...and the address Baseline must LISTEN on for that to be reachable. These two
 # lines are one decision and were previously made in two places that disagreed:
 # this file said "the Controller runs in a container", docker-compose.yml said it
 # "runs on the host" and bound the agent port to 127.0.0.1. The compose half won
@@ -361,13 +408,14 @@ _bridge_gateway() {
     -f '{{ range .IPAM.Config }}{{ .Gateway }}{{ end }}' 2>/dev/null \
     | awk '{print $1}'
 }
-FB_BIND="${SYSIBLE_FLASHBACK_AGENT_BIND:-}"
+FB_BIND="${SYSIBLE_BASELINE_AGENT_BIND:-${SYSIBLE_FLASHBACK_AGENT_BIND:-}}"
 if [ -z "$FB_BIND" ]; then
   FB_BIND="$(_bridge_gateway)"
   [ -n "$FB_BIND" ] || FB_BIND="172.17.0.1"
 fi
-export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"
-_upsert_kv "$ENV_FILE" SYSIBLE_FLASHBACK_AGENT_BIND "$FB_BIND" 2>/dev/null || true
+export SYSIBLE_BASELINE_AGENT_BIND="$FB_BIND"
+export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"   # pre-rebrand name
+_upsert_kv "$ENV_FILE" SYSIBLE_BASELINE_AGENT_BIND "$FB_BIND" 2>/dev/null || true
 
 # Where THIS checkout lives. The updater sidecar bind-mounts it (docker-compose.yml)
 # so SLOP can be updated from its own Administration page, and the mount target has
@@ -430,13 +478,13 @@ if [ "$WANT_APPS" -eq 1 ]; then
       _upsert_kv "$_aenv" SYSIBLE_SSO_SHARED_SECRET "$SSO_SECRET"
       _upsert_kv "$_aenv" "$trust" 1
       _upsert_kv "$_aenv" SYSIBLE_BASE_PATH "/$p/"
-      # The Controller relays its agents' config snapshots to Flashback, so it —
+      # The Controller relays its agents' config snapshots to Baseline, so it —
       # and only it — needs the agent token. Persisted here for the same reason
       # as the SSO secret: otherwise it lives only in this run's ambient env and
       # the next `docker compose up -d` brings the Controller back without it.
       if [ "$p" = "controller" ]; then
-        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_URL "$FB_URL"
-        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+        _upsert_kv "$_aenv" SYSIBLE_BASELINE_URL "$FB_URL"
+        _upsert_kv "$_aenv" SYSIBLE_BASELINE_AGENT_TOKEN "$FB_TOKEN"
       fi
       if [ "$p" = "connect" ] && [ -n "$HOST_ADDR" ]; then
         _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
@@ -450,7 +498,7 @@ if [ "$WANT_APPS" -eq 1 ]; then
       #
       # Bound to the docker bridge gateway, which is how Caddy reaches them
       # (host.docker.internal) — reachable from this host and its containers, not
-      # from the network. Exactly what the Flashback agent port already does, and
+      # from the network. Exactly what the Baseline agent port already does, and
       # what connect's own compose comment has always said the installer would do.
       #
       # NOT the Controller's :9000. That is the agent/CLI API and managed hosts on

@@ -1,6 +1,6 @@
-"""Sysible Flashback — request identity + authorization.
+"""Sysible Baseline — request identity + authorization.
 
-Flashback is a SLOP module: in production it sits behind the SLOP Caddy gateway,
+Baseline is a SLOP module: in production it sits behind the SLOP Caddy gateway,
 which authenticates the browser at the shared IdP and stamps every proxied request
 with the caller's identity plus a shared-secret proof:
 
@@ -8,15 +8,15 @@ with the caller's identity plus a shared-secret proof:
     X-Sysible-Role: <role>          role in {superuser, operator, auditor}
     X-Sysible-Auth: <shared secret> proves the request came through the gateway
 
-TRUST BOUNDARY: in gateway mode Flashback is reachable ONLY through the gateway,
+TRUST BOUNDARY: in gateway mode Baseline is reachable ONLY through the gateway,
 which stamps X-Sysible-Auth with the shared secret on every request it forwards. A
-browser hitting Flashback directly can't know that secret, so it can never spoof an
+browser hitting Baseline directly can't know that secret, so it can never spoof an
 identity — the constant-time secret match IS the boundary.
 
 Agents (the capture/restore side) are not browsers and never carry an SSO session;
 they authenticate to the ingest/restore endpoints with a bearer agent token.
 
-Standalone/dev (no gateway configured): Flashback falls back to a single local
+Standalone/dev (no gateway configured): Baseline falls back to a single local
 identity so it's usable on a laptop. This is UNAUTHENTICATED — only for a trusted
 local run — and a warning is logged at startup, mirroring the other CE modules'
 "trust off by default" posture.
@@ -26,16 +26,18 @@ from __future__ import annotations
 import hmac
 import os
 
+from . import env
+
 # ---- gateway SSO trust -----------------------------------------------------
-_TRUST_GATEWAY = os.getenv("SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH", "0") == "1"
+_TRUST_GATEWAY = env.getenv("TRUST_GATEWAY_AUTH", "0") == "1"
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 
 # ---- agent bearer token (capture + restore polling) ------------------------
-_AGENT_TOKEN = os.getenv("SYSIBLE_FLASHBACK_AGENT_TOKEN", "")
+_AGENT_TOKEN = env.getenv("AGENT_TOKEN", "")
 
 # ---- standalone/dev fallback identity --------------------------------------
-_LOCAL_USER = os.getenv("SYSIBLE_FLASHBACK_LOCAL_USER", "local")
-_LOCAL_ROLE = os.getenv("SYSIBLE_FLASHBACK_LOCAL_ROLE", "superuser")
+_LOCAL_USER = env.getenv("LOCAL_USER", "local")
+_LOCAL_ROLE = env.getenv("LOCAL_ROLE", "superuser")
 
 ROLES = ("superuser", "operator", "auditor")
 # Only these may take state-changing actions (queue a restore). 'auditor' is
@@ -79,10 +81,17 @@ def agent_configured() -> bool:
 #
 # So say so at startup rather than letting an override be a quiet cliff.
 def _warn_if_agent_port_is_wide_open() -> None:
-    bind = (os.getenv("SYSIBLE_FLASHBACK_AGENT_BIND", "") or "").strip()
+    bind = (env.getenv("AGENT_BIND", "") or "").strip()
     if bind in ("0.0.0.0", "::", "*"):
+        # Name the variable the operator ACTUALLY set. After the rebrand both
+        # spellings work, so a message that quotes the canonical name at someone
+        # who set the legacy one sends them hunting for a line that isn't in
+        # their .env.
+        import os
+        var = next((n for n in env.names("AGENT_BIND") if n in os.environ),
+                   env.PREFIX + "AGENT_BIND")
         print(
-            "[flashback] SYSIBLE_FLASHBACK_AGENT_BIND=" + bind + " publishes the agent "
+            "[baseline] " + var + "=" + bind + " publishes the agent "
             "endpoint on EVERY interface. That endpoint takes host_id from the caller "
             "and authenticates with one fleet-wide token, so anything that obtains the "
             "token can write any host's config history and read restore payloads queued "
@@ -106,7 +115,16 @@ def agent_auth_ok(request) -> bool:
     if sent.lower().startswith("bearer "):
         sent = sent[7:].strip()
     else:
-        sent = request.headers.get("x-sysible-flashback-agent", "").strip()
+        # The non-Authorization fallback header, under both spellings. The
+        # Controller is the only client, and Controller and Baseline are
+        # SEPARATE deployments on separate upgrade schedules: a Controller
+        # still sending x-sysible-flashback-agent must keep authenticating
+        # against a rebranded Baseline, or config backup stops fleet-wide at
+        # the moment one half is updated and the other is not.
+        for name in ("x-sysible-baseline-agent", "x-sysible-flashback-agent"):
+            sent = (request.headers.get(name) or "").strip()
+            if sent:
+                break
     return bool(sent) and hmac.compare_digest(sent, _AGENT_TOKEN)
 
 
@@ -131,24 +149,24 @@ def current(request) -> Identity | None:
 def deny_reason(request) -> tuple[str, str]:
     """Why current() refused, as (code, operator-facing sentence).
 
-    A browser that lands on Flashback and is told only "Not signed in." has no way
+    A browser that lands on Baseline and is told only "Not signed in." has no way
     to tell a direct hit apart from a misconfigured gateway, so this names the
     actual failure. It deliberately reveals NOTHING secret: whether a proof header
     was PRESENT is not the secret's value, and someone who can't produce the secret
     learns nothing they couldn't learn by trying. Each case maps to one fix.
     """
     if not gateway_configured():
-        return ("open", "Flashback is running in unauthenticated local mode.")
+        return ("open", "Baseline is running in unauthenticated local mode.")
     proof = request.headers.get("x-sysible-auth", "")
     if not proof:
         return ("no-proof",
                 "This request carried no gateway proof header. Either you reached "
-                "Flashback directly (it is only meant to be used through the SLOP "
-                "gateway at /flashback/), or the gateway is not stamping this route.")
+                "Baseline directly (it is only meant to be used through the SLOP "
+                "gateway at /baseline/), or the gateway is not stamping this route.")
     if not hmac.compare_digest(proof, _SSO_SECRET):
         return ("bad-proof",
                 "The gateway's proof header did not match. SYSIBLE_SSO_SHARED_SECRET "
-                "differs between the gateway and Flashback — set the same value for "
+                "differs between the gateway and Baseline — set the same value for "
                 "both (it lives in the SLOP .env) and recreate both containers.")
     user = (request.headers.get("x-sysible-user") or "").strip()
     role = (request.headers.get("x-sysible-role") or "").strip().lower()
@@ -165,6 +183,6 @@ def deny_reason(request) -> tuple[str, str]:
 
 def startup_notice() -> str:
     if gateway_configured():
-        return "Flashback: SSO gateway trust ON — identity taken from the SLOP gateway."
-    return ("Flashback: SSO gateway trust OFF — running in UNAUTHENTICATED local mode "
+        return "Baseline: SSO gateway trust ON — identity taken from the SLOP gateway."
+    return ("Baseline: SSO gateway trust OFF — running in UNAUTHENTICATED local mode "
             f"as '{_LOCAL_USER}' ({_LOCAL_ROLE}). Do not expose this on a network.")

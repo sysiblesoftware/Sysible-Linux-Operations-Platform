@@ -1,4 +1,4 @@
-"""The updater had no cap on the request body while Flashback and the Visualizer
+"""The updater had no cap on the request body while Baseline and the Visualizer
 both did.
 
 This service holds the host's Docker socket, so it is the one most worth making

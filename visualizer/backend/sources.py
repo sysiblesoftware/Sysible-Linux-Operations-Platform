@@ -19,7 +19,7 @@ retried with a stronger identity.
 
 TLS: the three fronted apps serve self-signed certs on the host (the same reason
 the gateway uses tls_insecure_skip_verify on those hops), so verification is off
-for them; flashback/visualizer are plain HTTP on the internal network.
+for them; baseline/visualizer are plain HTTP on the internal network.
 """
 from __future__ import annotations
 
@@ -39,7 +39,11 @@ from . import fleet
 _CONTROLLER = os.getenv("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800")
 _SLEP = os.getenv("SLOP_SLEP_UPSTREAM", "host.docker.internal:8810")
 _CONNECT = os.getenv("SLOP_CONNECT_UPSTREAM", "host.docker.internal:8700")
-_FLASHBACK = os.getenv("SLOP_FLASHBACK_UPSTREAM", "flashback:8080")
+# New name first, pre-rebrand name honoured: an operator who pinned the old
+# variable must not have it silently ignored.
+_BASELINE = (os.getenv("SLOP_BASELINE_UPSTREAM")
+             or os.getenv("SLOP_FLASHBACK_UPSTREAM")
+             or "baseline:8080")
 
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 _TIMEOUT = float(os.getenv("SYSIBLE_VISUALIZER_TIMEOUT_S", "8"))
@@ -99,8 +103,15 @@ SOURCES = ("user", "api", "automation")
 
 # Actor names that are a SERVICE, not a person. These are the identities the apps
 # stamp on their own background work (health sweeps, agent check-ins, schedulers).
+# "flashback" STAYS alongside "baseline". These are matched against actor names
+# in rows that are ALREADY STORED. Baseline used to log its relayed captures as
+# actor "flashback", and those rows are history — dropping the old spelling would
+# reclassify every config-backup event the fleet ever recorded from "automation"
+# to a named human, because an actor this set does not recognise is taken to be
+# a person.
 _SERVICE_ACTORS = {"", "-", "controller", "agent", "system", "systemd",
-                   "scheduler", "cron", "sysible", "slep", "flashback"}
+                   "scheduler", "cron", "sysible", "slep",
+                   "baseline", "flashback"}
 
 
 def _source_for(actor, given=None) -> str:
@@ -225,8 +236,8 @@ def _connect(identity, limit: int) -> dict:
     return {"events": events, "errors": [], "notes": []}
 
 
-def _flashback(identity, limit: int) -> dict:
-    data, err = _get(_url(_FLASHBACK, "http") + "/api/audit", identity, {"limit": limit})
+def _baseline(identity, limit: int) -> dict:
+    data, err = _get(_url(_BASELINE, "http") + "/api/audit", identity, {"limit": limit})
     if err:
         return {"events": [], "errors": [f"audit: {err}"], "notes": []}
     events = [_ev(e.get("ts"), e.get("actor"), e.get("action"),
@@ -240,7 +251,7 @@ APPS: dict[str, tuple] = {
     "controller": ("Sysible Controller", _controller),
     "slep": ("Sysible Linux Engineering Platform", _slep),
     "connect": ("Sysible Connect", _connect),
-    "flashback": ("Sysible Flashback", _flashback),
+    "baseline": ("Sysible Baseline", _baseline),
 }
 
 
