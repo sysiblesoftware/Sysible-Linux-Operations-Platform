@@ -392,7 +392,7 @@ def test_an_action_and_an_update_cannot_run_at_once(env, client, monkeypatch):
 # THE SECRET THAT IS NOT THE PLATFORM SECRET.
 #
 # This service holds the host's Docker socket. Every other service on the compose
-# network — Baseline, the Visualizer, the gateway — carries
+# network — Flashback, the Visualizer, the gateway — carries
 # SYSIBLE_SSO_SHARED_SECRET in its own environment, so authenticating this one
 # with that same value made a flaw in ANY of them exactly one hop from a root
 # shell: read your own env, POST to updater:8080, done.

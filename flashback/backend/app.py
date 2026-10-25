@@ -1,10 +1,10 @@
-"""Sysible Baseline — the standalone SLOP module (FastAPI service).
+"""Sysible Flashback — the standalone SLOP module (FastAPI service).
 
 A config "time machine": host agents POST snapshots of their tracked config files;
-Baseline stores every CHANGED version content-deduplicated, and lets an operator
+Flashback stores every CHANGED version content-deduplicated, and lets an operator
 browse each host's files, diff any two versions, download one, or restore one
 (queued for the host's agent to write back). Fronted by the SLOP gateway at
-/baseline with the shared SSO identity; agents authenticate with a bearer token.
+/flashback with the shared SSO identity; agents authenticate with a bearer token.
 
 Endpoints
   Browser (SSO identity via the gateway; auditor read-only):
@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from . import controller, env, identity, store, ui
 
-app = FastAPI(title="Sysible Baseline", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Sysible Flashback", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 # Bound request bodies: snapshots carry file content, so an unbounded POST could
@@ -103,6 +103,12 @@ async def _security_headers(request: Request, call_next):
 @app.on_event("startup")
 def _startup() -> None:
     identity._warn_if_agent_port_is_wide_open()
+    # Settings left under the short-lived SYSIBLE_BASELINE_* spelling are not
+    # read, and the default agent token is empty, which fails closed. A service
+    # that backs nothing up while looking healthy is the failure this prevents.
+    orphans = env.warn_about_orphans()
+    if orphans:
+        print(orphans, flush=True)
     store.init_db()
     print(identity.startup_notice(), flush=True)
 
@@ -122,7 +128,7 @@ async def _http_error(request: Request, exc: HTTPException):
 
     A browser that follows the portal tile and gets a bare
     `{"detail":"Not signed in."}` has no way to tell a direct hit apart from a
-    gateway that isn't stamping identity — it just looks like "Baseline does
+    gateway that isn't stamping identity — it just looks like "Flashback does
     nothing". On 401/403 a navigation gets the diagnostic page instead, naming
     which wiring fault occurred (identity.deny_reason leaks nothing secret).
     API and agent callers keep the JSON contract unchanged.
@@ -160,8 +166,8 @@ def _require_agent(request: Request) -> None:
         # operator gets wrong when nothing ever appears in the console.
         raise HTTPException(
             status_code=503,
-            detail="Baseline has no agent token configured, so it cannot accept "
-                   "snapshots. Set SYSIBLE_BASELINE_AGENT_TOKEN on this service "
+            detail="Flashback has no agent token configured, so it cannot accept "
+                   "snapshots. Set SYSIBLE_FLASHBACK_AGENT_TOKEN on this service "
                    "and give the same value to the Controller.")
     raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
@@ -181,7 +187,7 @@ def favicon() -> Response:
     for the REFUSAL page too, which is served to callers who have no identity yet
     — and an icon is not a secret. The pages reference it RELATIVELY, so it
     resolves under whatever prefix the gateway serves this app at
-    (/baseline/favicon.svg) and standalone at the root alike."""
+    (/flashback/favicon.svg) and standalone at the root alike."""
     return Response(
         content=ui.FAVICON_SVG,
         media_type="image/svg+xml",
@@ -191,7 +197,7 @@ def favicon() -> Response:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "service": "baseline"}
+    return {"status": "ok", "service": "flashback"}
 
 
 @app.get("/api/whoami")
@@ -241,7 +247,7 @@ def api_hosts(request: Request) -> dict:
         h["capture_capable"] = bool(h.get("backed_up")) or bool(capable.get(h["host_id"]))
         h["online"] = onlines.get(h["host_id"])
     hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
-    # When the CONTROLLER itself has no Baseline wiring, no host can ever
+    # When the CONTROLLER itself has no Flashback wiring, no host can ever
     # capture and the per-host signal is meaningless — every agent reads as a
     # stale build. Say that once, at the top, and suppress the per-host verdict
     # rather than sending the operator to update agents that are already current.
@@ -265,15 +271,15 @@ def api_compare_paths(request: Request) -> dict:
 
 @app.get("/api/compare")
 def api_compare(request: Request, path: str = Query(...),
-                baseline: str = Query(default="")) -> dict:
+                flashback: str = Query(default="")) -> dict:
     """Is this file the same across the fleet? Compared by content hash against
-    a baseline host, so it is a lookup rather than a diff of every pair."""
+    a flashback host, so it is a lookup rather than a diff of every pair."""
     who = _require_identity(request)
-    out = store.compare_path(path, baseline or None)
+    out = store.compare_path(path, flashback or None)
     # "No copy stored" must cover the whole FLEET, not just hosts that already
     # have some history. A host enrolled but never captured is exactly the one an
     # operator needs to see here, and the store cannot know about it.
-    have = {out["baseline"]["host_id"]} if out.get("baseline") else set()
+    have = {out["flashback"]["host_id"]} if out.get("flashback") else set()
     have |= {h["host_id"] for h in out.get("hosts") or []}
     fleet, _note, _cb = controller.list_hosts(who)
     known = {m["host_id"] for m in out.get("missing") or []}
@@ -327,7 +333,7 @@ def api_backup_now_many(request: Request, body: dict = Body(default=None)) -> di
     # — each captures on its next check-in", which the console renders as an
     # ordinary status line because the HTTP call succeeded. Pressing "Back up all"
     # against a Controller that is down therefore looked calm and reassuring while
-    # backing up precisely nothing — the whole of "Baseline isn't backing things
+    # backing up precisely nothing — the whole of "Flashback isn't backing things
     # up". A batch in which every host failed is a failed request, and has to
     # arrive as one.
     if failed and not ok:
@@ -508,8 +514,8 @@ def agent_restore_payload(request: Request, restore_id: int, host_id: str = Quer
             # that misses the path and digest silently writes the wrong file or
             # refuses the restore. Sending two headers costs ~70 bytes; getting
             # this wrong corrupts a config file on a machine nobody is watching.
-            "X-Baseline-Path": meta["path"],
-            "X-Baseline-Sha256": meta["sha256"],
+            "X-Flashback-Path": meta["path"],
+            "X-Flashback-Sha256": meta["sha256"],
             "X-Flashback-Path": meta["path"],
             "X-Flashback-Sha256": meta["sha256"],
             "Content-Disposition": 'attachment; filename="restore.bin"',

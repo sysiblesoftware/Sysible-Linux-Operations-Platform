@@ -286,11 +286,35 @@ _migrate_env_key() {
   fi
 }
 
-for _k in AGENT_TOKEN AGENT_BIND AGENT_PORT KEEP URL DATA DB LOCAL_USER \
-          LOCAL_ROLE MAX_REQUEST_BYTES TRUST_GATEWAY_AUTH CONTROLLER_TIMEOUT_S; do
-  _migrate_env_key "SYSIBLE_FLASHBACK_$_k" "SYSIBLE_BASELINE_$_k"
-done
-_migrate_env_key SLOP_FLASHBACK_UPSTREAM SLOP_BASELINE_UPSTREAM
+# ---- undo the two-day Baseline rename, ONCE ---------------------------------
+# Flashback was briefly renamed Sysible Baseline, and an earlier build of this
+# installer migrated these keys to SYSIBLE_BASELINE_*. That rename is undone,
+# and the name Baseline now belongs to a DIFFERENT product in this same stack —
+# the Salt-driven config manager, which owns SYSIBLE_BASELINE_* for itself.
+#
+# So this migration runs in reverse, and it runs EXACTLY ONCE. After that, a
+# SYSIBLE_BASELINE_AGENT_TOKEN in this file is the config manager's token and
+# moving it would break that service instead. The marker below is what makes
+# the difference between "a stray from the rename" and "another product's
+# setting", and there is no way to tell them apart by inspection.
+_FB_REVERT_MARK=SYSIBLE_FLASHBACK_UNRENAMED
+if ! grep -q "^${_FB_REVERT_MARK}=1$" "$ENV_FILE" 2>/dev/null; then
+  for _k in AGENT_TOKEN AGENT_BIND AGENT_PORT KEEP URL DATA DB LOCAL_USER \
+            LOCAL_ROLE MAX_REQUEST_BYTES TRUST_GATEWAY_AUTH CONTROLLER_TIMEOUT_S; do
+    _migrate_env_key "SYSIBLE_BASELINE_$_k" "SYSIBLE_FLASHBACK_$_k"
+  done
+  _migrate_env_key SLOP_BASELINE_UPSTREAM SLOP_FLASHBACK_UPSTREAM
+  # Only mark it once there is a file to mark; a first install has nothing to
+  # migrate and should not be stamped as though it did.
+  #
+  # `if/fi`, NOT `[ -f ... ] && ...`. This runs under `set -eu`, and an AND-list
+  # whose test fails is the last command in this block — so on a FIRST INSTALL,
+  # where there is no .env yet, the block exits 1 and takes the whole installer
+  # down with it. Found by a test asserting the first-install path exits 0.
+  if [ -f "$ENV_FILE" ]; then
+    _upsert_env "$_FB_REVERT_MARK" 1
+  fi
+fi
 
 # _app_compose_dir DIR — echo the directory that holds the app's compose file
 # (its own root, or a deploy/ subdir), matching how sysiblectl finds it. That is

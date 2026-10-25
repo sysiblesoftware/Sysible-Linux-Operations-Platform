@@ -78,7 +78,7 @@ def current(request) -> Identity | None:
 
 def deny_reason(request) -> tuple[str, str]:
     """Why current() refused, as (code, operator-facing sentence). Mirrors
-    Baseline's: it names the wiring fault and reveals nothing secret."""
+    Flashback's: it names the wiring fault and reveals nothing secret."""
     if not gateway_configured():
         return ("open", "Visualizer is running in unauthenticated local mode.")
     proof = request.headers.get("x-sysible-auth", "")

@@ -1,4 +1,4 @@
-"""Sysible Baseline — the versioned, content-addressed config store.
+"""Sysible Flashback — the versioned, content-addressed config store.
 
 A standalone store (stdlib sqlite3, no ORM) that keeps a time machine of every
 managed host's config files:
@@ -39,7 +39,7 @@ _DATA_DIR = env.getenv("DATA", "/data")
 # lives in the `flashback-data` volume, which keeps its name for the same
 # reason. Renaming either would not migrate the history — it would hide it, and
 # the console would come up pristine and empty on a fleet with years of
-# captures, which reads exactly like "Baseline deleted everything".
+# captures, which reads exactly like "Flashback deleted everything".
 #
 # Nobody sees this name: it is a file inside a Docker volume. The rebrand is for
 # the humans, and no human reads this path.
@@ -334,7 +334,7 @@ def recent_restores(host_id: str, limit: int = 50) -> list[dict]:
 # operator actually arrives with after an incident is the other one: this box
 # behaves differently, is its config different from the rest? That needs the
 # NEWEST stored version of one path on every host that has it, compared against a
-# chosen baseline. It is the capability the EE panel has and this did not.
+# chosen flashback. It is the capability the EE panel has and this did not.
 # --------------------------------------------------------------------------- #
 def paths_across_hosts(limit: int = 500) -> list[dict]:
     """Every tracked path, with how many hosts have it — the picker for a
@@ -357,10 +357,10 @@ def newest_version(host_id: str, path: str) -> dict | None:
         return dict(r) if r else None
 
 
-def compare_path(path: str, baseline: str | None = None) -> dict:
+def compare_path(path: str, flashback: str | None = None) -> dict:
     """Compare the newest stored version of `path` across every host that has it.
 
-    Returns the baseline plus one row per other host saying whether it matches,
+    Returns the flashback plus one row per other host saying whether it matches,
     differs, or has no copy at all. Comparison is by CONTENT HASH, so it is a
     cheap lookup rather than a diff of every pair — the diff is fetched only for
     the host an operator actually opens.
@@ -375,20 +375,20 @@ def compare_path(path: str, baseline: str | None = None) -> dict:
                                ORDER BY v2.captured_at DESC, v2.id DESC LIMIT 1)
                 ORDER BY h.label COLLATE NOCASE""", (path,)).fetchall()
         newest = [dict(r) for r in rows]
-        # Hosts Baseline knows about that have NO version of this path at all.
+        # Hosts Flashback knows about that have NO version of this path at all.
         known = c.execute("SELECT host_id, label FROM hosts").fetchall()
     have = {r["host_id"] for r in newest}
     if not newest:
-        return {"path": path, "baseline": None, "hosts": [], "missing": [],
+        return {"path": path, "flashback": None, "hosts": [], "missing": [],
                 "distinct": 0}
-    # DEFAULT BASELINE = the MAJORITY content, not the alphabetically-first host.
+    # DEFAULT FLASHBACK = the MAJORITY content, not the alphabetically-first host.
     # Picking by name made the single odd host the reference whenever its label
     # sorted first, so the hosts that agreed were the ones reported as
     # "differing" — backwards, and the diff read inverted too. The majority is
     # what an operator means by "the rest of the fleet"; ties break by label so
     # the choice is still deterministic.
-    if baseline:
-        base = next((r for r in newest if r["host_id"] == baseline), None)
+    if flashback:
+        base = next((r for r in newest if r["host_id"] == flashback), None)
     else:
         base = None
     if base is None:
@@ -407,7 +407,7 @@ def compare_path(path: str, baseline: str | None = None) -> dict:
                for k in known if k["host_id"] not in have]
     return {
         "path": path,
-        "baseline": base,
+        "flashback": base,
         "hosts": out,
         "missing": sorted(missing, key=lambda m: (m["label"] or "").lower()),
         # How many genuinely different contents exist across the fleet. 1 means

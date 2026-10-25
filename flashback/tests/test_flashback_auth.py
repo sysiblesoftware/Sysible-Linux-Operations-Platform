@@ -1,6 +1,6 @@
-"""Sysible Baseline — the gateway trust boundary and how it REFUSES.
+"""Sysible Flashback — the gateway trust boundary and how it REFUSES.
 
-Baseline has no login of its own: it trusts the identity the SLOP gateway stamps,
+Flashback has no login of its own: it trusts the identity the SLOP gateway stamps,
 guarded by a shared secret. These tests pin both halves of that:
 
   * the boundary itself — a request without the secret is never authenticated,
@@ -9,7 +9,7 @@ guarded by a shared secret. These tests pin both halves of that:
     {"detail":"Not signed in."} made the portal tile look simply broken), while API
     and agent callers keep the JSON contract. The page must never echo the secret.
 
-Run: pip install -r ../requirements.txt pytest ; pytest   (from the baseline/ dir)
+Run: pip install -r ../requirements.txt pytest ; pytest   (from the flashback/ dir)
 """
 import importlib
 import os
@@ -33,9 +33,9 @@ def cl(tmp_path):
     from starlette.testclient import TestClient
 
     os.environ.update(
-        SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="1",
+        SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
         SYSIBLE_SSO_SHARED_SECRET=SECRET,
-        SYSIBLE_BASELINE_DATA=str(tmp_path),
+        SYSIBLE_FLASHBACK_DATA=str(tmp_path),
     )
     for mod in ("backend.identity", "backend.store", "backend.app"):
         if mod in sys.modules:
@@ -110,7 +110,7 @@ def test_the_refusal_never_echoes_the_secret(cl):
 
 def test_signed_in_browser_gets_the_console(cl):
     r = cl.get("/", headers={**BROWSER, **GOOD})
-    assert r.status_code == 200 and "Sysible <b>Baseline</b>" in r.text
+    assert r.status_code == 200 and "Sysible <b>Flashback</b>" in r.text
 
 
 def test_health_stays_open_for_the_portal_dot(cl):
@@ -129,9 +129,9 @@ def test_the_console_declares_a_tab_icon(cl):
 
 
 def test_the_icon_href_is_relative_so_it_survives_the_gateway_prefix(cl):
-    """The gateway serves this app under /baseline and STRIPS the prefix. An
+    """The gateway serves this app under /flashback and STRIPS the prefix. An
     absolute href would resolve to the portal's root and 404; a relative one
-    resolves to /baseline/favicon.svg and reaches us."""
+    resolves to /flashback/favicon.svg and reaches us."""
     html = cl.get("/", headers={**GOOD, **BROWSER}).text
     assert "href='/favicon.svg'" not in html
     assert "href='favicon.svg'" in html
@@ -145,12 +145,12 @@ def test_the_refusal_page_carries_the_icon_too(cl):
     assert "favicon.svg" in r.text
 
 
-def test_the_icon_is_served_and_is_the_baseline_mark(cl):
+def test_the_icon_is_served_and_is_the_flashback_mark(cl):
     r = cl.get("/favicon.svg")
     assert r.status_code == 200
     assert "image/svg+xml" in r.headers["content-type"]
-    # The canonical mark from portal/marks/baseline.svg, not some other app's.
-    assert 'aria-label="Sysible Baseline"' in r.text
+    # The canonical mark from portal/marks/flashback.svg, not some other app's.
+    assert 'aria-label="Sysible Flashback"' in r.text
     assert "#6ddb73" in r.text                     # the family's brand-green ring
 
 
@@ -174,7 +174,7 @@ def test_agent_endpoints_are_closed_when_no_token_is_configured(cl, monkeypatch)
     assert r.status_code == 503
     # ...and it says WHICH fault, so a blank token is diagnosable rather than
     # looking identical to a wrong one.
-    assert "SYSIBLE_BASELINE_AGENT_TOKEN" in r.json()["detail"]
+    assert "SYSIBLE_FLASHBACK_AGENT_TOKEN" in r.json()["detail"]
     assert cl.get("/api/agent/restores", params={"host_id": "h"}).status_code == 503
 
 
@@ -251,7 +251,7 @@ def test_the_host_list_still_needs_an_identity(cl):
 # ---- an enrichment must never take the service down ------------------------
 # The host-import module imported httpx at module scope before httpx was in
 # requirements.txt. backend.app imports that module, so the app failed to import,
-# uvicorn never started, and EVERY Baseline page became a 502 at the gateway —
+# uvicorn never started, and EVERY Flashback page became a 502 at the gateway —
 # a feature that only adds rows to a list took the whole service out.
 def test_the_app_still_serves_when_httpx_is_missing(monkeypatch, tmp_path):
     """Simulate the dependency being absent and re-import the app from scratch."""
@@ -266,9 +266,9 @@ def test_the_app_still_serves_when_httpx_is_missing(monkeypatch, tmp_path):
             raise ImportError("simulated: httpx not installed")
         return real_import(name, *a, **kw)
 
-    os.environ.update(SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH="1",
+    os.environ.update(SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="1",
                       SYSIBLE_SSO_SHARED_SECRET=SECRET,
-                      SYSIBLE_BASELINE_DATA=str(tmp_path))
+                      SYSIBLE_FLASHBACK_DATA=str(tmp_path))
     for m in [m for m in list(_sys.modules) if m.startswith("backend")]:
         del _sys.modules[m]
     monkeypatch.setattr(builtins, "__import__", no_httpx)
@@ -423,9 +423,9 @@ def test_compare_finds_the_odd_one_out(cl, monkeypatch):
     _snap(cl, "h1", [("/etc/sshd_config", "Port 22\n")])
     _snap(cl, "h2", [("/etc/sshd_config", "Port 22\n")])
     _snap(cl, "h3", [("/etc/sshd_config", "Port 2222\nPermitRootLogin yes\n")])
-    d = cl.get("/api/compare", params={"path": "/etc/sshd_config", "baseline": "h1"},
+    d = cl.get("/api/compare", params={"path": "/etc/sshd_config", "flashback": "h1"},
                headers=GOOD).json()
-    assert d["baseline"]["host_id"] == "h1"
+    assert d["flashback"]["host_id"] == "h1"
     by = {h["host_id"]: h for h in d["hosts"]}
     assert by["h2"]["same"] is True
     assert by["h3"]["same"] is False
@@ -516,7 +516,7 @@ def test_a_fleet_backup_is_a_write(cl, monkeypatch):
     assert r.status_code == 403
 
 
-def test_the_default_baseline_is_the_majority_not_the_first_by_name(cl, monkeypatch):
+def test_the_default_flashback_is_the_majority_not_the_first_by_name(cl, monkeypatch):
     """Found in a browser: picking the alphabetically-first host made the single
     ODD host the reference whenever its label sorted first, so the two hosts that
     AGREED were reported as "differing" and the diff read inverted. The majority
@@ -525,31 +525,31 @@ def test_the_default_baseline_is_the_majority_not_the_first_by_name(cl, monkeypa
     _snap(cl, "h2", [("/etc/f", "Port 22\n")], label="web2")
     _snap(cl, "h3", [("/etc/f", "Port 2222\n")], label="db1")   # sorts FIRST by label
     d = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
-    assert d["baseline"]["host_id"] in ("h1", "h2"), d["baseline"]
+    assert d["flashback"]["host_id"] in ("h1", "h2"), d["flashback"]
     by = {h["host_id"]: h["same"] for h in d["hosts"]}
     assert by["h3"] is False
     assert all(v for k, v in by.items() if k != "h3")
 
 
-def test_the_majority_baseline_is_deterministic_on_a_tie(cl, monkeypatch):
+def test_the_majority_flashback_is_deterministic_on_a_tie(cl, monkeypatch):
     """Two contents, one host each: the choice must still be stable, or the page
     would flip between reference hosts on every reload."""
     _snap(cl, "h1", [("/etc/f", "a\n")], label="web1")
     _snap(cl, "h2", [("/etc/f", "b\n")], label="db1")
     first = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
     again = cl.get("/api/compare", params={"path": "/etc/f"}, headers=GOOD).json()
-    assert first["baseline"]["host_id"] == again["baseline"]["host_id"] == "h2"   # 'db1' < 'web1'
+    assert first["flashback"]["host_id"] == again["flashback"]["host_id"] == "h2"   # 'db1' < 'web1'
 
 
-def test_an_explicit_baseline_still_wins(cl, monkeypatch):
+def test_an_explicit_flashback_still_wins(cl, monkeypatch):
     """"Differs from prod" and "differs from this one box" are different
     questions, so the operator can override the majority."""
     _snap(cl, "h1", [("/etc/f", "Port 22\n")], label="web1")
     _snap(cl, "h2", [("/etc/f", "Port 22\n")], label="web2")
     _snap(cl, "h3", [("/etc/f", "Port 2222\n")], label="db1")
-    d = cl.get("/api/compare", params={"path": "/etc/f", "baseline": "h3"},
+    d = cl.get("/api/compare", params={"path": "/etc/f", "flashback": "h3"},
                headers=GOOD).json()
-    assert d["baseline"]["host_id"] == "h3"
+    assert d["flashback"]["host_id"] == "h3"
     assert not any(h["same"] for h in d["hosts"])
 
 
@@ -610,11 +610,11 @@ def test_stored_history_proves_capability_whatever_the_controller_says(cl, monke
 #
 # The per-host signal ("this agent has never asked for config-backup work") is
 # only meaningful if the Controller can relay snapshots at all. On a Controller
-# with no Baseline wiring NO agent ever asks, so every row rendered "agent
+# with no Flashback wiring NO agent ever asks, so every row rendered "agent
 # doesn't do config backup — update this host's agent" — and the operator went
 # and updated agents that were already current, which changed nothing.
 # ---------------------------------------------------------------------------
-_CB_OFF = {"configured": False, "reason": "this controller has no Baseline wiring"}
+_CB_OFF = {"configured": False, "reason": "this controller has no Flashback wiring"}
 _CB_ON = {"configured": True, "reason": None}
 
 
@@ -627,7 +627,7 @@ def test_an_unwired_controller_is_reported_once_not_per_host(cl, monkeypatch):
     ], cb=_CB_OFF)
     d = cl.get("/api/hosts", headers=GOOD).json()
     assert d["config_backup_configured"] is False
-    assert "Baseline wiring" in (d["config_backup_reason"] or "")
+    assert "Flashback wiring" in (d["config_backup_reason"] or "")
     # None = unknown. Not False, which the console renders as "update this agent".
     assert [h["capture_capable"] for h in d["hosts"]] == [None, None]
 
@@ -761,7 +761,7 @@ def test_the_console_folds_environments_and_remembers_it(cl):
     page = _console(cl)
     assert "envtoggle" in page
     assert "state.collapsed" in page
-    assert "sysible-baseline-collapsed" in page          # persisted per browser
+    assert "sysible-flashback-collapsed" in page          # persisted per browser
     assert "AUTO_COLLAPSE_HOSTS" in page                  # big fleets start folded
 
 
@@ -782,7 +782,7 @@ def test_selection_boxes_are_withheld_from_a_reader(cl):
 
 
 # ---- a Controller that cannot be USED is blocking, not "unknown" -------------
-# Reported as "Baseline isn't backing things up", and reproduced exactly: with
+# Reported as "Flashback isn't backing things up", and reproduced exactly: with
 # the Controller container down, /api/hosts returned can_request=True and
 # config_backup_configured=None, so the console kept offering "Back up now" and
 # "Back up all" — buttons that could not possibly work — with the explanation

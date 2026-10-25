@@ -26,9 +26,9 @@ from . import env
 
 # DEFENSIVE on purpose. This module is an ENRICHMENT — it makes the console show
 # hosts that have not captured yet — and an enrichment must never be able to stop
-# Baseline serving. Importing httpx at module scope without it being in
+# Flashback serving. Importing httpx at module scope without it being in
 # requirements.txt is exactly what happened: backend.app failed to import,
-# uvicorn never started, and every Baseline page became a 502 at the gateway.
+# uvicorn never started, and every Flashback page became a 502 at the gateway.
 # A missing dependency now disables the host import and reports it as a note.
 try:
     import httpx
@@ -70,7 +70,7 @@ def unavailable_reason() -> str | None:
     """Why the host import is off, when it is off for a reason worth showing."""
     if httpx is None:
         return ("the host list needs httpx, which is not installed in this "
-                "Baseline image — rebuild it (docker compose up -d --build baseline)")
+                "Flashback image — rebuild it (docker compose up -d --build flashback)")
     return None
 
 
@@ -83,7 +83,7 @@ def list_hosts(identity) -> tuple[list, str | None, dict]:
 
     The third value is the CONTROLLER's own wiring — {"configured": bool|None,
     "reason": str|None}. It matters because the per-host signal cannot tell the
-    difference on its own: a Controller with no Baseline wiring makes EVERY agent
+    difference on its own: a Controller with no Flashback wiring makes EVERY agent
     look like a stale build, and the console duly told the operator to go update
     agents that were already current. None means an older Controller that does not
     report it — unknown, not broken.
@@ -99,7 +99,7 @@ def list_hosts(identity) -> tuple[list, str | None, dict]:
         return {"configured": False, "reason": reason}
 
     if not configured():
-        # A standalone Baseline has no Controller to ask and needs no note; a
+        # A standalone Flashback has no Controller to ask and needs no note; a
         # missing dependency is a real fault and gets one.
         return [], unavailable_reason(), unknown
     headers = {

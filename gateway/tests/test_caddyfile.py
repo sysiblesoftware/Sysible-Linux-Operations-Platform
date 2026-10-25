@@ -509,8 +509,8 @@ def test_a_wedged_upstream_answers_instead_of_hanging(tmp_path):
     _threading.Thread(target=_hold, daemon=True).start()
 
     src = open(CADDYFILE, encoding="utf-8").read()
-    block = src[src.index("handle /healthz/baseline"):src.index("handle /healthz/visualizer")]
-    block = block.replace("{$SLOP_BASELINE_UPSTREAM:baseline:8080}",
+    block = src[src.index("handle /healthz/flashback"):src.index("handle /healthz/visualizer")]
+    block = block.replace("{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}",
                           f"127.0.0.1:{sink.getsockname()[1]}")
 
     gw = _socket.socket()
@@ -533,7 +533,7 @@ def test_a_wedged_upstream_answers_instead_of_hanging(tmp_path):
                 _time.sleep(0.1)
         t0 = _time.time()
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz/baseline", timeout=20)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz/flashback", timeout=20)
             code = 200
         except urllib.error.HTTPError as e:
             code = e.code

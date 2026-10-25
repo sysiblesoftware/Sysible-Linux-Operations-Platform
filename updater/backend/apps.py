@@ -23,7 +23,7 @@ ALLOWLIST: dict[str, tuple[str, str, str]] = {
     "slep": ("Sysible Linux Engineering Platform",
              "sysible-linux-engineering-platform", "SYSIBLE_SLEP_DIR"),
     "connect": ("Sysible Connect", "sysible-connect", "SYSIBLE_CONNECT_DIR"),
-    # SLOP itself: the gateway, IdP, Baseline and Visualizer all live in this
+    # SLOP itself: the gateway, IdP, Flashback and Visualizer all live in this
     # one checkout and are rebuilt together, so it is a single entry.
     "slop": ("Sysible Linux Operations Platform", "sysible-linux-operations-platform",
              "SYSIBLE_SLOP_DIR"),

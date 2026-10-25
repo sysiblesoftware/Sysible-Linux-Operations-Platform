@@ -123,7 +123,7 @@ def test_connect_missing_audit_reads_as_a_note(mod):
 
 def test_apps_are_separated_by_app(client):
     keys = [a["key"] for a in client.get("/api/apps", headers=hdr()).json()["apps"]]
-    assert keys == ["controller", "slep", "connect", "baseline"]
+    assert keys == ["controller", "slep", "connect", "flashback"]
 
 
 def test_unknown_app_404s(client):
@@ -344,7 +344,7 @@ def test_an_upstream_source_we_do_not_know_falls_back_to_the_actor(mod):
 
 
 def test_apps_without_a_source_are_classified_by_actor(mod):
-    """Connect/SLEP/Baseline record no source. A named human is a person; a
+    """Connect/SLEP/Flashback record no source. A named human is a person; a
     service identity (or an unattributed row) is the app's own automation."""
     app_mod, sources = mod
 
@@ -372,7 +372,7 @@ def test_every_event_carries_a_known_source(mod):
             return {"runs": [{"id": 1, "created": 1.0, "created_by": "carol",
                               "status": "ok", "kind": "playbook"}]}, None
         # Every app names its rows differently; answer with all the shapes at once
-        # so one fake serves the Controller, SLEP, Connect and Baseline adapters.
+        # so one fake serves the Controller, SLEP, Connect and Flashback adapters.
         return {"activity": [{"id": 2, "timestamp": 2.0, "username": "erin",
                               "description": "restarted nginx"}],
                 "audit": [{"id": 3, "timestamp": 3.0, "username": "frank",

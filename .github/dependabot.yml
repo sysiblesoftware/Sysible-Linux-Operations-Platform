@@ -11,7 +11,7 @@ updates:
     directories:
       - /idp
       - /updater
-      - /baseline
+      - /flashback
       - /visualizer
     schedule:
       interval: weekly
@@ -25,7 +25,7 @@ updates:
     directories:
       - /idp
       - /updater
-      - /baseline
+      - /flashback
       - /visualizer
       - /
     schedule:

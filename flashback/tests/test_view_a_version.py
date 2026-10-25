@@ -19,22 +19,22 @@ UI = open(os.path.join(HERE, "backend", "ui.py"), encoding="utf-8").read()
 def client(tmp_path):
     """Same shape as tests/test_console_actions.py's fixture.
 
-    My first version set BASELINE_DATA_DIR, which this store does not read — it
-    reads SYSIBLE_BASELINE_DATA (backend/store.py). It passed on its own and
+    My first version set FLASHBACK_DATA_DIR, which this store does not read — it
+    reads SYSIBLE_FLASHBACK_DATA (backend/store.py). It passed on its own and
     failed the moment another test file ran first, which is exactly what a wrong
     fixture looks like.
     """
     import importlib
     from starlette.testclient import TestClient
 
-    os.environ["SYSIBLE_BASELINE_DATA"] = str(tmp_path)
-    os.environ.pop("SYSIBLE_BASELINE_DB", None)
-    # Pin the identity mode instead of inheriting it. test_baseline_auth.py leaves
+    os.environ["SYSIBLE_FLASHBACK_DATA"] = str(tmp_path)
+    os.environ.pop("SYSIBLE_FLASHBACK_DB", None)
+    # Pin the identity mode instead of inheriting it. test_flashback_auth.py leaves
     # gateway trust ON, and these modules are reloaded from the live environment —
     # so run after it, this client had no credentials and every call was a 401.
-    os.environ["SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH"] = "0"
+    os.environ["SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH"] = "0"
     os.environ.pop("SYSIBLE_SSO_SHARED_SECRET", None)
-    os.environ["SYSIBLE_BASELINE_LOCAL_ROLE"] = "superuser"
+    os.environ["SYSIBLE_FLASHBACK_LOCAL_ROLE"] = "superuser"
     for mod in ("backend.identity", "backend.store", "backend.app"):
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])

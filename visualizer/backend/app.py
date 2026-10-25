@@ -1,7 +1,7 @@
 """Sysible Visualizer — the SLOP activity & log console.
 
 One place to read what happened across the whole platform, SEPARATED BY APP:
-Controller, SLEP, Connect and Baseline each get their own panel, fed by that
+Controller, SLEP, Connect and Flashback each get their own panel, fed by that
 app's own activity/audit API. Visualizer stores nothing and mutates nothing — it
 is a read-only aggregator that forwards the caller's own SSO identity upstream, so
 each app applies its own role rules to the real human behind the request

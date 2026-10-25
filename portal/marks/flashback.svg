@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Sysible Baseline — canonical mark. Family tile (dark rounded square + thin
-  brand-green ring, see controller.svg); the glyph says what Baseline IS: a
+  Sysible Flashback — canonical mark. Family tile (dark rounded square + thin
+  brand-green ring, see controller.svg); the glyph says what Flashback IS: a
   time machine for config. A brand-green clock face whose hand points BACK,
   wrapped by a blue counter-clockwise arrow — rewind, not just history.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Baseline">
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Flashback">
   <defs>
     <linearGradient id="fb-tile" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>

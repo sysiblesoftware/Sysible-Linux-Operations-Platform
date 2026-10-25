@@ -1,4 +1,4 @@
-# Sysible Baseline — the standalone SLOP module runtime. Deliberately tiny:
+# Sysible Flashback — the standalone SLOP module runtime. Deliberately tiny:
 # almost everything (sqlite3, hashlib, difflib, base64, hmac) is Python stdlib, so
 # the service stays easy to audit.
 #
@@ -8,7 +8,7 @@
 # .py imports it DEFENSIVELY: if it is ever missing, the host import turns itself
 # off and says so, rather than taking the whole service down. It did exactly that
 # once — the import was added here before the dependency was, so uvicorn could
-# not start and the gateway served 502 for every Baseline page.
+# not start and the gateway served 502 for every Flashback page.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1

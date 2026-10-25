@@ -149,7 +149,7 @@
 # ---- same as (appsite), but for a PLAIN-HTTP upstream ----------------------
 # Identical SSO gate + prefix strip + cookie strip as (appsite); the only
 # difference is the upstream speaks plain HTTP inside the private network (e.g.
-# Baseline), so there is no upstream TLS to skip-verify. Same trust boundary: the
+# Flashback), so there is no upstream TLS to skip-verify. Same trust boundary: the
 # gateway strips any client X-Sysible-*, injects identity only from the IdP, and
 # stamps the shared secret AFTER auth. The gateway->app hop is still on the trusted
 # internal network; publish the app port only where that hop can't be interposed.
@@ -268,7 +268,7 @@ sysible.slop {
 		reverse_proxy {$SLOP_IDP_UPSTREAM:idp:8080}
 	}
 	# Shared brand assets — the topographic background every SLOP surface draws
-	# (portal, sign-in, Baseline, Visualizer). PUBLIC on purpose: the sign-in page
+	# (portal, sign-in, Flashback, Visualizer). PUBLIC on purpose: the sign-in page
 	# is the first thing anyone sees and it must be able to load its own
 	# background, which a forward_auth'd asset could not be. Static art, no data.
 	handle /brand/* {
@@ -346,13 +346,13 @@ sysible.slop {
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
-	# Baseline is a SLOP-native service on this compose's internal network (built
-	# from ./baseline), reached by service name. It serves plain HTTP inside the
+	# Flashback is a SLOP-native service on this compose's internal network (built
+	# from ./flashback), reached by service name. It serves plain HTTP inside the
 	# private network (TLS is the gateway's job), so this hop is http:// — no
 	# upstream cert to skip-verify, and the port is never host-published.
-	handle /healthz/baseline {
+	handle /healthz/flashback {
 		rewrite * /api/health
-		reverse_proxy http://{$SLOP_BASELINE_UPSTREAM:baseline:8080} {
+		reverse_proxy http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080} {
 			transport http {
 				dial_timeout 4s
 				response_header_timeout 4s
@@ -360,17 +360,6 @@ sysible.slop {
 			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
 		}
 	}
-
-	# NO /healthz/flashback. The pre-rebrand health path is deliberately absent
-	# while /flashback/ itself still redirects, and the difference is who asks.
-	# /flashback/ is a URL a human bookmarked, so it has to keep working. The
-	# health path is only ever polled by portal/app.js, which derives the apps to
-	# poll from the dots in portal/index.html — the same deploy, served from the
-	# same origin, so the two can only disagree inside one already-open tab, and
-	# only until it reloads. The cost of that is a single grey dot; the cost of
-	# keeping the route is an exception in the health-route invariants, including
-	# the one that stops a health path from ever forwarding a live SSO cookie.
-	# tests/test_portal_health_contract.py enforces all of it.
 
 	handle /healthz/visualizer {
 		rewrite * /api/health
@@ -387,30 +376,24 @@ sysible.slop {
 	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
 	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
 	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
-	# Baseline (config history and restore) — SLOP-native service, plain HTTP
-	# upstream on the internal network (see /healthz/baseline).
-	import appsite_http /baseline http://{$SLOP_BASELINE_UPSTREAM:baseline:8080}
+	# Flashback (backup & restore) — SLOP-native service, plain HTTP upstream on
+	# the internal network (see /healthz/flashback).
+	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}
 
-	# /flashback/* — the pre-rebrand path. A REDIRECT, not a second proxy: the
-	# console's own JS builds its API calls from window.location, so a browser
-	# that follows this lands on /baseline/ and every subsequent call is already
-	# on the new prefix. Proxying both would mean two routes whose prefix
-	# stripping, SSO stamping and cookie scrubbing have to stay in lockstep
-	# forever — and the one that nobody exercises is the one that rots.
-	# 302 rather than 301: a permanent redirect is cached by every browser on the
-	# fleet indefinitely, and this is an appliance an operator may yet re-route.
-	# {http.request.uri} and NOT {http.request.uri.path}: inside handle_path the
-	# prefix is already stripped, so .path is "/api/versions" — concatenating it
-	# onto "/baseline/" yields "/baseline//api/versions", and .path drops the
-	# QUERY STRING, which is how the console passes ?host= and ?limit=. Verified
-	# against caddy 2.8.4: inside this block .uri is "/api/versions?q=foo" and
-	# .path is "/api/versions", so "/baseline" + .uri is the only correct form.
-	handle_path /flashback/* {
-		redir * /baseline{http.request.uri} 302
-	}
-	handle /flashback {
-		redir * /baseline/ 302
-	}
+	# NOTE FOR ANYONE LOOKING FOR THE /flashback -> /baseline REDIRECT: it was
+	# here, and it is deliberately GONE rather than reversed.
+	#
+	# For two days this product was renamed Flashback -> Baseline, and that
+	# redirect pointed the old path at the new one. The rename has been undone,
+	# and /baseline now belongs to a DIFFERENT product — Sysible Baseline, the
+	# Salt-driven config manager. Reversing the redirect would therefore send
+	# every bookmark for the backup tool to the config manager: a working link
+	# landing on a real page that is the wrong application entirely, which is a
+	# worse failure than a 404 because nothing about it looks broken.
+	#
+	# Anyone who bookmarked /baseline/ during those two days gets the config
+	# manager and a visibly different console, which is the honest answer.
+
 	# Visualizer (activity & logs across every app) — SLOP-native, plain HTTP.
 	import appsite_http /visualizer http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080}
 
@@ -463,7 +446,7 @@ sysible.slop {
 	# said the module was down; the click threw that context away and left a dead
 	# end that looks like SLOP itself is broken.
 	#
-	# Same reasoning as the IdP's and Baseline's own refusal pages: a bare error
+	# Same reasoning as the IdP's and Flashback's own refusal pages: a bare error
 	# is a dead end, so say which module, why, and where to go next. {err_status}
 	# and {path} are Caddy placeholders, so no module list is hard-coded here and
 	# a module added later is covered the day it is added.

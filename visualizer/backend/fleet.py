@@ -71,7 +71,7 @@ def hypervisor_badge(role: str | None, vms) -> str:
 def supp_active(s: dict, host: str, env: str, key: str, boot_epoch, now: float) -> bool:
     """Port of the console's suppActive(). A suppression silences a finding only
     for its own key and scope; 'snooze' expires by clock, 'reboot' clears once the
-    host has booted past the recorded baseline, the rest are indefinite."""
+    host has booted past the recorded flashback, the rest are indefinite."""
     if s.get("key") != key:
         return False
     scope, target = s.get("scope"), s.get("target")

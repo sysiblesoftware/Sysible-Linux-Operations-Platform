@@ -4,7 +4,7 @@ One page, one tab per app. Selecting an app loads that app's normalised activity
 into a table; where the app exposes a log (SLEP run logs, the Controller's own
 service log) a "Log" pane can be opened alongside. No build step, no framework:
 the shell is server-rendered and a little vanilla fetch() JS drives the panels.
-Palette matches the SLOP portal / IdP / Baseline so it reads as one product.
+Palette matches the SLOP portal / IdP / Flashback so it reads as one product.
 """
 from __future__ import annotations
 
@@ -547,7 +547,7 @@ function topoRender(){
     out.push('<g class="tnode" data-key="__hub__'+tesc(h.key)+'" data-act="group" data-group="'+tesc(h.key)+
       '" data-x="'+h.x+'" data-y="'+h.y+'" transform="translate('+h.x+' '+h.y+')">');
     out.push('<circle r="'+(h.collapsed?18:8)+'" fill="'+(h.collapsed?col:'#1a2130')+'" stroke="'+col+'" stroke-width="2"/>');
-    if(h.collapsed)out.push('<text text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#0d1117">'+h.hosts.length+'</text>');
+    if(h.collapsed)out.push('<text text-anchor="middle" dominant-flashback="central" font-size="12" font-weight="700" fill="#0d1117">'+h.hosts.length+'</text>');
     out.push('<text y="'+(h.collapsed?32:22)+'" text-anchor="middle" font-size="12.5" font-weight="600" fill="#8b93a7">'+
       tesc(ttrunc(h.label,22))+' <tspan font-weight="400">('+h.hosts.length+(h.collapsed?' ▸':' ▾')+')</tspan></text>');
     out.push('</g>');
@@ -814,7 +814,7 @@ def page(user: str, role: str) -> str:
 
 def denied_page(reason: str, code: str, status: int = 401) -> str:
     """What a BROWSER gets instead of raw `{"detail":"Not signed in."}` — the same
-    self-describing refusal Baseline serves. `reason` comes from
+    self-describing refusal Flashback serves. `reason` comes from
     identity.deny_reason() and never contains a secret."""
     head = "Not signed in" if status == 401 else "Not permitted"
     return (

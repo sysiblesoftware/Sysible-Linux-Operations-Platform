@@ -6,7 +6,7 @@ The app logos shown on the portal tiles.
 `branding/` directory — they are the canonical marks, and if branding changes
 there, re-copy them here. `connect.svg` keeps Connect's own glyph but is re-cut
 onto the canonical tile geometry (Connect's favicon uses a heavier 4px ring that
-reads wrong beside the others at 40px). `baseline.svg`, `visualizer.svg` and
+reads wrong beside the others at 40px). `flashback.svg`, `visualizer.svg` and
 `admin.svg` are drawn here, in the same family, because those modules live in
 this repo and have no separate branding directory.
 

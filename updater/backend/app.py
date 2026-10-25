@@ -34,7 +34,7 @@ from . import apps, git, jobs
 app = FastAPI(title="Sysible updater", docs_url=None, redoc_url=None, openapi_url=None)
 
 # ---------------------------------------------------------------------------
-# Request body cap. Same shape as Baseline's and the Visualizer's, which both
+# Request body cap. Same shape as Flashback's and the Visualizer's, which both
 # had one while this service did not: without it an unauthenticated POST can make
 # the process buffer an arbitrarily large body before any handler — and before any
 # authentication — runs. Small here on purpose: everything this service accepts is
@@ -89,7 +89,7 @@ app.add_middleware(_BodyLimitASGI, max_bytes=_MAX_REQUEST_BYTES)
 
 # ITS OWN SECRET, not the platform-wide one. Every service on this network carries
 # SYSIBLE_SSO_SHARED_SECRET, and this service holds the host's Docker socket — so
-# authenticating it with that shared value made a flaw in ANY of them (Baseline,
+# authenticating it with that shared value made a flaw in ANY of them (Flashback,
 # the Visualizer, the gateway) one hop from a root shell: read the secret out of
 # your own environment, POST here, done. SYSIBLE_UPDATER_SECRET is known only to
 # the IdP and this service, so that hop does not exist.
