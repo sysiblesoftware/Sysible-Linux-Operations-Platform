@@ -468,3 +468,18 @@ def test_the_compose_file_hands_it_to_exactly_two_services():
         if "SYSIBLE_UPDATER_SECRET" in text[start:end]:
             holders.append(name)
     assert sorted(holders) == ["idp", "updater"], holders
+
+
+# ---- the word the operator is shown while it happens ------------------------
+def test_every_action_has_a_spelled_out_progressive():
+    """"Recreate".capitalize() + "ing" is "Recreateing", which is what the
+    console said for one of the four controls. English drops the silent e, so
+    the form is a table rather than a derivation — and the table has to cover
+    every action, or the derivation comes back for the one it missed."""
+    from backend import jobs
+    for action in jobs.ACTIONS:
+        word = jobs.progressive(action)
+        assert word in jobs._PROGRESSIVE.values(), \
+            f"{action!r} falls through to the derivation and reads {word!r}"
+        assert not word.endswith("eing"), f"{action!r} reads {word!r}"
+        assert word[0].isupper(), f"{word!r} does not start a sentence"

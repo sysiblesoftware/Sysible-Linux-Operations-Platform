@@ -253,6 +253,18 @@ ACTIONS: dict[str, tuple[list[str], str]] = {
     "recreate": (["docker", "compose", "up", "-d"], "recreated"),
 }
 
+# "Recreate".capitalize() + "ing" is "Recreateing", which is what the operator
+# was being shown. English drops the silent e, so the progressive form is spelled
+# out rather than derived.
+_PROGRESSIVE = {"restart": "Restarting", "stop": "Stopping",
+                "start": "Starting", "recreate": "Recreating"}
+
+
+def progressive(action: str) -> str:
+    """'Restarting', 'Recreating' — the word a toast says while it happens."""
+    return _PROGRESSIVE.get(action, action.capitalize() + "ing")
+
+
 # Stopping the stack that serves this page would take the console, the gateway
 # and this updater down together, leaving no way back except a shell on the host.
 # Restart is fine — it comes back on its own.
@@ -345,7 +357,7 @@ def start_module_action(key: str, module: str, action: str, compose: Path,
                 "message": "", "log": [], "self_update": False}
     threading.Thread(target=_action_worker, args=(key, compose, argv, verb, module),
                      name=f"{action}-{key}-{module}", daemon=True).start()
-    return True, f"{action.capitalize()}ing {module}…"
+    return True, f"{progressive(action)} {module}…"
 
 
 def _action_worker(key: str, compose: Path, argv: list[str], verb: str,
@@ -392,7 +404,7 @@ def start_action(key: str, action: str, compose: Path, actor: str) -> tuple[bool
             return False, f"could not start {action}: {message}"
         with _job_lock:
             _job = None
-        return True, (f"{action.capitalize()}ing slop… this service restarts as part "
+        return True, (f"{progressive(action)} slop… this service restarts as part "
                       "of it, so the page will drop briefly.")
     with _job_lock:
         _job = {"app": key, "actor": actor, "state": "running", "action": action,
@@ -400,7 +412,7 @@ def start_action(key: str, action: str, compose: Path, actor: str) -> tuple[bool
                 "self_update": False}
     threading.Thread(target=_action_worker, args=(key, compose, argv, verb),
                      name=f"{action}-{key}", daemon=True).start()
-    return True, f"{action.capitalize()}ing {key}…"
+    return True, f"{progressive(action)} {key}…"
 
 def services(compose: Path) -> list[dict]:
     """Per-service state for one stack, so the console can show what is actually
