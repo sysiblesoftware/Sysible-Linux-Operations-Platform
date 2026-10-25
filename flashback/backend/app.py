@@ -32,7 +32,7 @@ import os
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import controller, env, identity, store, ui
+from . import controller, env, identity, platform, store, ui
 
 app = FastAPI(title="Sysible Flashback", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -466,6 +466,31 @@ def api_restore_activity(request: Request, host_id: str) -> list:
 # --------------------------------------------------------------------------- #
 # Agent side  (bearer token)
 # --------------------------------------------------------------------------- #
+@app.post("/api/platform/snapshot")
+def platform_snapshot(request: Request, body: dict = Body(default=None)) -> dict:
+    """Capture the SLOP platform's own configuration.
+
+    Agent-token authenticated like the host snapshot routes, because the caller
+    is `sysible_ctl`, not a browser — and because what it stores describes the
+    whole stack.
+
+    The CALLER supplies the volume inventory, deliberately. Flashback does not
+    shell out to docker and does not hold the docker socket, which is a
+    root-equivalent grant it has no other reason to want.
+    """
+    _require_agent(request)
+    body = body or {}
+    root = (body.get("root") or "/slop").strip()
+    volumes = body.get("volumes") if isinstance(body.get("volumes"), dict) else None
+    files = platform.collect(root, volumes)
+    if not files:
+        raise HTTPException(status_code=400,
+                            detail=f"Nothing to capture under {root!r}.")
+    out = store.ingest_snapshot(platform.PLATFORM_ID, platform.PLATFORM_LABEL, files)
+    out["covers"] = [f["path"] for f in files]
+    return out
+
+
 @app.post("/api/agent/snapshot")
 def agent_snapshot(request: Request, body: dict = Body(...)) -> dict:
     _require_agent(request)

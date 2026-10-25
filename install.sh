@@ -441,6 +441,41 @@ export SYSIBLE_BASELINE_AGENT_BIND="$FB_BIND"
 export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"   # pre-rebrand name
 _upsert_kv "$ENV_FILE" SYSIBLE_BASELINE_AGENT_BIND "$FB_BIND" 2>/dev/null || true
 
+# ---- Baseline controller token (one per install; persisted in this repo's .env)
+# Baseline's desired-state and result endpoints are authenticated by a bearer
+# token and FAIL CLOSED when it is unset — so without this, configuration
+# management silently never happens and the console stays empty. Minted exactly
+# like Flashback's, and handed to the Controller below, which is the only thing
+# that talks to those endpoints.
+#
+# A SEPARATE TOKEN FROM FLASHBACK'S, deliberately. They are different services
+# with different powers: Flashback's token reads and writes a host's stored
+# configuration, Baseline's declares what a host must become. One token for both
+# means a compromise of either is a compromise of both.
+_bl_token_from_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^SYSIBLE_BASELINE_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+}
+BL_TOKEN="${SYSIBLE_BASELINE_AGENT_TOKEN:-$(_bl_token_from_env || true)}"
+if [ -z "$BL_TOKEN" ]; then
+  BL_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  case "$BL_TOKEN" in
+    *[!0-9a-f]* | "") die "failed to generate a valid Baseline token (need 64 hex chars)." ;;
+  esac
+  [ "${#BL_TOKEN}" -eq 64 ] || die "generated Baseline token is not 64 hex chars (got ${#BL_TOKEN})."
+  _upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$BL_TOKEN"
+  say "Generated a Baseline token into $ENV_FILE"
+fi
+export SYSIBLE_BASELINE_AGENT_TOKEN="$BL_TOKEN"
+BL_URL="${SYSIBLE_BASELINE_URL:-http://host.docker.internal:${SYSIBLE_BASELINE_AGENT_PORT:-8771}}"
+BL_BIND="${SYSIBLE_BASELINE_AGENT_BIND:-}"
+if [ -z "$BL_BIND" ]; then
+  BL_BIND="$(_bridge_gateway)"
+  [ -n "$BL_BIND" ] || BL_BIND="172.17.0.1"
+fi
+export SYSIBLE_BASELINE_AGENT_BIND="$BL_BIND"
+_upsert_kv "$ENV_FILE" SYSIBLE_BASELINE_AGENT_BIND "$BL_BIND" 2>/dev/null || true
+
 # Where THIS checkout lives. The updater sidecar bind-mounts it (docker-compose.yml)
 # so SLOP can be updated from its own Administration page, and the mount target has
 # to be the path the checkout has on the HOST — the `docker compose` the updater

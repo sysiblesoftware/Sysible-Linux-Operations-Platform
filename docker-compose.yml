@@ -193,7 +193,14 @@ services:
     volumes:
       - baseline-data:/data
     expose:
-      - "8080"
+      - "8080"                     # the gateway's front door for the browser console
+    ports:
+      # The CONTROLLER api (desired state out, results back) has to be reachable
+      # by the Controller, which is a container in a DIFFERENT compose project —
+      # `baseline:8080` does not resolve for it. Same bind as Flashback's agent
+      # port and for the same reason: the docker bridge gateway is reachable
+      # from containers on this host and from the host, not from the network.
+      - "${SYSIBLE_BASELINE_AGENT_BIND:-172.17.0.1}:${SYSIBLE_BASELINE_AGENT_PORT:-8771}:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
