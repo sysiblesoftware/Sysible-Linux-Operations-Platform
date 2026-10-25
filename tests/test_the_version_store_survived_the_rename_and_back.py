@@ -92,10 +92,18 @@ def test_flashback_does_not_read_the_config_managers_prefix(suffix):
     would mean the backup service silently using the config manager's token,
     data dir or retention — a misconfiguration with no symptom until something
     needs restoring, which is the worst possible moment to find it."""
+    # The flashback service block ONLY. Slicing to the next named service by
+    # name is brittle — this read as far as `visualizer:` and swallowed the
+    # whole `baseline:` service the moment one was added between them, so the
+    # test failed on the config manager's own settings. Cut at the next
+    # top-level service key instead.
     src = COMPOSE.read_text()
-    i = src.index("  flashback:")
-    end = src.find("\n  ", src.index("\n", i) + 1)
-    block = src[i:src.index("\n  visualizer:", i) if "\n  visualizer:" in src[i:] else len(src)]
+    lines = src.splitlines(True)
+    start = next(n for n, l in enumerate(lines) if l.startswith("  flashback:"))
+    end = next((n for n in range(start + 1, len(lines))
+                if lines[n].startswith("  ") and not lines[n].startswith("   ")
+                and lines[n].rstrip().endswith(":")), len(lines))
+    block = "".join(lines[start:end])
     assert f"SYSIBLE_BASELINE_{suffix}" not in block, (
         f"the flashback service reads SYSIBLE_BASELINE_{suffix} — that is the "
         f"config manager's setting")

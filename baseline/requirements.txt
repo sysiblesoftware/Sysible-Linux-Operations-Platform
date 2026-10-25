@@ -1,0 +1,10 @@
+# Sysible Baseline — the SLOP config-management module runtime. Deliberately
+# tiny: sqlite3, json, fnmatch and shlex are all stdlib, so the service stays
+# easy to audit.
+#
+# NOTE: salt itself is NOT a dependency of this service. Baseline is masterless
+# (see backend/salt.py) — it composes a `salt-call --local` command and the HOST
+# runs it. Installing salt here would add a large dependency tree, a C toolchain
+# for timelib, and no capability: this container never evaluates a state.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0

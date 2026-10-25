@@ -183,7 +183,7 @@ def test_the_shared_secret_is_only_stamped_on_gated_routes(adapted):
 
     walk(adapted, False)
     # One per fronted app (3 https + 2 plain-http); the portal never stamps it.
-    assert len(stamped) == 5, f"unexpected number of X-Sysible-Auth stamps: {len(stamped)}"
+    assert len(stamped) == 6, f"unexpected number of X-Sysible-Auth stamps: {len(stamped)}"
 
 
 # ---- framing: exactly 'self', not looser and not tighter --------------------

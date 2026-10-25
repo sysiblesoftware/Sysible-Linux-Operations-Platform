@@ -508,14 +508,12 @@ def agent_restore_payload(request: Request, restore_id: int, host_id: str = Quer
         content=content,
         media_type="application/octet-stream",
         headers={
-            # BOTH spellings, and both stay. The reader is a host AGENT, and
-            # agents are the slowest-moving half of the fleet — they update on
-            # their own heartbeat, some are powered off for weeks, and a host
-            # that misses the path and digest silently writes the wrong file or
-            # refuses the restore. Sending two headers costs ~70 bytes; getting
-            # this wrong corrupts a config file on a machine nobody is watching.
-            "X-Flashback-Path": meta["path"],
-            "X-Flashback-Sha256": meta["sha256"],
+            # ONE name, and it is the original one. During the two days this
+            # product was called Baseline it sent X-Baseline-* as well; every
+            # agent build in existence reads X-Flashback-* — the older ones as
+            # their only name, the rename-era ones as their fallback — so this
+            # single header reaches all of them. Re-adding X-Baseline-* now
+            # would put the config manager's name on the backup tool's wire.
             "X-Flashback-Path": meta["path"],
             "X-Flashback-Sha256": meta["sha256"],
             "Content-Disposition": 'attachment; filename="restore.bin"',

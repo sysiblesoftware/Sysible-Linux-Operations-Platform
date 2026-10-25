@@ -82,6 +82,7 @@ services:
       # Flashback (backup & restore) is baked into THIS stack (below), so the
       # gateway reaches it by service name on the internal network — no host port.
       SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-flashback:8080}
+      SLOP_BASELINE_UPSTREAM: ${SLOP_BASELINE_UPSTREAM:-baseline:8080}
       # Visualizer (the activity & log console) is baked into THIS stack too.
       SLOP_VISUALIZER_UPSTREAM: ${SLOP_VISUALIZER_UPSTREAM:-visualizer:8080}
     volumes:
@@ -163,6 +164,39 @@ services:
       # with ConnectError, exactly as the Visualizer needed the same mapping.
       - "host.docker.internal:host-gateway"
 
+  # Baseline — desired-state configuration. A SLOP-native module like Flashback
+  # and the Visualizer: expose-only, reached by the gateway at baseline:8080.
+  #
+  # NO HOST PORT, and no Salt in this image. Baseline is MASTERLESS: it composes
+  # a `salt-call --local` command and the Controller runs it on the host through
+  # the agent channel it already has. Nothing here ever evaluates a state, so a
+  # salt install would add a large dependency tree and a C toolchain for no
+  # capability. See baseline/backend/salt.py for why masterless.
+  #
+  # Its volume is its OWN. baseline-data holds declared states and run history;
+  # flashback-data holds what hosts actually look like. The declaration and the
+  # observation must be able to disagree, so they are never the same store.
+  baseline:
+    build: ./baseline
+    image: sysible-baseline
+    container_name: sysible-baseline
+    restart: unless-stopped
+    environment:
+      SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # The Controller presents this to read desired state and post results.
+      # Empty = Baseline refuses both, which is the right default for a service
+      # that describes a whole fleet's configuration.
+      SYSIBLE_BASELINE_AGENT_TOKEN: ${SYSIBLE_BASELINE_AGENT_TOKEN:-}
+      SYSIBLE_BASELINE_KEEP: ${SYSIBLE_BASELINE_KEEP:-50}
+      SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
+    volumes:
+      - baseline-data:/data
+    expose:
+      - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # Visualizer — the platform-wide activity & log console. Like the IdP and
   # Flashback it is a SLOP-native service in this stack: expose-only (no host
   # port), reached by the gateway at visualizer:8080. It is STATELESS and
@@ -182,6 +216,7 @@ services:
       SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}
       SLOP_CONNECT_UPSTREAM: ${SLOP_CONNECT_UPSTREAM:-host.docker.internal:8700}
       SLOP_FLASHBACK_UPSTREAM: ${SLOP_FLASHBACK_UPSTREAM:-flashback:8080}
+      SLOP_BASELINE_UPSTREAM: ${SLOP_BASELINE_UPSTREAM:-baseline:8080}
     expose:
       - "8080"                     # internal only; the gateway is the sole front door
     extra_hosts:
@@ -234,3 +269,4 @@ volumes:
   slop-caddy-data:
   slop-caddy-config:
   flashback-data:
+  baseline-data:

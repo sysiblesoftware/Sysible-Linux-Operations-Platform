@@ -361,6 +361,17 @@ sysible.slop {
 		}
 	}
 
+	handle /healthz/baseline {
+		rewrite * /api/health
+		reverse_proxy http://{$SLOP_BASELINE_UPSTREAM:baseline:8080} {
+			transport http {
+				dial_timeout 4s
+				response_header_timeout 4s
+			}
+			header_up Cookie "sysible_sso=[^;]*;?\s*" ""
+		}
+	}
+
 	handle /healthz/visualizer {
 		rewrite * /api/health
 		reverse_proxy http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080} {
@@ -393,6 +404,12 @@ sysible.slop {
 	#
 	# Anyone who bookmarked /baseline/ during those two days gets the config
 	# manager and a visibly different console, which is the honest answer.
+
+	# Baseline (desired-state configuration) — SLOP-native, plain HTTP upstream.
+	# A DIFFERENT PRODUCT from Flashback above: Baseline declares what a host must
+	# look like, Flashback records what it does look like. Nothing bridges the two
+	# prefixes — see tests/test_flashback_and_baseline_are_separate_apps.py.
+	import appsite_http /baseline http://{$SLOP_BASELINE_UPSTREAM:baseline:8080}
 
 	# Visualizer (activity & logs across every app) — SLOP-native, plain HTTP.
 	import appsite_http /visualizer http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080}
