@@ -153,6 +153,18 @@ def states_for(target: str) -> list:
             (target,)).fetchall()]
 
 
+def list_assignments() -> list:
+    """Every (target, state) pair. The console needs the whole picture: an
+    assignment is the only thing that makes a declared state actually apply to
+    anything, and a state declared but never assigned is the most common way to
+    believe a fleet is managed when nothing is."""
+    with _LOCK, _db() as c:
+        return [{"target": r["target"], "state": r["state_name"], "created": r["created"]}
+                for r in c.execute(
+                    "SELECT target,state_name,created FROM assignments "
+                    "ORDER BY target, state_name").fetchall()]
+
+
 def save_rule(name: str, match: str, trigger: str, action: str,
               argument: str = "", enabled: bool = True) -> None:
     with _LOCK, _db() as c:

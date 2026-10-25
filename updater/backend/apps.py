@@ -29,6 +29,59 @@ ALLOWLIST: dict[str, tuple[str, str, str]] = {
              "SYSIBLE_SLOP_DIR"),
 }
 
+# Products and services that ship INSIDE another product's checkout. They are
+# not separate allowlist entries, and deliberately not separately UPDATABLE:
+# they are built from one git tree by one compose file, so an "Update Flashback"
+# button would rebuild the whole stack while claiming to touch one service — the
+# kind of control that is worse than no control.
+#
+# They ARE listed, with their own section on the updates screen, because an
+# operator otherwise cannot see that Flashback and Baseline are installed at
+# all, what they do, which of them is the one that is down, or that updating
+# SLOP is what updates them.
+#
+# A module key IS its compose service name. That is what makes the lifecycle
+# actions below exact — `docker compose restart baseline` touches one service —
+# and it is checked against the real compose file by
+# tests/test_updater_modules.py, so a renamed service cannot leave a section
+# here pointing at nothing.
+MODULES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "slop": (
+        ("gateway", "Gateway",
+         "Caddy: the platform's single front door, TLS, and every app's route"),
+        ("idp", "Sign-in & accounts",
+         "The platform's identity provider — sessions, SSO and this console"),
+        ("flashback", "Sysible Flashback",
+         "Backup and restore: config history for every host, and the platform's own shape"),
+        ("baseline", "Sysible Baseline",
+         "Desired-state configuration: declare what each host must be, applied with Salt"),
+        ("visualizer", "Sysible Visualizer",
+         "Activity and logs from every app, separated by app"),
+        ("updater", "Updater",
+         "The sidecar holding the host's Docker socket — what carries out this page"),
+    ),
+}
+
+
+def modules(key: str) -> list[dict]:
+    """The named modules inside this product's checkout, if any.
+
+    Reported even when the product is not installed on this host, so the screen
+    can say "Flashback would come with SLOP" rather than silently omitting it.
+    """
+    return [{"key": k, "label": lbl, "detail": d} for k, lbl, d in MODULES.get(key, ())]
+
+
+def module_keys(key: str) -> list[str]:
+    return [k for k, _lbl, _d in MODULES.get(key, ())]
+
+
+def is_module(key: str, module: str) -> bool:
+    """Whether `module` is a declared module of `key` — the only way a service
+    name ever reaches an argv. Nothing here accepts a service from a caller."""
+    return module in module_keys(key)
+
+
 _COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
 
 

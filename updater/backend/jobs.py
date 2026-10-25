@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import detached, git
+from . import apps, detached, git
 
 # Bound the log: a --build pours out a lot, and this lives in memory.
 MAX_LOG_LINES = int(os.environ.get("SYSIBLE_UPDATER_MAX_LOG_LINES", "600"))
@@ -66,7 +66,6 @@ def _forget_after_detached_pull(job: dict) -> None:
     watched the update succeed."""
     if job.get("state") != "succeeded" or job.get("action") is not None:
         return
-    from . import apps
     root = apps.checkout_dir("slop")
     if root is None or str(root) in _forgotten:
         return
@@ -271,14 +270,94 @@ def action_refusal(key: str, action: str) -> str | None:
     return None
 
 
-def _action_worker(key: str, compose: Path, argv: list[str], verb: str) -> None:
+# Lifecycle actions scoped to ONE service inside a stack, so the Flashback
+# section can restart Flashback without restarting the platform. The service
+# name is a module key from apps.MODULES — never a string from the caller — and
+# `recreate` carries --no-deps so "this service" is literally true: without it,
+# `compose up -d flashback` is free to recreate everything flashback depends on,
+# which is the whole stack claiming to be one tile.
+_SCOPED_EXTRA: dict[str, list[str]] = {"recreate": ["--no-deps"]}
+
+# Modules that CANNOT be stopped from this console, for the same reason SLOP
+# itself cannot: the gateway is the platform's only front door and the IdP is
+# this page, so stopping either leaves no way to start it again except a shell
+# on the host. Restart is fine — both come back on their own.
+_MODULE_NO_STOP = {"gateway", "idp"}
+
+# The updater is the service running the argv. `docker compose stop updater`
+# would kill the process mid-call, and restart/recreate would do the same and
+# leave a job record that never finishes — the exact failure the detached
+# hand-off exists to avoid for SLOP-wide actions. One service is not worth a
+# second hand-off path: refuse it here and name the command that does work.
+_MODULE_NO_ACTIONS = {"updater"}
+
+
+def module_action_refusal(key: str, module: str, action: str) -> str | None:
+    """Why this action is not offered for this module, or None when it is."""
+    if action not in ACTIONS:
+        return f"unknown action '{action}'"
+    if not apps.is_module(key, module):
+        return f"'{module}' is not a module of {key}"
+    if module in _MODULE_NO_ACTIONS:
+        return (f"the {module} is the service carrying out this request — acting on it "
+                f"from here would kill the call mid-run. Use 'sysiblectl {key} restart' "
+                "on the host.")
+    if action == "stop" and module in _MODULE_NO_STOP:
+        why = ("the gateway is the platform's only front door"
+               if module == "gateway" else "the sign-in service serves this console")
+        return (f"stopping it would leave no way to start it again from the console — "
+                f"{why}. Use Restart, or 'sysiblectl {key} stop' on the host.")
+    return None
+
+
+def module_actions(key: str, module: str) -> list[str]:
+    """Which lifecycle actions this module will accept. The GUI renders from
+    this rather than re-implementing the rules, so a refusal and a button can
+    never disagree."""
+    return [a for a in ACTIONS if module_action_refusal(key, module, a) is None]
+
+
+def start_module_action(key: str, module: str, action: str, compose: Path,
+                        actor: str) -> tuple[bool, str]:
+    """Begin a lifecycle action on one service of a stack.
+
+    Shares the update lock with everything else here: restarting one service
+    during a `compose up --build` of the same project would fight over container
+    names. No detached hand-off — unlike a SLOP-wide action, this does not touch
+    the updater (acting on the updater is refused above), so the job survives to
+    report its own result.
+    """
+    global _job
+    refusal = module_action_refusal(key, module, action)
+    if refusal:
+        return False, refusal
+    argv, verb = ACTIONS[action]
+    argv = list(argv) + _SCOPED_EXTRA.get(action, []) + [module]
+    if detached.running():
+        return False, f"An update of {key} is already running — wait for it to finish."
+    if not _lock.acquire(blocking=False):
+        running = current() or {}
+        return False, (f"An update of {running.get('app', 'another product')} is already "
+                       "running — wait for it to finish.")
+    with _job_lock:
+        _job = {"app": key, "module": module, "actor": actor, "state": "running",
+                "action": action, "started": time.time(), "finished": None,
+                "message": "", "log": [], "self_update": False}
+    threading.Thread(target=_action_worker, args=(key, compose, argv, verb, module),
+                     name=f"{action}-{key}-{module}", daemon=True).start()
+    return True, f"{action.capitalize()}ing {module}…"
+
+
+def _action_worker(key: str, compose: Path, argv: list[str], verb: str,
+                   module: str | None = None) -> None:
+    subject = module or key
     try:
         rc = _run(argv, compose)
         if rc != 0:
             _set(state="failed", finished=time.time(),
                  message=f"{' '.join(argv[:3])} failed — see the log.")
             return
-        _set(state="succeeded", finished=time.time(), message=f"{key} {verb}.")
+        _set(state="succeeded", finished=time.time(), message=f"{subject} {verb}.")
     except Exception as e:                                   # pragma: no cover
         _set(state="failed", finished=time.time(), message=str(e)[:200])
     finally:

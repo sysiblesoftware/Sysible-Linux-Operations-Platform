@@ -115,6 +115,20 @@ def action(key: str, act: str, user: str, role: str):
     return _call(f"/api/action/{key}/{act}", user, role, method="POST")
 
 
+def module_action(key: str, module: str, act: str, user: str, role: str):
+    """Restart / stop / start / recreate ONE service inside a product's stack —
+    what the Flashback and Baseline sections of the updates screen drive.
+
+    Three caller-supplied identifiers now land in the path, so all three go
+    through _KEY_RE for the same reason the other two do: the updater re-checks
+    every one against its own fixed tables, but a value that can reshape the URL
+    never reaches that check."""
+    key, module, act = (key or "").strip(), (module or "").strip(), (act or "").strip()
+    if not (_KEY_RE.match(key) and _KEY_RE.match(module) and _KEY_RE.match(act)):
+        return None, "unknown product, module or action"
+    return _call(f"/api/action/{key}/{module}/{act}", user, role, method="POST")
+
+
 def pending(apps) -> int:
     """How many products have an update waiting — what the header pill counts."""
     return sum(1 for a in apps or [] if a.get("available"))

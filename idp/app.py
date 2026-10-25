@@ -692,6 +692,45 @@ margin-top:.45rem;padding-top:.6rem;border-top:1px dashed var(--line)}
    four buttons the toggle exists to put away. */
 .prod-controls[hidden]{display:none}
 .prod-controls .hint{color:var(--muted);font-size:12px;margin-left:.2rem}
+/* What's inside a product. SLOP is one git checkout that happens to contain
+   Flashback, Baseline, the Visualizer, sign-in and the gateway, so a single
+   "6 services: all running" line was the only place any of them appeared — you
+   could not see that Flashback was installed, what it does, or which one of the
+   six was the one that is down. Each module gets its own section with its own
+   state and its own controls.
+
+   Deliberately NOT its own "Update now": they are built from one tree by one
+   compose file, so that button would rebuild the whole stack while claiming to
+   touch one service. Restart/stop/start/recreate ARE per-service — `docker
+   compose restart baseline` is exactly one container — so those are offered. */
+.prod-mods{grid-column:1/-1;margin-top:.55rem;padding-top:.55rem;
+border-top:1px dashed var(--line)}
+.prod-mods>.mods-h{color:var(--faint);font-size:11.5px;letter-spacing:.04em;
+text-transform:uppercase;margin-bottom:.45rem}
+.mod{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.2rem .8rem;
+align-items:start;padding:.5rem .6rem;border-radius:9px;background:var(--panel2)}
+.mod+.mod{margin-top:.35rem}
+.mod-name{font-weight:600;font-size:13.5px;min-width:0;line-height:1.35}
+.mod-detail{grid-column:1;color:var(--muted);font-size:12px;line-height:1.45;min-width:0}
+.mod-state{grid-column:1;font-size:12px;line-height:1.45;margin-top:1px}
+/* A module's own recovery buttons ride the SAME Manage toggle as the product's.
+   Six sections times four buttons, all on screen, would put Stop one stray click
+   away in six new places — and the sections are there to be READ. So: sections
+   always visible, controls only while managing. The class is on the container,
+   which a repaint does not rebuild, so toggling survives a refresh. */
+.mod-act{grid-row:1;grid-column:2;align-self:start;justify-self:end;
+display:none;gap:.3rem;flex-wrap:wrap}
+.prod-mods.managing .mod-act{display:flex}
+.mod-why{grid-column:1;color:var(--faint);font-size:11.5px;line-height:1.4;
+margin-top:.2rem;display:none}
+.prod-mods.managing .mod-why{display:block}
+.prod-mods>.mods-f{color:var(--faint);font-size:11.5px;line-height:1.45;
+margin-top:.45rem}
+.mod.down{background:color-mix(in srgb,#e0a83a 10%,var(--panel2))}
+@media(max-width:640px){
+  .mod{grid-template-columns:1fr}
+  .mod-act{grid-row:auto;grid-column:1;justify-self:start;margin-top:.35rem}
+}
 /* The row you came to act on. A tint, not another button. */
 .prod.due{background:color-mix(in srgb,#e0a83a 8%,transparent)}
 @media(max-width:640px){
@@ -1690,6 +1729,7 @@ _UPDATES_JS = r"""
     if(btn){ btn.hidden=!a.can_update; btn.disabled=!a.can_update; }
     paintServices(a);
     paintActions(a);
+    paintModules(a);
   }
   function st(kind, label, detail){
     var w=el('div','st '+kind);
@@ -1704,6 +1744,28 @@ _UPDATES_JS = r"""
     var box=document.getElementById('s-'+a.key); if(!box)return;
     box.innerHTML='';
     var svcs=a.services||[];
+    // Anything that has its own section below says it better there, so this line
+    // does not repeat it: "5 services: 1 not running \u2014 baseline (exited)"
+    // directly above a Baseline section reading "Exited" is the same sentence
+    // twice. What it does NOT do is drop a service silently \u2014 a compose
+    // override can add one this build has no section for, and that one is
+    // exactly the service worth naming here.
+    if((a.modules||[]).length){
+      var covered={};
+      a.modules.forEach(function(m){ covered[m.key]=1; });
+      var rest=svcs.filter(function(s){ return !covered[s.service]; });
+      if(!rest.length) return;
+      // Its own sentence rather than the counted one below: "1 service: 1 not
+      // running" reads badly, and what matters about these is their names.
+      box.appendChild(el('span',null,'Not covered by a section: '));
+      rest.forEach(function(s, i){
+        if(i) box.appendChild(el('span',null,', '));
+        var n=el('span',null, s.service+' ('+(s.state||'?')+')');
+        n.style.color = (s.state==='running') ? '#4ec07a' : '#e0a83a';
+        box.appendChild(n);
+      });
+      return;
+    }
     if(!svcs.length){ return; }
     var bad=svcs.filter(function(s){return s.state!=='running';});
     var txt=svcs.length+' service'+(svcs.length===1?'':'s')+': ';
@@ -1745,6 +1807,125 @@ _UPDATES_JS = r"""
       ? 'Stopping the platform from here would take this page down with it.'
       : 'Brief downtime while the containers come back.'));
   }
+  // What's INSIDE a product, one section each. SLOP is a single git checkout
+  // that contains Flashback, Baseline, the Visualizer, sign-in and the gateway;
+  // before this the only trace of any of them was "6 services: all running", so
+  // the screen could not tell you that Flashback was installed, what it does, or
+  // which one of the six was the one that was down.
+  //
+  // The sections carry state and recovery controls but NO "Update now": one tree,
+  // one compose file, one build. The footer line says so rather than leaving the
+  // absence to be guessed at.
+  function paintModules(a){
+    var box=document.getElementById('mods-'+a.key); if(!box)return;
+    var mods=a.modules||[];
+    box.innerHTML='';
+    if(!mods.length){ box.hidden=true; return; }
+    box.hidden=false;
+    box.appendChild(el('div','mods-h','Inside '+(a.label||a.key)));
+    mods.forEach(function(m){ box.appendChild(modRow(a,m)); });
+    box.appendChild(el('div','mods-f', a.installed
+      ? ('These are built from the one ' + (a.label||a.key) + ' checkout by one '
+         + 'compose file, so updating it updates all of them together \u2014 there '
+         + 'is no separate update for a module.')
+      : ('These come with ' + (a.label||a.key) + ', which is not installed here.')));
+  }
+  function modRow(a, m){
+    var row=el('div','mod'); row.id='mod-'+a.key+'-'+m.key;
+    row.appendChild(el('div','mod-name', m.label||m.key));
+    if(m.detail) row.appendChild(el('div','mod-detail', m.detail));
+    var st=el('div','mod-state');
+    var svcs=m.services||[];
+    if(!a.installed){
+      st.appendChild(modSt('unk','Not installed', 'ships with '+(a.label||a.key)));
+    } else if(!svcs.length){
+      // A declared module with no container at all. Not the same as "stopped":
+      // compose has never created it, or the service was renamed out from under
+      // this list. Either way it is NOT running, so say that and tint the row.
+      st.appendChild(modSt('due','No container',
+        'docker compose ps does not list the '+m.key+' service'));
+      row.classList.add('down');
+    } else {
+      var bad=svcs.filter(function(s){return s.state!=='running';});
+      var ill=svcs.filter(function(s){return s.health==='unhealthy';});
+      if(bad.length||ill.length) row.classList.add('down');
+      var detail=svcs.map(function(s){
+        return s.status || s.state || '?';
+      }).join(', ');
+      if(bad.length){
+        st.appendChild(modSt('due', bad.length===svcs.length
+          ? capit(bad[0].state||'not running') : 'Partly running', detail));
+      } else if(ill.length){
+        // Up, and failing its own health check. "Running" alone would read as
+        // fine, which is how a broken module hides behind a green line.
+        st.appendChild(modSt('due','Running, unhealthy', detail));
+      } else {
+        st.appendChild(modSt('ok','Running', detail));
+      }
+    }
+    row.appendChild(st);
+    var acts=(a.installed && (m.actions||[]).length) ? m.actions : [];
+    if(acts.length){
+      var box=el('div','mod-act');
+      acts.forEach(function(act){
+        var cls=(act==='stop') ? 'btn danger sm' : 'btn ghost sm';
+        var b=el('button', cls, capit(act));
+        b.onclick=function(){ runModuleAction(a, m, act, b); };
+        box.appendChild(b);
+      });
+      row.appendChild(box);
+    }
+    // Why a module offers fewer buttons than its neighbour. Only while managing,
+    // because that is the only time the gap is visible.
+    if(a.installed){
+      var missing=['restart','stop','start','recreate'].filter(function(x){
+        return acts.indexOf(x)<0; });
+      if(missing.length){
+        row.appendChild(el('div','mod-why', acts.length
+          ? ('No '+missing.join('/')+' from here \u2014 it would cut the console off '
+             + 'from this service. Use the host.')
+          : ('No controls from here \u2014 this is the service that carries out '
+             + 'the request. Use sysiblectl '+a.key+' on the host.')));
+      }
+    }
+    return row;
+  }
+  function modSt(kind, label, detail){
+    var w=el('span','st '+kind);
+    w.appendChild(el('b',null,label));
+    if(detail)w.appendChild(el('span','st-note',detail));
+    return w;
+  }
+  function capit(s){ return String(s).charAt(0).toUpperCase()+String(s).slice(1); }
+  // One service of one stack. Same discipline as runAction: the product key, the
+  // module and the action are all identifiers the updater re-checks against its
+  // own fixed tables, and nothing here builds a command.
+  function runModuleAction(a, m, act, b){
+    var name=m.label||m.key;
+    var warn = (act==='stop')
+      ? 'Stop '+name+"? It will be DOWN until you start it again. The rest of "
+        +(a.label||a.key)+' keeps running.'
+      : (act==='restart'||act==='recreate')
+        ? (act==='restart'?'Restart ':'Recreate ')+name+'? Brief downtime for that '
+          +'one service.'
+        : null;
+    if(warn && !window.confirm(warn)) return;
+    b.disabled=true;
+    var body=new URLSearchParams();
+    body.set('csrf', document.getElementById('csrf').value);
+    body.set('app', a.key); body.set('module', m.key); body.set('action', act);
+    fetch('/admin/updates/module-action',{method:'POST',body:body,
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+      .then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});})
+      .then(function(res){
+        if(!res.ok){ pushToast(res.d.detail||'Refused',
+          {title:'Software & services',kind:'warn',ttl:0}); b.disabled=false; return; }
+        pushToast(res.d.message||(act+' '+m.key),{title:'Software & services'});
+        load();
+      })
+      .catch(function(e){ pushToast(String(e.message||e),
+        {title:'Software & services',kind:'error',ttl:0}); b.disabled=false; });
+  }
   // Bound once, on the list, so a repaint cannot lose the handler or stack a
   // second one on top of it.
   function bindManage(){
@@ -1756,6 +1937,10 @@ _UPDATES_JS = r"""
       var box=document.getElementById('a-'+key); if(!box)return;
       var open=box.hidden;
       box.hidden=!open;
+      // The module sections share this one toggle rather than growing six of
+      // their own — see .mod-act in the stylesheet.
+      var mods=document.getElementById('mods-'+key);
+      if(mods) mods.classList.toggle('managing', open);
       t.setAttribute('aria-expanded', open?'true':'false');
       t.textContent = open ? 'Hide' : 'Manage';
     });
@@ -1804,8 +1989,9 @@ _UPDATES_JS = r"""
     act.appendChild(btn); act.appendChild(tog);
     var meta=el('div','prod-meta'); meta.id='s-'+a.key;
     var ctrls=el('div','prod-controls'); ctrls.id='a-'+a.key; ctrls.hidden=true;
+    var mods=el('div','prod-mods'); mods.id='mods-'+a.key; mods.hidden=true;
     row.appendChild(name); row.appendChild(state); row.appendChild(act);
-    row.appendChild(meta); row.appendChild(ctrls);
+    row.appendChild(meta); row.appendChild(ctrls); row.appendChild(mods);
     list.appendChild(row);
   }
   function paint(d){
@@ -1848,6 +2034,25 @@ _UPDATES_JS = r"""
       hide('b-'+key); hide('m-'+key);
       var box=document.getElementById('a-'+key);
       if(box){ box.innerHTML=''; box.hidden=true; }
+      staleModules(key);
+    });
+  }
+  // The module sections survive an unreachable updater \u2014 they are the only
+  // place the screen names what is inside a product. What must NOT survive is
+  // the state they were last painted with: "Running" beside Baseline, held over
+  // from the last successful poll, is exactly the kind of green line that gets
+  // believed. Keep the names, drop the claim, take the buttons away.
+  function staleModules(key){
+    var box=document.getElementById('mods-'+key); if(!box)return;
+    box.classList.remove('managing');
+    Array.prototype.forEach.call(box.querySelectorAll('.mod'), function(row){
+      row.classList.remove('down');
+      Array.prototype.forEach.call(row.querySelectorAll('.mod-act,.mod-why'),
+        function(n){ n.parentNode.removeChild(n); });
+      var st=row.querySelector('.mod-state');
+      if(!st){ st=el('div','mod-state'); row.appendChild(st); }
+      st.innerHTML='';
+      st.appendChild(modSt('unk',"Can't check",'the updater did not report it'));
     });
   }
   function showJob(j){
@@ -1980,13 +2185,53 @@ _UPDATES_JS = r"""
 """
 
 
+# The modules inside each product, for the SERVER-RENDERED skeleton only.
+#
+# This duplicates updater/backend/apps.py:MODULES, as the product list above it
+# already duplicates that file's ALLOWLIST, and for the same reason: the skeleton
+# has to name what is installed before — or without ever — hearing from the
+# updater, and the IdP deliberately cannot import from the updater's package.
+# The updater's answer REPLACES all of it on the first successful poll, so the
+# only thing that can go wrong is drift; tests/test_updates_modules.py compares
+# the two tables and fails when they disagree.
+_SKELETON_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
+    "slop": (
+        ("gateway", "Gateway"),
+        ("idp", "Sign-in & accounts"),
+        ("flashback", "Sysible Flashback"),
+        ("baseline", "Sysible Baseline"),
+        ("visualizer", "Sysible Visualizer"),
+        ("updater", "Updater"),
+    ),
+}
+
+
+def _skeleton_modules(key: str) -> str:
+    """The module sections as flat HTML. No state and no buttons: both come from
+    the updater, and inventing either here would mean the page claiming
+    something it has not asked anything about yet."""
+    mods = _SKELETON_MODULES.get(key, ())
+    if not mods:
+        return f"<div class=prod-mods id='mods-{key}' hidden></div>"
+    inner = "".join(
+        f"<div class=mod id='mod-{key}-{mk}'>"
+        f"<div class=mod-name>{escape(lbl)}</div>"
+        f"<div class=mod-state><span class='st unk'><b>checking&hellip;</b></span></div>"
+        f"</div>"
+        for mk, lbl in mods)
+    return (f"<div class=prod-mods id='mods-{key}'>"
+            f"<div class=mods-h>Inside this product</div>{inner}</div>")
+
+
 def _updates_page(sess: sqlite3.Row, tok: str) -> str:
     rows = []
+    # The SLOP row deliberately carries no "— gateway, sign-in, Flashback, …"
+    # suffix any more. That list went stale the moment Baseline shipped; the
+    # module sections below each row name them, and are generated from one table.
     for key, lbl in (("controller", "Sysible Controller"),
                      ("slep", "Sysible Linux Engineering Platform"),
                      ("connect", "Sysible Connect"),
-                     ("slop", "Sysible Linux Operations Platform"
-                              " — gateway, sign-in, Flashback, Visualizer")):
+                     ("slop", "Sysible Linux Operations Platform")):
         rows.append(
             f"<div class=prod id='p-{key}'>"
             f"<div class=prod-name>{escape(lbl)}</div>"
@@ -2001,7 +2246,8 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
             f"</div>"
             f"<div class=prod-meta id='s-{key}'></div>"
             f"<div class=prod-controls id='a-{key}' hidden></div>"
-            f"</div>")
+            + _skeleton_modules(key)
+            + "</div>")
     table = f"<div class=prods id=updtable>{''.join(rows)}</div>"
 
     # Two dense paragraphs used to sit between the operator and the page. They are
@@ -2022,6 +2268,15 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<p>The Operations Platform itself cannot be STOPPED from here: that would "
         "take down the gateway, this page and the updater together, leaving no way "
         "back except the host. Restart it instead.</p>"
+        "<p><b>Inside this product</b> lists the modules that ship in one "
+        "checkout &mdash; Flashback, Baseline, the Visualizer, sign-in and the "
+        "gateway for the Operations Platform &mdash; with what each one is and "
+        "whether it is running. There is no per-module <b>Update now</b> on "
+        "purpose: they are one git tree built by one compose file, so updating "
+        "any of them is updating all of them. Their restart/stop/start/recreate "
+        "<i>are</i> per-service, and appear under <b>Manage</b> with the "
+        "product&rsquo;s own; a module whose controls would cut this console off "
+        "from itself says so in place of them.</p>"
         "</details>")
     if not updates.configured():
         note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
@@ -2135,6 +2390,29 @@ def admin_updates_action(request: Request, csrf: str = Form(""), app: str = Form
         return JSONResponse({"detail": "Request blocked (bad origin or token)."},
                             status_code=403)
     data, error = updates.action(app, action, sess["username"], "superuser")
+    if error:
+        return JSONResponse({"detail": error}, status_code=409)
+    return JSONResponse(data)
+
+
+@app.post("/admin/updates/module-action")
+def admin_updates_module_action(request: Request, csrf: str = Form(""),
+                                app: str = Form(""), module: str = Form(""),
+                                action: str = Form("")):
+    """The same lifecycle controls, scoped to one module of a product — so a
+    wedged Baseline can be restarted without restarting the platform around it.
+    There is no module-scoped UPDATE to relay: the stack is one git checkout.
+    Superuser-gated and carrying the same origin + CSRF guard as every other
+    admin mutation."""
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    tok = _csrf_token(request)
+    guard = _admin_guard(request, sess, csrf, tok)
+    if guard is not None:
+        return JSONResponse({"detail": "Request blocked (bad origin or token)."},
+                            status_code=403)
+    data, error = updates.module_action(app, module, action, sess["username"], "superuser")
     if error:
         return JSONResponse({"detail": error}, status_code=409)
     return JSONResponse(data)

@@ -2,22 +2,26 @@
 <!--
   Sysible Baseline — canonical mark. Family tile (dark rounded square + thin
   brand-green ring, see controller.svg); the glyph says what Baseline IS: a
-  declared line that the fleet is held to. A level baseline rule with three
-  hosts sitting exactly on it, one pulled off and snapped back.
+  declared line the fleet is held to. A brand-green baseline rule with two
+  hosts sitting exactly on it, and a blue one pulled above being snapped back
+  down to it — drift, corrected, which is the whole product in one picture.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Baseline">
   <defs>
     <linearGradient id="bl-tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1c2b25"/><stop offset="1" stop-color="#0d1512"/>
+      <stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/>
     </linearGradient>
   </defs>
-  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bl-tile)"/>
-  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="25.25" fill="none"
-        stroke="#1d9f6c" stroke-opacity=".55" stroke-width="1.5"/>
-  <line x1="26" y1="78" x2="102" y2="78" stroke="#3fd39a" stroke-width="5" stroke-linecap="round"/>
-  <rect x="34" y="58" width="16" height="20" rx="3" fill="#3fd39a"/>
-  <rect x="56" y="58" width="16" height="20" rx="3" fill="#3fd39a"/>
-  <rect x="78" y="44" width="16" height="34" rx="3" fill="#6aa8ff"/>
-  <path d="M86 40 l0 -12 M80 34 l6 -6 6 6" fill="none" stroke="#6aa8ff"
-        stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#bl-tile)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <!-- The declared line. -->
+  <line x1="28" y1="84" x2="100" y2="84" stroke="#6ddb73" stroke-width="6" stroke-linecap="round"/>
+  <!-- Two hosts already on it (green). -->
+  <rect x="34" y="64" width="15" height="20" rx="3" fill="#6ddb73"/>
+  <rect x="56" y="64" width="15" height="20" rx="3" fill="#6ddb73"/>
+  <!-- One drifted above (blue), with an arrow pulling it back to the line. -->
+  <rect x="78" y="40" width="15" height="20" rx="3" fill="#7aa2ff"/>
+  <path d="M85.5 66 L85.5 78" fill="none" stroke="#7aa2ff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M79 72 L85.5 79 L92 72" fill="none" stroke="#7aa2ff" stroke-width="5"
+        stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

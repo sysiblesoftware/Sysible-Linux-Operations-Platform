@@ -27,7 +27,7 @@ import os
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import eda, env, identity, salt, store, ui
+from . import controller, eda, env, identity, salt, store, ui
 
 app = FastAPI(title="Sysible Baseline", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -152,6 +152,27 @@ def api_unassign(request: Request, body: dict = Body(...)) -> dict:
     _require(request, "operator")
     store.unassign((body.get("target") or "").strip(), (body.get("state") or "").strip())
     return {"ok": True}
+
+
+@app.get("/api/assignments")
+def api_assignments(request: Request) -> dict:
+    _require(request, "operator")
+    return {"assignments": store.list_assignments()}
+
+
+@app.post("/api/hosts/{target}/apply")
+def api_apply(target: str, request: Request, body: dict = Body(default=None)) -> dict:
+    """Ask the Controller to apply this target's desired state.
+
+    Operator+, and the Controller re-checks that against the SAME human — this
+    service proves who is asking, it does not vouch for them.
+    """
+    who = _require(request, "operator")
+    preview = bool((body or {}).get("preview"))
+    ok, message = controller.request_apply(who, target, preview=preview)
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    return {"target": target, "preview": preview, "detail": message}
 
 
 @app.get("/api/rules")

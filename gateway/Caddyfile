@@ -449,6 +449,18 @@ sysible.slop {
 				}
 			}
 			root * /srv/portal
+			# REVALIDATE THE PORTAL EVERY TIME. index.html and app.js carried no
+			# Cache-Control at all, so browsers applied HEURISTIC freshness —
+			# roughly a tenth of the file's age — and served the portal from
+			# cache without asking. The symptom is a portal that is missing an
+			# app for hours after it was added, or still showing one that was
+			# renamed, with nothing on the page to suggest it is stale.
+			#
+			# These are three small files behind a gateway on the local network;
+			# a conditional request costs a round trip and an ETag compare. The
+			# art under /brand/ keeps its immutable year-long cache above —
+			# that content genuinely never changes under the same name.
+			header Cache-Control "no-cache"
 			file_server
 		}
 	}

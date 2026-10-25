@@ -156,7 +156,11 @@ def status(request: Request, refresh: bool = False) -> dict:
     _authorized(request)
     out = []
     for key in apps.keys():
-        row = {"key": key, "label": apps.label(key)}
+        row = {"key": key, "label": apps.label(key),
+               # Modules inside this checkout. Reported even when the product
+               # is not installed here, so the screen can say "Flashback would
+               # come with SLOP" rather than silently omitting it.
+               "modules": apps.modules(key)}
         root = apps.checkout_dir(key)
         if root is None:
             # Not every SLOP host runs every product; say so plainly rather than
@@ -189,6 +193,17 @@ def status(request: Request, refresh: bool = False) -> dict:
         # can never disagree.
         row["actions"] = [a for a in jobs.ACTIONS
                           if jobs.action_refusal(key, a) is None]
+        # Same for each module's own section: its live state, taken from the one
+        # `compose ps` already paid for above rather than a probe per module, and
+        # the actions it will accept. A module key IS its compose service name,
+        # which is what lets these two line up.
+        by_service: dict[str, list[dict]] = {}
+        for svc in row["services"]:
+            by_service.setdefault(svc.get("service") or "", []).append(svc)
+        for mod in row["modules"]:
+            mod["services"] = by_service.get(mod["key"], [])
+            mod["actions"] = (jobs.module_actions(key, mod["key"])
+                              if compose is not None else [])
         out.append(row)
     return {"apps": out, "job": jobs.current()}
 
@@ -279,6 +294,40 @@ def action(key: str, action: str, request: Request):
     if not started:
         raise HTTPException(status_code=409, detail=message)
     print(f"[sysible-updater] {actor} started {action} of {key} ({compose})", flush=True)
+    return {"started": True, "message": message}
+
+
+@app.post("/api/action/{key}/{module}/{action}")
+def module_action(key: str, module: str, action: str, request: Request):
+    """Restart / stop / start / recreate ONE service inside a product's stack.
+
+    This is what the Flashback and Baseline sections of the updates screen drive,
+    so a single wedged module can be recovered without restarting the platform
+    around it. `module` is looked up in apps.MODULES and `action` in jobs.ACTIONS
+    — both fixed tables — so neither the service name nor any part of the argv
+    ever comes from the request. There is deliberately no per-module UPDATE: the
+    whole stack is one git checkout built by one compose file."""
+    actor = _authorized(request)
+    if key not in apps.ALLOWLIST:
+        raise HTTPException(status_code=404, detail="Unknown product.")
+    if not apps.is_module(key, module):
+        raise HTTPException(status_code=404, detail="Unknown module.")
+    if action not in jobs.ACTIONS:
+        raise HTTPException(status_code=404, detail="Unknown action.")
+    refusal = jobs.module_action_refusal(key, module, action)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
+    root = apps.checkout_dir(key)
+    if root is None:
+        raise HTTPException(status_code=409, detail="That product is not installed here.")
+    compose = apps.compose_dir(root)
+    if compose is None:
+        raise HTTPException(status_code=409, detail="No compose file in that checkout.")
+    started, message = jobs.start_module_action(key, module, action, compose, actor)
+    if not started:
+        raise HTTPException(status_code=409, detail=message)
+    print(f"[sysible-updater] {actor} started {action} of {key}/{module} ({compose})",
+          flush=True)
     return {"started": True, "message": message}
 
 

@@ -8,3 +8,10 @@
 # for timelib, and no capability: this container never evaluates a state.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+# httpx is the one addition, and only for the console's "Apply now" button,
+# which asks the CONTROLLER to run a state (Baseline never talks to hosts).
+# backend/controller.py imports it DEFENSIVELY: if it is ever missing, the
+# button turns itself off and says so, rather than taking the whole service
+# down — which is exactly what happened to Flashback once when the import was
+# added here before the dependency was.
+httpx==0.28.1
