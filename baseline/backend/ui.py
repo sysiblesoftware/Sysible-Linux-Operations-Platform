@@ -96,13 +96,54 @@ label.f span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
 .pill.on{border-color:var(--accent);color:var(--accent)}
 .pill.bad{border-color:var(--err);color:var(--err)}
 .pill.warn{border-color:var(--amber);color:var(--amber)}
+/* A state can be eight items long. Without a bounded height the dialog grows
+   past the viewport and takes its own Save button with it — the list gets
+   longer exactly as the reason to save it gets stronger. */
 dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);
-       color:var(--text);padding:0;width:min(760px,94vw)}
+       color:var(--text);padding:0;width:min(760px,94vw);max-height:92vh}
+dialog form{display:flex;flex-direction:column;max-height:92vh}
+dialog .db{overflow:auto;flex:1 1 auto;min-height:0}
+dialog .dh,dialog .df{flex:0 0 auto}
 dialog::backdrop{background:rgba(0,0,0,.55)}
 dialog .dh{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:600}
 dialog .db{padding:16px}
 dialog .df{padding:12px 16px;border-top:1px solid var(--line);display:flex;gap:10px;
            justify-content:flex-end}
+/* ---- the state builder ------------------------------------------------
+   A state is a list of things that must be true, each one a small card. The
+   YAML it generates is a MODE, not the way in. */
+dialog .dh{display:flex;align-items:center;gap:12px}
+.modes{margin-left:auto;display:flex;gap:4px;border:1px solid var(--line);
+       border-radius:9px;padding:2px}
+button.mode{font-size:12px;padding:.3em .7em;border:0;background:transparent;
+            color:var(--muted);border-radius:7px;font-weight:500}
+button.mode:hover{color:var(--text)}
+button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
+#s-items:empty::after{content:'Nothing declared yet. Add the first thing below.';
+  display:block;color:var(--faint);font-size:12.5px;padding:14px 2px}
+.item{border:1px solid var(--line);border-radius:11px;background:var(--panel2);
+      padding:10px 12px;margin-bottom:8px}
+.item-h{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.item-h b{font-size:13px}
+.item-h .faint{font-size:11.5px}
+.item-h .sp{margin-left:auto;display:flex;gap:4px}
+.item-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+           gap:8px 10px;margin-top:8px}
+.item-grid .wide{grid-column:1/-1}
+.item-grid label{display:flex;flex-direction:column;gap:3px;font-size:12px;
+                 color:var(--muted);min-width:0}
+.item-grid textarea{min-height:92px}
+.item-grid .hint{color:var(--faint);font-size:11px}
+.item-grid label.check{flex-direction:row;align-items:center;gap:7px}
+.item-grid label.check input{width:auto}
+.additem{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;
+         padding-top:12px;border-top:1px dashed var(--line)}
+.additem select{min-width:220px}
+.additem .faint{font-size:11.5px;flex:1 1 200px}
+/* Why the YAML is read-only until you say otherwise. */
+.yamlnote{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5}
+.yamlnote.warn{color:var(--amber)}
+#s-yaml textarea[readonly]{opacity:.85}
 .msg{padding:.6em 1em;font-size:13px;border-bottom:1px solid var(--line)}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 .msg.ok{background:rgba(76,175,90,.12);color:var(--ok)}
@@ -202,14 +243,40 @@ def console_page(who) -> str:
         "</div>"
 
         # ---- state editor -------------------------------------------------
+        # A state used to be one textarea of raw Salt SLS. That is the right
+        # thing to SHIP and the wrong thing to ASK FOR: "declare what this host
+        # must be" should not start with remembering whether the key is
+        # pkg.installed or pkg.install. It is a list of things now, and YAML is
+        # a mode you can switch to rather than the only way in.
         "<dialog id=dlg-state><form method=dialog>"
-        "<div class=dh id=dlg-state-h>New state</div><div class=db>"
+        "<div class=dh><span id=dlg-state-h>New state</span>"
+        "<span class=modes id=s-modes>"
+        "<button type=button class='mode on' data-mode=build>Build it</button>"
+        "<button type=button class=mode data-mode=yaml>YAML</button>"
+        "</span></div><div class=db>"
         "<label class=f><span>Name</span><input id=s-name placeholder='web-servers'></label>"
-        "<label class=f><span>Salt state (SLS)</span>"
-        "<textarea id=s-sls spellcheck=false placeholder='nginx_installed:\n"
-        "  pkg.installed:\n    - name: nginx'></textarea></label>"
-        "<div class='faint' style='font-size:12px'>Saving creates a new version. "
-        "Nothing is overwritten — the previous declaration stays readable.</div>"
+
+        # Build mode: the list, and one picker to add to it.
+        "<div id=s-build>"
+        "  <div id=s-items></div>"
+        "  <div class=additem>"
+        "    <select id=s-kind aria-label='What to add'></select>"
+        "    <button type=button class=sm id=s-add>+ Add</button>"
+        "    <span class=faint id=s-kindhelp></span>"
+        "  </div>"
+        "</div>"
+
+        # YAML mode: a preview of what the list makes, or the editor itself
+        # once this state is authored as YAML.
+        "<div id=s-yaml hidden>"
+        "  <div class=yamlnote id=s-yamlnote></div>"
+        "  <textarea id=s-sls spellcheck=false placeholder='nginx_installed:\n"
+        "  pkg.installed:\n    - name: nginx'></textarea>"
+        "  <button type=button class=sm id=s-takeover hidden>Edit this YAML by hand</button>"
+        "</div>"
+
+        "<div class='faint' style='font-size:12px;margin-top:10px'>Saving creates a new "
+        "version. Nothing is overwritten — the previous declaration stays readable.</div>"
         "</div><div class=df>"
         "<button value=cancel>Cancel</button>"
         "<button class=primary id=s-save value=save>Save version</button>"
@@ -383,19 +450,215 @@ async function load(){
 
 // ---- actions ---------------------------------------------------------------
 
+// ---- the state builder -----------------------------------------------------
+// A state is a list of things that must be true. KINDS comes from the server so
+// the fields drawn here and the fields the generator reads are one list; the
+// SLS is generated there too, because it is the thing that runs as root on
+// every host the state is assigned to.
+let KINDS = null;          // kind -> spec, once fetched
+let ITEMS = [];            // what is being built right now
+let SOURCE = 'builder';    // 'builder' | 'yaml' — which editor owns this state
+
+async function kinds(){
+  if(KINDS) return KINDS;
+  const list = (await api('kinds')).kinds || [];
+  KINDS = {};
+  for(const k of list) KINDS[k.kind] = k;
+  const sel = $('s-kind');
+  sel.innerHTML = list.map((k) =>
+    `<option value="${esc(k.kind)}">${esc(k.label)}</option>`).join('');
+  kindHelp();
+  return KINDS;
+}
+function kindHelp(){
+  const k = KINDS && KINDS[$('s-kind').value];
+  $('s-kindhelp').textContent = k ? (k.help || '') : '';
+}
+
+function fieldHtml(kind, idx, field, value){
+  const id = `it-${idx}-${field.key}`;
+  const wide = (field.type === 'body' || field.type === 'lines') ? ' wide' : '';
+  const hint = field.help ? `<span class=hint>${esc(field.help)}</span>` : '';
+  if(field.type === 'bool'){
+    return `<label class="check${wide}"><input type=checkbox id="${id}"` +
+           `${value ? ' checked' : ''}><span>${esc(field.label)}</span>${hint}</label>`;
+  }
+  const label = `<span>${esc(field.label)}${field.required ? ' *' : ''}</span>`;
+  if(field.type === 'body' || field.type === 'lines'){
+    const v = Array.isArray(value) ? value.join('\n') : (value || '');
+    const ph = field.placeholder ? ` placeholder="${esc(field.placeholder)}"` : '';
+    return `<label class="${wide.trim()}">${label}<textarea id="${id}" ` +
+           `spellcheck=false${ph}>${esc(v)}</textarea>${hint}</label>`;
+  }
+  const ph = field.placeholder ? ` placeholder="${esc(field.placeholder)}"` : '';
+  return `<label>${label}<input id="${id}" value="${esc(value || '')}"${ph}>${hint}</label>`;
+}
+
+function renderItems(){
+  const box = $('s-items');
+  box.innerHTML = ITEMS.map((item, i) => {
+    const spec = KINDS[item.kind];
+    if(!spec) return '';
+    const fields = spec.fields.map((f) => fieldHtml(item.kind, i, f, item[f.key])).join('');
+    const moves = CAN_WRITE ? (
+      `<span class=sp>` +
+      `<button type=button class=sm data-move="${i}:-1" title="Move up"` +
+      `${i === 0 ? ' disabled' : ''}>\u2191</button>` +
+      `<button type=button class=sm data-move="${i}:1" title="Move down"` +
+      `${i === ITEMS.length - 1 ? ' disabled' : ''}>\u2193</button>` +
+      `<button type=button class="sm danger" data-drop="${i}">Remove</button></span>`) : '';
+    return `<div class=item data-i="${i}"><div class=item-h><b>${esc(spec.label)}</b>` +
+           `<span class=faint>${esc(spec.help || '')}</span>${moves}</div>` +
+           `<div class=item-grid>${fields}</div></div>`;
+  }).join('');
+  if(!CAN_WRITE){
+    box.querySelectorAll('input,textarea').forEach((e) => {
+      if(e.type === 'checkbox') e.disabled = true; else e.readOnly = true; });
+  }
+}
+
+// Read the form back into ITEMS. Called before anything that needs the current
+// values — switching to YAML, saving, reordering — so a half-typed field is
+// never lost by a re-render.
+function collectItems(){
+  ITEMS = ITEMS.map((item, i) => {
+    const spec = KINDS[item.kind];
+    const out = {kind: item.kind};
+    for(const f of spec.fields){
+      const el = $(`it-${i}-${f.key}`);
+      if(!el){ out[f.key] = item[f.key]; continue; }
+      out[f.key] = (f.type === 'bool') ? el.checked : el.value;
+    }
+    return out;
+  });
+  return ITEMS;
+}
+
+function setMode(mode){
+  SOURCE = (mode === 'yaml' && SOURCE === 'yaml') ? 'yaml' : SOURCE;
+  $('s-build').hidden = (mode !== 'build');
+  $('s-yaml').hidden = (mode !== 'yaml');
+  $('s-modes').querySelectorAll('.mode').forEach((b) =>
+    b.classList.toggle('on', b.dataset.mode === mode));
+}
+
+// The YAML view. For a builder state this is a PREVIEW, generated by the
+// server — the same call the save uses — so what is read here is the string the
+// fleet runs, not a second implementation of it that drifts.
+async function showYaml(){
+  if(SOURCE === 'yaml'){
+    $('s-yamlnote').textContent =
+      'This state is written as YAML. It is saved exactly as typed.';
+    $('s-yamlnote').classList.remove('warn');
+    $('s-sls').readOnly = !CAN_WRITE;
+    $('s-takeover').hidden = true;
+    setMode('yaml');
+    return;
+  }
+  collectItems();
+  setMode('yaml');
+  $('s-sls').readOnly = true;
+  $('s-yamlnote').textContent = 'Generating…';
+  $('s-yamlnote').classList.remove('warn');
+  try{
+    const name = $('s-name').value.trim() || 'preview';
+    const r = await api('states/' + encodeURIComponent(name) + '/preview',
+                        {method: 'POST', body: JSON.stringify({items: ITEMS})});
+    $('s-sls').value = r.sls;
+    $('s-yamlnote').textContent =
+      'This is what the list builds — read-only, because the list is what gets saved.';
+    $('s-takeover').hidden = !CAN_WRITE;
+  }catch(e){
+    $('s-sls').value = '';
+    $('s-yamlnote').textContent = e.message;
+    $('s-yamlnote').classList.add('warn');
+    $('s-takeover').hidden = true;
+  }
+}
+
 async function openState(name){
+  try{ await kinds(); }
+  catch(e){ say(e.message, 'err'); return; }
   $('dlg-state-h').textContent = name ? `Edit ${name}` : 'New state';
   $('s-name').value = name || '';
   $('s-name').disabled = !!name;        // a rename would orphan its assignments
   $('s-sls').value = '';
+  ITEMS = [];
+  SOURCE = 'builder';
   if(name){
-    try{ $('s-sls').value = (await api('states/' + encodeURIComponent(name))).state.sls; }
+    let st;
+    try{ st = (await api('states/' + encodeURIComponent(name))).state; }
     catch(e){ say(e.message, 'err'); return; }
+    // A state remembers how it was written. One typed as YAML opens as YAML:
+    // parsing it back into items would be a guess, and guessing at the file
+    // that configures someone's fleet is not a feature.
+    SOURCE = st.source === 'builder' ? 'builder' : 'yaml';
+    ITEMS = (st.items || []).slice();
+    $('s-sls').value = st.sls || '';
   }
-  $('s-sls').readOnly = !CAN_WRITE;
+  renderItems();
   $('s-save').hidden = !CAN_WRITE;
+  $('s-add').hidden = !CAN_WRITE;
+  $('s-kind').disabled = !CAN_WRITE;
+  if(SOURCE === 'yaml'){ await showYaml(); } else { setMode('build'); }
   $('dlg-state').showModal();
 }
+
+// ---- builder events --------------------------------------------------------
+$('s-kind').addEventListener('change', kindHelp);
+$('s-add').addEventListener('click', () => {
+  const kind = $('s-kind').value;
+  const spec = KINDS && KINDS[kind];
+  if(!spec) return;
+  collectItems();
+  ITEMS.push(Object.assign({kind}, spec.defaults || {}));
+  renderItems();
+  const first = $('s-items').querySelector(`.item[data-i="${ITEMS.length - 1}"] input,` +
+                                           `.item[data-i="${ITEMS.length - 1}"] textarea`);
+  if(first) first.focus();
+});
+$('s-items').addEventListener('click', (ev) => {
+  const drop = ev.target.closest('[data-drop]');
+  const move = ev.target.closest('[data-move]');
+  if(!drop && !move) return;
+  ev.preventDefault();
+  collectItems();
+  if(drop){ ITEMS.splice(Number(drop.dataset.drop), 1); }
+  else{
+    const [i, d] = move.dataset.move.split(':').map(Number);
+    const j = i + d;
+    if(j < 0 || j >= ITEMS.length) return;
+    [ITEMS[i], ITEMS[j]] = [ITEMS[j], ITEMS[i]];
+  }
+  renderItems();
+});
+$('s-modes').addEventListener('click', (ev) => {
+  const b = ev.target.closest('.mode');
+  if(!b) return;
+  ev.preventDefault();
+  if(b.dataset.mode === 'yaml'){ showYaml(); }
+  else if(SOURCE === 'yaml'){
+    // There is nothing to go back to: this state has no item list.
+    say('This state is written as YAML, so there is no list to build from. ' +
+        'Create a new state to use the builder.', 'err');
+  }
+  else { setMode('build'); }
+});
+// One-way on purpose, and said so. Parsing SLS back into items would be a
+// guess; what it would silently throw away is the part an operator cannot see.
+$('s-takeover').addEventListener('click', () => {
+  if(!confirm('Take over this YAML by hand?\n\nThe list stops being the source: ' +
+              'from the next version on, this state is whatever is typed here, and ' +
+              'the builder cannot be used on it again.')) return;
+  SOURCE = 'yaml';
+  $('s-sls').readOnly = false;
+  $('s-takeover').hidden = true;
+  $('s-yamlnote').textContent =
+    'Hand-edited. Saving stores this YAML as typed; the builder is no longer used ' +
+    'for this state.';
+  $('s-yamlnote').classList.add('warn');
+  $('s-sls').focus();
+});
 
 async function openRule(name){
   const meta = STATE.meta || {triggers: ['changed'], actions: ['notify']};
@@ -484,9 +747,15 @@ $('dlg-state').addEventListener('close', async (ev) => {
   if($('dlg-state').returnValue !== 'save' || !CAN_WRITE) return;
   const name = $('s-name').value.trim();
   if(!name) return say('A state needs a name.', 'err');
+  // Whichever editor owns this state is what gets sent. Sending both and
+  // letting the server choose would mean a stale preview could overwrite the
+  // list it was generated from.
+  const payload = (SOURCE === 'yaml')
+    ? {sls: $('s-sls').value}
+    : {items: collectItems()};
   try{
     const r = await api('states/' + encodeURIComponent(name),
-                        {method: 'POST', body: JSON.stringify({sls: $('s-sls').value})});
+                        {method: 'POST', body: JSON.stringify(payload)});
     say(`Saved ${r.name} v${r.version}.`, 'ok'); load();
   }catch(e){ say(e.message, 'err'); }
 });

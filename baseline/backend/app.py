@@ -27,7 +27,7 @@ import os
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import controller, eda, env, identity, salt, store, ui
+from . import build, controller, eda, env, identity, salt, store, ui
 
 app = FastAPI(title="Sysible Baseline", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -68,6 +68,25 @@ def _require(request: Request, role: str = "operator"):
     return who
 
 
+def _require_read(request: Request):
+    """Signed in, any role.
+
+    The console is served to anyone the gateway authenticates and renders
+    read-only for a role that cannot write (CAN_WRITE in ui.py). But every READ
+    endpoint it then calls demanded an operator, so an auditor got a console
+    where each panel in turn said "This needs an operator account" — a
+    read-only mode that could not read. Reading the declaration and what
+    happened when it was applied is what an auditor is for.
+
+    Writing is unchanged: every route that stores, assigns, or applies anything
+    still goes through _require(..., "operator").
+    """
+    who = identity.current(request)
+    if who is None:
+        raise HTTPException(status_code=401, detail=identity.deny_reason(request)[1])
+    return who
+
+
 def _require_agent(request: Request) -> None:
     if not identity.agent_auth_ok(request):
         raise HTTPException(
@@ -103,35 +122,74 @@ def health() -> dict:
 
 @app.get("/api/states")
 def api_states(request: Request) -> dict:
-    _require(request, "operator")
+    _require_read(request)
     return {"states": store.list_states()}
+
+
+@app.get("/api/kinds")
+def api_kinds(request: Request) -> dict:
+    """What a state can be made of, for the console to draw its forms from.
+
+    Served rather than duplicated in JavaScript so the fields the browser shows
+    and the fields the generator reads cannot drift apart.
+    """
+    _require_read(request)
+    return {"kinds": build.catalog()}
 
 
 @app.get("/api/states/{name}")
 def api_state(name: str, request: Request, version: int = Query(default=0)) -> dict:
-    _require(request, "operator")
-    rec = store.latest_state(name) if not version else None
-    if version:
-        for v in store.state_versions(name):
-            if v["version"] == version:
-                rec = store.latest_state(name)
-                break
+    _require_read(request)
+    # Asking for a version used to walk the version list and then return
+    # latest_state() regardless, so "what did this say before" answered with
+    # what it says now — on a screen whose whole purpose is comparing them.
+    rec = store.get_state(name, version) if version else store.latest_state(name)
     if rec is None:
         raise HTTPException(status_code=404, detail="No such state.")
     return {"state": rec, "versions": store.state_versions(name)}
 
 
+def _sls_from(body: dict, name: str):
+    """(sls, source, items) for a save or a preview.
+
+    `items` means the builder; `sls` means someone typed YAML. Sent both, the
+    builder wins — it is the editor that was open, and the SLS beside it is the
+    preview it generated.
+    """
+    body = body or {}
+    if body.get("items") is not None:
+        items = build.normalise(body.get("items"))
+        wrong = build.problems(items)
+        if wrong:
+            raise HTTPException(status_code=400, detail=" ".join(wrong))
+        return build.to_sls(items), "builder", items
+    return str(body.get("sls") or ""), "yaml", []
+
+
+@app.post("/api/states/{name}/preview")
+def api_preview_state(name: str, request: Request, body: dict = Body(...)) -> dict:
+    """The SLS these items would produce, without saving anything.
+
+    The console's YAML view calls this instead of generating the text itself:
+    the preview an operator reads has to be the same string the fleet runs, and
+    it is this module that writes that string.
+    """
+    _require(request, "operator")
+    sls, source, items = _sls_from(body, name)
+    return {"sls": sls, "source": source, "items": items}
+
+
 @app.post("/api/states/{name}")
 def api_save_state(name: str, request: Request, body: dict = Body(...)) -> dict:
     who = _require(request, "operator")
-    sls = (body or {}).get("sls") or ""
+    sls, source, items = _sls_from(body, name)
     try:
         # Reject here rather than at apply time: a state that cannot build a
         # command is a state that would fail on every host it is assigned to.
         salt.apply_command(sls, state_name=name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return store.save_state(name, sls, author=who.user)
+    return store.save_state(name, sls, author=who.user, source=source, items=items)
 
 
 @app.post("/api/assign")
@@ -156,7 +214,7 @@ def api_unassign(request: Request, body: dict = Body(...)) -> dict:
 
 @app.get("/api/assignments")
 def api_assignments(request: Request) -> dict:
-    _require(request, "operator")
+    _require_read(request)
     return {"assignments": store.list_assignments()}
 
 
@@ -177,7 +235,7 @@ def api_apply(target: str, request: Request, body: dict = Body(default=None)) ->
 
 @app.get("/api/rules")
 def api_rules(request: Request) -> dict:
-    _require(request, "operator")
+    _require_read(request)
     rules = store.list_rules()
     for r in rules:
         r["describes"] = eda.describe(r)
@@ -216,7 +274,7 @@ def api_delete_rule(name: str, request: Request) -> dict:
 @app.get("/api/runs")
 def api_runs(request: Request, host_id: str = Query(default=""),
              limit: int = Query(default=50, le=500)) -> dict:
-    _require(request, "operator")
+    _require_read(request)
     return {"runs": store.recent_runs(limit=limit, host_id=host_id),
             "drift": store.drift_summary()}
 

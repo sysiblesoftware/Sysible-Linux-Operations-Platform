@@ -15,3 +15,11 @@ uvicorn[standard]==0.34.0
 # down — which is exactly what happened to Flashback once when the import was
 # added here before the dependency was.
 httpx==0.28.1
+# Declared rather than leaned on: uvicorn[standard] already pulls PyYAML in, so
+# this was working by accident. backend/build.py uses it DIRECTLY to turn an
+# operator's list of items into the SLS that runs as root on the fleet, and the
+# reason it is a dependency at all is that YAML must be DUMPED, never formatted
+# as text — a path with a colon, a value that reads as a boolean, a file body
+# whose first line starts "- " each produce a different document otherwise, and
+# the first anyone knows about it is a state that fails on every host.
+pyyaml==6.0.3

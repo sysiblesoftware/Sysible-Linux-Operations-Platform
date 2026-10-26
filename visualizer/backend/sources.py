@@ -39,11 +39,13 @@ from . import fleet
 _CONTROLLER = os.getenv("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800")
 _SLEP = os.getenv("SLOP_SLEP_UPSTREAM", "host.docker.internal:8810")
 _CONNECT = os.getenv("SLOP_CONNECT_UPSTREAM", "host.docker.internal:8700")
-# New name first, pre-rebrand name honoured: an operator who pinned the old
-# variable must not have it silently ignored.
-_FLASHBACK = (os.getenv("SLOP_FLASHBACK_UPSTREAM")
-             or os.getenv("SLOP_FLASHBACK_UPSTREAM")
-             or "flashback:8080")
+# This read SLOP_FLASHBACK_UPSTREAM, and then fell back to
+# SLOP_FLASHBACK_UPSTREAM. The comment above it said "new name first, pre-rebrand
+# name honoured" and both names were the same one — left over from a rebrand that
+# was reverted, so the second read could only ever return what the first had
+# already returned. Dead, but the kind of dead that reads as a working
+# compatibility shim; see tests/test_no_value_falls_back_to_itself.py.
+_FLASHBACK = os.getenv("SLOP_FLASHBACK_UPSTREAM", "flashback:8080")
 
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 _TIMEOUT = float(os.getenv("SYSIBLE_VISUALIZER_TIMEOUT_S", "8"))

@@ -57,6 +57,14 @@ def init_db() -> None:
             sls TEXT NOT NULL,
             author TEXT NOT NULL DEFAULT '',
             created INTEGER NOT NULL,
+            -- How this version was authored. 'builder' means items_json holds
+            -- the list it was built from and the SLS above was generated from
+            -- them; 'yaml' means someone typed the SLS and there are no items.
+            -- A version remembers its own answer: a state can be switched to
+            -- YAML, and the versions before that are still openable in the
+            -- builder they were written in.
+            source TEXT NOT NULL DEFAULT 'yaml',
+            items_json TEXT NOT NULL DEFAULT '[]',
             UNIQUE(name, version)
         );
         CREATE TABLE IF NOT EXISTS assignments (
@@ -93,20 +101,37 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS runs_host ON runs(host_id, started DESC);
         """)
+        # Every state written before the builder existed was typed as YAML, and
+        # the column default says exactly that — so an existing install keeps
+        # opening its states in the editor they were written in.
+        have = {r["name"] for r in c.execute("PRAGMA table_info(states)")}
+        if "source" not in have:
+            c.execute("ALTER TABLE states ADD COLUMN source TEXT NOT NULL DEFAULT 'yaml'")
+        if "items_json" not in have:
+            c.execute("ALTER TABLE states ADD COLUMN items_json TEXT NOT NULL DEFAULT '[]'")
 
 
-def save_state(name: str, sls: str, author: str = "") -> dict:
-    """A new VERSION of a state. Never an overwrite — see the module docstring."""
+def save_state(name: str, sls: str, author: str = "", source: str = "yaml",
+               items=None) -> dict:
+    """A new VERSION of a state. Never an overwrite — see the module docstring.
+
+    `source` records HOW it was authored. The SLS is what ships either way —
+    nothing downstream of here knows or cares which editor produced it.
+    """
     if not name.strip():
         raise ValueError("a state needs a name")
     if not sls.strip():
         raise ValueError("refusing to save an empty state")
+    if source not in ("builder", "yaml"):
+        raise ValueError(f"unknown state source {source!r}")
     now = int(time.time())
+    items_json = json.dumps(items or [], separators=(",", ":"))
     with _LOCK, _db() as c:
         row = c.execute("SELECT MAX(version) v FROM states WHERE name=?", (name,)).fetchone()
         ver = (row["v"] or 0) + 1
-        c.execute("INSERT INTO states(name,version,sls,author,created) VALUES(?,?,?,?,?)",
-                  (name, ver, sls, author, now))
+        c.execute("INSERT INTO states(name,version,sls,author,created,source,items_json) "
+                  "VALUES(?,?,?,?,?,?,?)",
+                  (name, ver, sls, author, now, source, items_json))
         old = c.execute("SELECT version FROM states WHERE name=? ORDER BY version DESC "
                         "LIMIT -1 OFFSET ?", (name, KEEP_VERSIONS)).fetchall()
         for o in old:
@@ -118,21 +143,58 @@ def latest_state(name: str):
     with _LOCK, _db() as c:
         r = c.execute("SELECT * FROM states WHERE name=? ORDER BY version DESC LIMIT 1",
                       (name,)).fetchone()
-    return dict(r) if r else None
+    if not r:
+        return None
+    out = dict(r)
+    # Decoded here so no caller has to remember that one column is JSON. A
+    # malformed value reads as "no items", which the console shows as a state
+    # it cannot open in the builder rather than as a crash.
+    try:
+        out["items"] = json.loads(out.pop("items_json", "[]")) or []
+    except (ValueError, TypeError):
+        out["items"] = []
+        out["source"] = "yaml"
+    if not isinstance(out["items"], list):
+        out["items"], out["source"] = [], "yaml"
+    return out
+
+
+def get_state(name: str, version: int):
+    """One specific version, decoded like latest_state().
+
+    This exists because the API had no way to fetch one: asking for version 3
+    looked it up in the version list and then returned the LATEST state, so
+    "show me what this said before" showed what it says now.
+    """
+    with _LOCK, _db() as c:
+        r = c.execute("SELECT * FROM states WHERE name=? AND version=?",
+                      (name, int(version))).fetchone()
+    if not r:
+        return None
+    out = dict(r)
+    try:
+        out["items"] = json.loads(out.pop("items_json", "[]")) or []
+    except (ValueError, TypeError):
+        out["items"] = []
+        out["source"] = "yaml"
+    if not isinstance(out["items"], list):
+        out["items"], out["source"] = [], "yaml"
+    return out
 
 
 def state_versions(name: str) -> list:
     with _LOCK, _db() as c:
         return [dict(r) for r in c.execute(
-            "SELECT version,author,created,length(sls) AS size FROM states "
+            "SELECT version,author,created,source,length(sls) AS size FROM states "
             "WHERE name=? ORDER BY version DESC", (name,)).fetchall()]
 
 
 def list_states() -> list:
     with _LOCK, _db() as c:
         return [dict(r) for r in c.execute(
-            "SELECT name, MAX(version) AS version, MAX(created) AS created "
-            "FROM states GROUP BY name ORDER BY name").fetchall()]
+            "SELECT name, version, created, source FROM states s "
+            "WHERE version = (SELECT MAX(version) FROM states WHERE name = s.name) "
+            "ORDER BY name").fetchall()]
 
 
 def assign(target: str, state_name: str) -> None:
