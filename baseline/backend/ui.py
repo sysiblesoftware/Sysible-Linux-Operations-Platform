@@ -229,6 +229,16 @@ def console_page(who) -> str:
         "<div class=wrap>"
         "  <div class=grid id=drift></div>"
 
+        # THE FLEET, FIRST. The console listed declarations and assignments and
+        # never the hosts — so the question an operator actually arrives with,
+        # "what is this host supposed to be, and is it?", could only be answered
+        # by reading two tables and joining them in your head. The fleet itself
+        # existed on this screen only inside the Assign dialog.
+        "  <h2>Hosts <span class=n id=nhosts></span>"
+        "    <span style='margin-left:auto'></span>"
+        "  </h2>"
+        "  <div class=card id=hosts><div class=empty>Loading&hellip;</div></div>"
+
         "  <h2>Declared states <span class=n id=nstates></span>"
         "    <span style='margin-left:auto'></span>"
         + ("    <button class='sm primary' id=newstate>+ New state</button>" if can_write else "")
@@ -388,6 +398,87 @@ function drift(d){
        </div>` : '');
 }
 
+// What each host must satisfy, and whether it does.
+//
+// A host's states come from TWO places — assigned to it directly, and assigned
+// to its environment — and before this screen showed them together an operator
+// had to know that rule and apply it themselves against two other tables.
+function statesFor(host){
+  const direct = STATE.assign.filter((a) => a.target === host.id).map((a) => a.state);
+  const viaEnv = host.environment
+    ? STATE.assign.filter((a) => a.target === 'env:' + host.environment).map((a) => a.state)
+    : [];
+  return {direct, viaEnv, all: direct.concat(viaEnv)};
+}
+
+function hostStatus(host, declared){
+  // "Nothing declared for it" is NOT compliance, and it is the state most of a
+  // fleet is in on day one. Saying "as declared" there would report an entirely
+  // unconfigured fleet as green.
+  if(!declared.length) return {cls: 'faint', label: 'Not managed',
+                               note: 'no state assigned to it or its environment'};
+  const d = STATE.drift || {drifted: [], failed: []};
+  if((d.failed || []).includes(host.id)) return {cls: 'err', label: 'Failing',
+                                                 note: 'the last run could not finish'};
+  if((d.drifted || []).includes(host.id)) return {cls: 'amber', label: 'Drifted',
+                                                  note: 'the last run had to change it'};
+  const ran = (STATE.runs || []).some((r) => r.host_id === host.id && !r.preview);
+  if(!ran) return {cls: 'faint', label: 'Never applied',
+                   note: 'declared, but nothing has been applied to it yet'};
+  return {cls: 'ok', label: 'As declared', note: 'the last run changed nothing'};
+}
+
+function hostsTable(){
+  const hosts = STATE.hosts || [];
+  $('nhosts').textContent = hosts.length
+    ? `${hosts.length} from the Controller` : '';
+  if(!hosts.length){
+    return `<div class=empty>${esc(STATE.fleetNote ||
+      'The Controller has no hosts enrolled yet.')}<br>
+      States can still be declared and assigned by typing a target.</div>`;
+  }
+  const byEnv = {};
+  for(const h of hosts){ (byEnv[h.environment || ''] = byEnv[h.environment || ''] || []).push(h); }
+  let out = '';
+  for(const env of Object.keys(byEnv).sort()){
+    const label = env || 'No environment';
+    // The environment is itself a target — assigning here is how one state
+    // covers a whole environment, which is otherwise a piece of syntax you
+    // have to know (env:<name>) rather than a thing you can click.
+    out += `<table><tr><th colspan=4 style="padding-top:14px">${esc(label)}
+      ${env && CAN_WRITE ? `<button class='sm' style='margin-left:10px'
+        data-assignenv="${esc(env)}">Assign to all of ${esc(label)}</button>` : ''}
+      </th></tr>
+      <tr><th>Host</th><th>Must satisfy</th><th>State</th><th></th></tr>`;
+    out += byEnv[env].map((h) => {
+      const d = statesFor(h);
+      const st = hostStatus(h, d.all);
+      const must = d.all.length
+        ? d.direct.map((n) => `<span class=mono>${esc(n)}</span>`).join(', ') +
+          (d.viaEnv.length
+            ? (d.direct.length ? ', ' : '') + d.viaEnv.map((n) =>
+                `<span class=mono>${esc(n)}</span> <span class=faint>(via ${esc(h.environment)})</span>`).join(', ')
+            : '')
+        : '<span class=faint>nothing</span>';
+      return `<tr>
+        <td><span class=mono>${esc(h.label || h.id)}</span>
+            ${h.address ? `<div class=faint style="font-size:11.5px">${esc(h.address)}${
+              h.kind === 'ssh' ? ' · SSH' : ''}</div>` : ''}</td>
+        <td>${must}</td>
+        <td><span class="${st.cls}">${esc(st.label)}</span>
+            <div class=faint style="font-size:11.5px">${esc(st.note)}</div></td>
+        <td style="text-align:right;white-space:nowrap">
+          ${CAN_WRITE ? `<button class=sm data-assignhost="${esc(h.id)}">Assign…</button>` : ''}
+          ${d.all.length ? `<button class=sm data-preview="${esc(h.id)}">Preview</button>` : ''}
+          ${d.all.length && CAN_WRITE ? `<button class='sm primary'
+            data-apply="${esc(h.id)}">Apply now</button>` : ''}
+        </td></tr>`;
+    }).join('');
+    out += '</table>';
+  }
+  return out;
+}
+
 function statesTable(rows){
   $('nstates').textContent = rows.length ? `${rows.length} declared` : '';
   if(!rows.length) return `<div class=empty>Nothing declared yet. A host with no
@@ -404,9 +495,12 @@ function statesTable(rows){
 }
 
 function assignTable(rows){
-  if(!rows.length) return `<div class=empty>Nothing assigned. Declaring a state does
-    not apply it — assign it to a host id, or to <span class=mono>env:&lt;name&gt;</span>
-    for a whole environment.</div>`;
+  // This told people to type a host id, which stopped being how it works when
+  // the picker arrived: the instruction on the screen outlived the thing it
+  // was describing.
+  if(!rows.length) return `<div class=empty>Nothing assigned yet. Declaring a state
+    does not apply it — use <b>Assign\u2026</b> on a host above, or
+    <b>Assign to all of &lt;environment&gt;</b> to cover a whole environment.</div>`;
   return '<table><tr><th>Target</th><th>State</th><th></th></tr>' + rows.map((a) => `
     <tr><td class=mono>${esc(a.target)}</td><td class=mono>${esc(a.state)}</td>
         <td style="text-align:right">
@@ -451,11 +545,17 @@ function runsTable(rows){
 
 async function load(){
   try{
-    const [s, r, runs, a] = await Promise.all([
-      api('states'), api('rules'), api('runs?limit=50'), api('assignments')]);
+    // The fleet is fetched with everything else now, not only when the Assign
+    // dialog opens. It is allowed to fail on its own: an unreachable Controller
+    // must cost the host list, not the whole console.
+    const [s, r, runs, a, t] = await Promise.all([
+      api('states'), api('rules'), api('runs?limit=50'), api('assignments'),
+      api('targets').catch((e) => ({hosts: [], environments: [], note: e.message}))]);
     STATE = {states: s.states, rules: r.rules, runs: runs.runs,
-             drift: runs.drift, assign: a.assignments, meta: r};
+             drift: runs.drift, assign: a.assignments, meta: r,
+             hosts: t.hosts || [], envs: t.environments || [], fleetNote: t.note};
     $('drift').innerHTML = drift(runs.drift);
+    $('hosts').innerHTML = hostsTable();
     $('states').innerHTML = statesTable(s.states);
     $('assign').innerHTML = assignTable(a.assignments);
     $('rules').innerHTML = rulesTable(r);
@@ -741,7 +841,7 @@ function ruleActionChanged(){
 // source, obvious the moment it was clicked.
 const TYPE_IT = '!type-a-target';
 
-async function openAssign(stateName){
+async function openAssign(stateName, target){
   $('a-target').value = '';
   $('a-state').innerHTML = STATE.states.map((s) =>
     `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
@@ -784,7 +884,15 @@ async function openAssign(stateName){
   pick.innerHTML = opts.join('');
 
   const empty = !(d.hosts || []).length && !(d.environments || []).length;
-  if(empty) pick.value = TYPE_IT;
+  if(target && [...pick.options].some((o) => o.value === target)){
+    pick.value = target;
+  } else if(target){
+    // A target the Controller does not list — still assignable, by typing.
+    pick.value = TYPE_IT;
+    $('a-target').value = target;
+  } else if(empty){
+    pick.value = TYPE_IT;
+  }
   syncAssignPick();
   $('a-note').textContent = d.note
     ? d.note
@@ -849,6 +957,10 @@ document.addEventListener('click', async (ev) => {
     if(t.id === 'newrule')  return openRule('');
     if(t.dataset.edit)      return openState(t.dataset.edit);
     if(t.dataset.delstate)  return deleteState(t.dataset.delstate);
+    // Assigning FROM a host row: the target is already known, so the dialog
+    // opens with it chosen rather than making you find it in the list again.
+    if(t.dataset.assignhost) return openAssign('', t.dataset.assignhost);
+    if(t.dataset.assignenv)  return openAssign('', 'env:' + t.dataset.assignenv);
     if(t.dataset.rule)      return openRule(t.dataset.rule);
     if(t.dataset.assign)    return openAssign(t.dataset.assign);
     if(t.dataset.preview)   return applyTo(t.dataset.preview, true);
