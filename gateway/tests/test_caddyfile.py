@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -549,3 +550,87 @@ def test_a_wedged_upstream_answers_instead_of_hanging(tmp_path):
         f"the health probe took {took:.1f}s against a wedged upstream — the portal "
         f"dot stays grey for that long, which is what 'nothing is coming up' looked like")
     assert code in (502, 504), f"a wedged upstream reported HTTP {code}"
+
+
+# ---- the portal must not be served from a stale cache ----------------------
+@needs_caddy
+def test_the_portal_revalidates_but_the_art_does_not(adapted):
+    """index.html, app.js and style.css carried no Cache-Control at all, so
+    browsers applied HEURISTIC freshness — roughly a tenth of the file's age —
+    and served the portal without asking. The symptom is a portal missing an
+    app that was added hours ago, or (worse) a NEW index.html alongside an OLD
+    app.js, which is a page whose script is looking for elements that are not
+    there any more.
+
+    The brand art keeps its year-long immutable cache: that content genuinely
+    never changes under the same name, and it is the only thing here big enough
+    for the round trip to matter.
+    """
+    headers = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if obj.get("handler") == "headers":
+                got = obj.get("response", {}).get("set", {}).get("Cache-Control")
+                if got:
+                    headers.append(got[0])
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(adapted)
+    assert "no-cache" in headers, \
+        f"nothing tells a browser to revalidate the portal: {headers}"
+    assert any("immutable" in h for h in headers), \
+        f"the brand art lost its long cache: {headers}"
+
+
+@needs_caddy
+def test_the_portal_script_is_served_with_the_same_policy_as_its_page(tmp_path):
+    """The one that actually matters, measured rather than inferred: a browser
+    holding a stale app.js next to a fresh index.html is a portal whose script
+    reveals elements that no longer exist. Served by the SAME catch-all handle,
+    so they can never disagree — proved by asking a real caddy for both.
+    """
+    import urllib.request
+
+    srv = tmp_path / "srv" / "portal"
+    (srv / "brand").mkdir(parents=True)
+    for name in ("index.html", "app.js", "style.css"):
+        (srv / name).write_text("x")
+    (srv / "brand" / "topo-dark.svg").write_text("<svg/>")
+    cfg = tmp_path / "Caddyfile"
+    cfg.write_text(
+        "{\n  admin off\n  auto_https off\n}\n"
+        ":9098 {\n"
+        f"  handle /brand/* {{\n    root * {srv}\n    file_server\n"
+        '    header Cache-Control "public, max-age=604800, immutable"\n  }\n'
+        f"  handle {{\n    root * {srv}\n"
+        '    header Cache-Control "no-cache"\n    file_server\n  }\n}\n')
+    proc = subprocess.Popen([caddy_bin, "run", "--config", str(cfg),
+                             "--adapter", "caddyfile"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        got = {}
+        for _ in range(50):
+            try:
+                for path in ("/index.html", "/app.js", "/style.css",
+                             "/brand/topo-dark.svg"):
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:9098{path}", timeout=2) as r:
+                        got[path] = r.headers.get("Cache-Control")
+                break
+            except Exception:
+                time.sleep(0.1)
+        assert got, "caddy never came up"
+        assert got["/index.html"] == "no-cache", got
+        assert got["/app.js"] == got["/index.html"], (
+            "the portal's script and its page are cached differently, so a "
+            f"browser can hold one without the other: {got}")
+        assert got["/style.css"] == got["/index.html"], got
+        assert "immutable" in (got["/brand/topo-dark.svg"] or ""), got
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

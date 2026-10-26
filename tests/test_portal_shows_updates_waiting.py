@@ -43,7 +43,7 @@ def _apps(available_count, total=4):
 def portal():
     """The real portal page, with /auth/me and the updates endpoint stubbed."""
     class Portal:
-        def open(self, role="superuser", status=None, status_code=200):
+        def open(self, role="superuser", status=None, status_code=200, me_status=200):
             pw = sync_playwright().start()
             browser = pw.chromium.launch(executable_path=CHROMIUM)
             page = browser.new_page()
@@ -53,7 +53,13 @@ def portal():
             def route(r, req):
                 u = req.url
                 if "/auth/me" in u:
-                    body = {"authenticated": True, "user": "admin", "role": role}
+                    if me_status != 200:
+                        return r.fulfill(status=me_status, body="")
+                    body = {"authenticated": True, "user": "admin"}
+                    # role=None stands for "answered, but said nothing about
+                    # the role" — which is NOT the same as "not a superuser".
+                    if role is not None:
+                        body["role"] = role
                     return r.fulfill(status=200, content_type="application/json",
                                      body=json.dumps(body))
                 if "/admin/updates/status" in u:
@@ -145,10 +151,13 @@ def test_it_does_not_force_a_git_fetch(portal):
 # not an app, and the grid answers "which tool do I want". The rule it proves is
 # the same one, and it is the rule that matters: hidden has to mean hidden.
 def test_the_administration_tab_is_really_hidden_from_a_non_superuser(portal):
+    """The tab is rendered VISIBLE and hidden once /auth/me says the role is
+    not superuser — see test_there_is_always_a_way_into_administration below
+    for why that way round. `hidden` still has to actually hide."""
     p = portal.open(role="operator", status=_apps(available_count=2))
     tab = p.query_selector("#admtab")
     assert tab is not None, "the Administration entry is gone from the portal"
-    assert tab.get_attribute("hidden") is not None, "the markup stopped hiding it"
+    assert tab.get_attribute("hidden") is not None, "nothing hid it from an operator"
     assert tab.is_hidden(), "it carries hidden= and renders anyway"
 
 
@@ -182,3 +191,51 @@ def test_administration_is_not_one_of_the_app_tiles(portal):
         f"Administration is back in the app grid: {in_grid}"
     assert p.evaluate("() => !!document.querySelector('header .admtab')"), \
         "the Administration tab is not in the header"
+
+
+# ---- the way in must not depend on a fetch succeeding ----------------------
+# Reported: "I don't see a way to go to the administration options."
+#
+# The tab was rendered `hidden` and revealed only when /auth/me came back with
+# exactly role === "superuser". It is the ONLY link to /admin on this page, so
+# every other outcome — the request failing, an answer with no role in it, an
+# answer saying "Superuser" — produced the same silent nothing, with no way
+# into Administration and nothing on screen to suggest one existed.
+#
+# It fails open now. A non-superuser who slips through sees one link that tells
+# them they need a superuser account; /admin is gated server-side by the IdP
+# and the whole portal is behind sign-in at the gateway. Failing closed costs
+# everyone the way in, which is strictly worse.
+def _tab_visible(page):
+    return page.evaluate(
+        "() => {var t = document.getElementById('admtab');"
+        " return t ? t.offsetParent !== null : false;}")
+
+
+def test_a_superuser_sees_the_way_in(portal):
+    assert _tab_visible(portal.open(role="superuser", status=_apps(0)))
+
+
+def test_an_unreachable_auth_me_still_leaves_a_way_in(portal):
+    """This is the reported bug. The portal is best-effort about everything
+    else; being best-effort about the only entry point meant losing it."""
+    p = portal.open(role="superuser", status=_apps(0), me_status=503)
+    assert _tab_visible(p), \
+        "/auth/me failed and the portal has no link to Administration at all"
+
+
+def test_an_answer_with_no_role_leaves_a_way_in(portal):
+    """Not knowing the role is not the same as knowing it is not superuser."""
+    p = portal.open(role=None, status=_apps(0))
+    assert _tab_visible(p), "an answer that said nothing about the role hid the way in"
+
+
+def test_the_role_is_matched_without_caring_about_case(portal):
+    """Being strict here only creates silent invisibility."""
+    assert _tab_visible(portal.open(role="Superuser", status=_apps(0)))
+
+
+@pytest.mark.parametrize("role", ["operator", "auditor"])
+def test_a_non_superuser_is_the_one_case_that_hides_it(portal, role):
+    p = portal.open(role=role, status=_apps(2))
+    assert not _tab_visible(p), f"a {role} is shown the Administration tab"

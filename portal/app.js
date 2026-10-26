@@ -102,13 +102,25 @@
       if (!me || !me.authenticated) return;
       var who = document.getElementById("who");
       if (who) who.textContent = me.user + (me.role ? " · " + me.role : "");
-      if (me.role === "superuser") {
-        // Administration (accounts + all SLOP configuration) is the superuser
-        // entry point to /admin. It is a tab in the header, not a tile: it is
-        // not an app, and it does not belong in a grid that answers "which tool
-        // do I want". Superuser-only, revealed here.
-        var admTab = document.getElementById("admtab");
-        if (admTab) admTab.hidden = false;
+      // Administration (accounts + all SLOP configuration) is the superuser
+      // entry point to /admin, and the only link to it on this page. It is
+      // rendered VISIBLE and hidden here — only when /auth/me has actually
+      // answered and the answer is a role that is not superuser.
+      //
+      // Hiding by default and revealing on success is what left this portal
+      // with no way into Administration: an /auth/me that failed, answered
+      // without a role, or answered "Superuser" instead of "superuser" all
+      // produced the same silent nothing. Compare case-insensitively for the
+      // same reason.
+      // Hide only when the answer POSITIVELY says they are not a superuser.
+      // An answer with no role at all is not that — it is another way of not
+      // knowing, and treating it as "no" puts us straight back to a portal
+      // with no way into Administration.
+      var role = String(me.role || "").toLowerCase();
+      var isSuper = role === "superuser";
+      var admTab = document.getElementById("admtab");
+      if (admTab && role && !isSuper) admTab.hidden = true;
+      if (isSuper) {
         // Only now: /admin/updates/status answers 403 to anyone else, and the
         // tab the badge lives on is superuser-only anyway.
         checkUpdates();
