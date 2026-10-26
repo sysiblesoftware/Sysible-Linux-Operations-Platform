@@ -44,7 +44,7 @@ def portal():
     """The real portal page, with /auth/me and the updates endpoint stubbed."""
     class Portal:
         def open(self, role="superuser", status=None, status_code=200, me_status=200,
-                 css=None):
+                 css=None, visit_admin=False):
             pw = sync_playwright().start()
             browser = pw.chromium.launch(executable_path=CHROMIUM)
             page = browser.new_page()
@@ -82,6 +82,15 @@ def portal():
                 return r.continue_()
 
             page.route("**/*", dispatch)
+            if visit_admin:
+                # Make /admin a VISITED link. A fresh profile has visited
+                # nothing, so :visited never applies and an unstyled <a> is not
+                # purple — which is why every earlier test missed the reported
+                # symptom entirely.
+                page.goto("file://" + os.path.join(PORTAL, "index.html") + "#admin-visited")
+                page.evaluate("() => { var a=document.getElementById('admtab');"
+                              " if(a) a.click(); }")
+                page.wait_for_timeout(100)
             page.goto("file://" + os.path.join(PORTAL, "index.html"))
             page.wait_for_timeout(600)
             self.page = page
@@ -309,3 +318,74 @@ def test_an_unreadable_stylesheet_never_cries_wolf(portal):
     }""")
     assert broke
     assert p.query_selector("#stale") is None
+
+
+# ---- the header tab must not depend on a separately-cached file ------------
+# Reported twice. First "I don't see a way to go to the administration
+# options" (the reveal logic), then "Why is this purple? The font looks weird
+# too" and, after a hard refresh, "Administration is still purple".
+#
+# Purple-and-underlined at the inherited size is what an <a> looks like with no
+# rule applied. index.html and style.css are two files with two cache entries,
+# so a browser can hold new markup with an old stylesheet — and this element is
+# the only way into Administration, so when it renders unstyled it does not
+# just look wrong, it stops reading as a control at all.
+#
+# Its rules ship inline with the markup that needs them now. Everything else on
+# the page is older than its markup and stays in the stylesheet.
+#
+# The link is VISITED in these tests. A fresh browser profile never visits
+# anything, so :visited never applied and the exact reported symptom was
+# unreproducible in every test written before this one.
+_PRE_TAB_CSS = ":root{--bg:#0d1117;--panel:#131923;--line:#26303f;--text:#e6edf5;" \
+               "--muted:#93a1b5;--accent:#43a047;--font:sans-serif}\n" \
+               "body{background:var(--bg);color:var(--text);font-family:var(--font)}\n" \
+               ".head-right{display:flex;align-items:center;gap:14px}\n" \
+               "[hidden]{display:none !important}\n"
+
+
+def _tab_style(page):
+    """The tab's computed style, plus what var(--muted, …) resolves to RIGHT NOW.
+
+    Comparing against a literal colour was wrong: the portal has a light theme,
+    so --muted is #93a1b5 or #5b6675 depending on which one is active, and the
+    first version of this test failed on correct code for that reason alone.
+    The property is "it is the muted colour", not "it is that hex".
+    """
+    return page.evaluate(
+        "() => {var t=document.getElementById('admtab'); if(!t) return null;"
+        " var probe=document.createElement('span');"
+        " probe.style.color='var(--muted, #93a1b5)';"
+        " document.body.appendChild(probe);"
+        " var want=getComputedStyle(probe).color; probe.remove();"
+        " var s=getComputedStyle(t);"
+        " return {color:s.color, muted:want, deco:s.textDecorationLine,"
+        "         border:parseFloat(s.borderTopWidth), size:s.fontSize};}")
+
+
+@pytest.mark.parametrize("css,label", [
+    (None, "the current stylesheet"),
+    (_PRE_TAB_CSS, "a stylesheet from before the tab existed"),
+    ("", "no stylesheet at all"),
+])
+def test_the_admin_tab_is_styled_whatever_the_stylesheet_says(portal, css, label):
+    p = portal.open(role="superuser", status=_apps(1), css=css, visit_admin=True)
+    got = _tab_style(p)
+    assert got, "the Administration tab is gone"
+    assert got["deco"] == "none", f"underlined with {label}: {got}"
+    assert got["color"] == got["muted"], \
+        f"not the muted colour with {label} — purple is the visited default: {got}"
+    assert got["border"] >= 1, f"no tab outline with {label}: {got}"
+    assert got["size"] == "13.5px", f"inherited font size with {label}: {got}"
+
+
+def test_the_tab_rules_travel_with_the_markup(portal):
+    """Structural, not visual: the point is that the two cannot be split."""
+    import os as _os
+    html = open(_os.path.join(PORTAL, "index.html"), encoding="utf-8").read()
+    assert ".admtab {" in html or ".admtab{" in html, \
+        "the tab's rules left index.html — a cached stylesheet can strand it again"
+    css = open(_os.path.join(PORTAL, "style.css"), encoding="utf-8").read()
+    decls = [ln for ln in css.splitlines()
+             if ln.strip().startswith(".admtab") and "{" in ln]
+    assert not decls, f"the rules are in both files and will drift: {decls}"

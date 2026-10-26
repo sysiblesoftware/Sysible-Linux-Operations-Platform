@@ -72,12 +72,12 @@ body { background: var(--bg); color: var(--text); font-family: var(--font);
 /* Administration, in the header rather than among the app tiles. Styled as a
    tab: a quiet outline that lights up on hover, distinct from the app cards
    below and from the plain text links beside it, so it reads as "a different
-   place" rather than "another app" or "another link". */
-.admtab { display: inline-flex; align-items: center; gap: 7px; text-decoration: none;
-  color: var(--muted); font-size: 13.5px; padding: 6px 12px; border-radius: 9px;
-  border: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
-.admtab:hover { color: var(--text); border-color: var(--accent); }
-.admtab svg { opacity: .85; }
+   place" rather than "another app" or "another link".
+
+   ITS RULES LIVE IN index.html, inline, and deliberately not here. That element
+   has rendered wrong twice because a browser held this stylesheet without that
+   markup — see the comment on the <style> block there. Everything else on the
+   page is older than its markup and belongs in this file. */
 
 /* "2 updates" on the Administration tab. Amber, the same colour this platform
    uses for an update everywhere else (the IdP's .upd-pill, the Controller's
