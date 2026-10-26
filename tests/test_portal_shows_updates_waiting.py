@@ -119,11 +119,11 @@ def test_a_403_leaves_the_badge_hidden(portal):
 
 
 def test_a_non_superuser_never_asks(portal):
-    """/admin/updates/status answers 403 to anyone else, and the tile it badges
+    """/admin/updates/status answers 403 to anyone else, and the tab it badges
     is superuser-only — so an operator's portal must not call it at all."""
     p = portal.open(role="operator", status=_apps(available_count=2))
     assert portal.calls == [], portal.calls
-    assert p.query_selector("#card-admin").is_hidden()
+    assert p.query_selector("#admtab").is_hidden()
 
 
 # ---- and it must not cost the portal its speed ------------------------------
@@ -138,27 +138,47 @@ def test_it_does_not_force_a_git_fetch(portal):
 # ---- the bug the test above found -------------------------------------------
 # `hidden` is only display:none from the UA stylesheet, and .card/.userbox both
 # set an explicit display, so every `hidden` in this page was being overridden.
-# The superuser-only Administration tile was rendering for every signed-in user,
+# The superuser-only Administration entry rendered for every signed-in user,
 # and the identity chip appeared before /auth/me had answered.
-def test_the_administration_tile_is_really_hidden_from_a_non_superuser(portal):
+#
+# It is a header TAB now rather than a tile in the app grid — Administration is
+# not an app, and the grid answers "which tool do I want". The rule it proves is
+# the same one, and it is the rule that matters: hidden has to mean hidden.
+def test_the_administration_tab_is_really_hidden_from_a_non_superuser(portal):
     p = portal.open(role="operator", status=_apps(available_count=2))
-    card = p.query_selector("#card-admin")
-    assert card.get_attribute("hidden") is not None, "the markup stopped hiding it"
-    assert card.is_hidden(), "it carries hidden= and renders anyway"
+    tab = p.query_selector("#admtab")
+    assert tab is not None, "the Administration entry is gone from the portal"
+    assert tab.get_attribute("hidden") is not None, "the markup stopped hiding it"
+    assert tab.is_hidden(), "it carries hidden= and renders anyway"
 
 
 def test_an_auditor_does_not_see_it_either(portal):
     p = portal.open(role="auditor", status=_apps(available_count=2))
-    assert p.query_selector("#card-admin").is_hidden()
+    assert p.query_selector("#admtab").is_hidden()
 
 
 def test_a_superuser_does_see_it(portal):
     """The rule must hide what is hidden without hiding what is not."""
     p = portal.open(role="superuser", status=_apps(available_count=0))
-    assert p.query_selector("#card-admin").is_visible()
+    assert p.query_selector("#admtab").is_visible()
 
 
 def test_the_identity_chip_appears_only_once_someone_is_known(portal):
     """Same inert-hidden bug: it showed before /auth/me resolved."""
     p = portal.open(role="superuser", status=_apps(available_count=0))
     assert p.query_selector("#userbox").is_visible()
+
+
+def test_administration_is_not_one_of_the_app_tiles(portal):
+    """It is not an app. The grid answers "which tool do I want"; Administration
+    answers "I need to change the platform itself", and it grew a health dot and
+    an update badge that no other tile had because it never fitted there."""
+    p = portal.open(role="superuser", status=_apps(available_count=1))
+    assert p.query_selector("#admtab") is not None, "the header tab is gone"
+    in_grid = p.evaluate(
+        "() => [...document.querySelectorAll('.cards .card')]"
+        ".map(c => (c.querySelector('h2')||{}).textContent||'')")
+    assert not any("Administration" in t for t in in_grid), \
+        f"Administration is back in the app grid: {in_grid}"
+    assert p.evaluate("() => !!document.querySelector('header .admtab')"), \
+        "the Administration tab is not in the header"

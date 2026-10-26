@@ -762,6 +762,14 @@ details.help p{margin:.5rem 0 0;line-height:1.55}
 border-radius:20px;font-size:12.5px;color:var(--muted);text-decoration:none}
 .chip:hover{color:var(--text);border-color:var(--accent)}
 .chip.on{color:var(--text);border-color:var(--accent);background:var(--panel2)}
+/* The `hidden` attribute is only `display:none` from the UA stylesheet, so ANY
+   explicit display rule silently beats it. This stylesheet has now hit that
+   twice: .prod-controls set display:flex, so every Manage panel rendered
+   permanently open; .appframe sets display:block, so hiding a failed app frame
+   left the frame AND the failure message on screen together. The portal's
+   stylesheet already answers this globally — so does this one now, and the
+   next element someone hides does not have to rediscover it. */
+[hidden]{display:none !important}
 .appframe{width:100%;height:min(72vh,900px);border:1px solid var(--line);
 border-radius:12px;background:var(--panel);display:block}
 .upd-log{margin:.6rem 0 0;padding:.6rem .8rem;background:var(--field,#0d1320);
@@ -771,6 +779,54 @@ line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .back{display:inline-flex;align-items:center;gap:5px;margin-bottom:10px;padding:5px 11px;
   border:1px solid var(--line);border-radius:8px;font-size:13px;color:var(--muted)}
 .back:hover{color:var(--accent2);border-color:var(--accent2)}
+/* Administration's nav. Each of these four pages used to hand-write its own
+   run of "Configuration · Apps · Software & services · Your account · Portal →"
+   — a sentence of undifferentiated blue links that omitted the page you were
+   on, mixed the four SECTIONS of Administration with two links that LEAVE it,
+   and had already drifted into a different order on every page. You could not
+   see where you were, and the only way to learn the whole set was to visit
+   every page and union them.
+
+   One strip, generated once, with the current section marked. */
+.anav{display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin:2px 0 14px;
+padding-bottom:0;border-bottom:1px solid var(--line)}
+.anav a{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;font-size:13.5px;
+color:var(--muted);border:1px solid transparent;border-bottom:0;
+border-radius:9px 9px 0 0;position:relative;top:1px}
+.anav a:hover{color:var(--text);background:var(--panel2)}
+/* The current section, and the only one that is not a link. */
+.anav a[aria-current=page]{color:var(--text);font-weight:600;background:var(--panel2);
+border-color:var(--line);border-bottom:1px solid var(--panel2)}
+/* The count of products behind, ON the tab it leads to — it used to float in
+   the link run as a separate pill pointing at the same place. */
+.anav .n{background:#e0a83a;color:#0d1117;border-radius:9px;padding:0 6px;
+font-size:11px;font-weight:700;line-height:17px}
+.anav .n[hidden]{display:none}
+/* Links that LEAVE Administration, kept out of the section tabs so the strip
+   is four places you can be rather than six things that are blue. */
+.anav .away{margin-left:auto;display:flex;gap:2px}
+.anav .away a{font-size:12.5px;color:var(--faint)}
+@media(max-width:560px){
+  .anav .away{margin-left:0;width:100%;border-top:1px solid var(--line);margin-top:2px}
+}
+/* Configuration is eight tables and about three thousand pixels tall. There
+   was no way to reach any one of them except scrolling past the others, and no
+   way to see from the top what the page even contained. */
+/* Shown instead of the embedded console when the app answers with something
+   that is not one. */
+.framefail{margin:.8rem 0 0;padding:16px 18px;border:1px solid var(--line);
+border-radius:12px;background:var(--panel2)}
+.framefail[hidden]{display:none}
+.framefail b{display:block;margin-bottom:.3rem}
+.cfgindex{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:1em 0 0;
+padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}
+.cfgindex-h{color:var(--faint);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+margin-right:4px}
+.cfgindex a{font-size:12.5px;color:var(--accent2);padding:3px 9px;border-radius:7px;
+border:1px solid var(--line);background:var(--panel)}
+.cfgindex a:hover{border-color:var(--accent2)}
+/* So a jumped-to section is not welded to the top edge of the viewport. */
+fieldset[id^=cfg-]{scroll-margin-top:16px}
 .foot{margin-top:1.4em;color:var(--faint);font-size:12px;text-align:center;letter-spacing:.04em}
 fieldset{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:1.2em 0 0}
 legend{color:var(--muted);font-size:12.5px;padding:0 6px}
@@ -822,10 +878,41 @@ window.pushToast=function(msg,opts){
 """
 
 
-# The "Updates available" pill. Hidden by default and revealed by the poll
-# below only when a product is genuinely behind, so a current platform shows
-# nothing — a permanently-lit badge is noise, not information.
-_PILL = "<a class=upd-pill id=updpill href='/admin/updates' title='A product has an update available'>&#11014; Updates available <b>0</b></a> "
+# Administration's four sections, in one place. Each page used to name the
+# other three itself, in its own order, leaving its own name out — so no page
+# ever showed the whole set and none of them said where you were.
+_ADMIN_SECTIONS = (
+    ("accounts", "/admin", "Accounts"),
+    ("apps", "/admin/apps", "Apps"),
+    ("settings", "/admin/settings", "Configuration"),
+    ("updates", "/admin/updates", "Software &amp; services"),
+)
+
+
+def _admin_nav(current: str) -> str:
+    """The section strip. `current` is a key from _ADMIN_SECTIONS.
+
+    The count of products behind rides the tab it leads to. It was a separate
+    "⬆ Updates available 3" pill sitting in the same line and pointing at the
+    same page — two controls for one fact.
+    """
+    tabs = []
+    for key, href, label in _ADMIN_SECTIONS:
+        here = " aria-current=page" if key == current else ""
+        badge = ("<span class=n id=updn hidden>0</span>" if key == "updates" else "")
+        tabs.append(f"<a href='{href}'{here}>{label}{badge}</a>")
+    # Deliberately NOT a "Portal →" here: every admin page carries a "← Portal"
+    # button top-left, and a second link to the same place in the same strip is
+    # the duplication this nav exists to remove. "Your account" stays, because
+    # it is the one destination that is neither a section nor the way out.
+    return ("<nav class=anav aria-label='Administration'>"
+            + "".join(tabs)
+            + "<span class=away><a href='/account'>Your account</a></span></nav>")
+
+
+# Kept as a name because the poll below writes to it; it is now the count on the
+# Software &amp; services tab rather than a pill of its own.
+_PILL = ""
 # "Set" confirms a role change, so with nothing changed it has nothing to do.
 # Disabling it says that, and keeps the row quiet until there is something to
 # apply. Rendered ENABLED and disabled from here, so a browser with no JavaScript
@@ -847,7 +934,7 @@ _SETROLE_JS = (
     "})();</script>"
 )
 
-_PILL_POLL = "<script>fetch('/admin/updates/status',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d.apps)return;var n=d.apps.filter(function(a){return a.available;}).length;var p=document.getElementById('updpill');if(p&&n>0){p.classList.add('on');p.querySelector('b').textContent=n;}}).catch(function(){});</script>"
+_PILL_POLL = ("<script>fetch('/admin/updates/status',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d.apps)return;var n=d.apps.filter(function(a){return a.available;}).length;var b=document.getElementById('updn');if(b){b.textContent=n;b.hidden=(n===0);b.title=n+' product'+(n===1?'':'s')+' can be updated';}}).catch(function(){});</script>")
 
 
 def _page(title: str, body: str, wide: bool = False) -> str:
@@ -1276,8 +1363,8 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
     body = (
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin/settings'>Configuration</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software &amp; services</a> · <a href='/account'>Your account</a> · "
-        "<a href='/'>Portal →</a><br>One credential signs a user into all three apps, "
+        + _admin_nav("accounts")
+        + "<p class=sub>One credential signs a user into all three apps, "
         "and the role set here is the role every app enforces.</p>"
         f"{_msg(msg, kind)}"
         f"<h2 class=sect>{n} account{'' if n == 1 else 's'}</h2>"
@@ -1446,11 +1533,28 @@ def admin_delete(request: Request, username: str, csrf: str = Form("")):
 # status + reference view, not an editor; the account actions on /admin are the
 # runtime-editable surface.
 # ---------------------------------------------------------------------------
+_BACKTICK = re.compile(r"`([^`]{1,120})`")
+
+
+def _desc(text: str) -> str:
+    """A parameter description: escaped, then `backticks` become <code>.
+
+    Descriptions are plain text and are escaped, which is right — several of
+    them contain literal placeholders like <app> and <host-ip> that MUST show
+    as angle brackets. But one of them had been written with real markup in it,
+    so the page rendered the characters `<span class=mono>` to the operator,
+    inside the sentence, as text. Escaping was not the bug; having no safe way
+    to say "this bit is a path" was. Backticks are that way.
+    """
+    return _BACKTICK.sub(r"<code>\1</code>", escape(text))
+
+
 def _cfg_table(items) -> str:
-    """items: list of (env_name, value_html, desc). value_html is pre-escaped/marked."""
+    """items: list of (env_name, value_html, desc). value_html is pre-escaped/marked;
+    desc is PLAIN TEXT and may use `backticks` for code."""
     trs = "".join(
         f"<tr><td><code>{escape(name)}</code></td><td class=mono>{value}</td>"
-        f"<td class=sub style='margin:0'>{escape(desc)}</td></tr>"
+        f"<td class=sub style='margin:0'>{_desc(desc)}</td></tr>"
         for name, value, desc in items
     )
     return ("<table><tr><th>Parameter</th><th>Value</th><th>What it does</th></tr>"
@@ -1474,7 +1578,7 @@ def _config_page(sess: sqlite3.Row) -> str:
          # operator to the logs for a password that has not been in them since
          # it moved to a 0600 file.
          "Bootstrap admin password. Empty = a random one is generated into "
-         "<span class=mono>$SLOP_DATA_DIR/initial-password</span> (mode 0600), never the log. "
+         "`$SLOP_DATA_DIR/initial-password` (mode 0600), never the log. "
          "It is deleted the first time that account signs in."),
         ("SLOP_ADMIN_FORCE_CHANGE",
          "on" if os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "1") == "1" else "off",
@@ -1571,34 +1675,50 @@ def _config_page(sess: sqlite3.Row) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Configuration</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/apps'>Apps</a> · <a href='/admin/updates'>Software &amp; services</a> · <a href='/account'>Your account</a> · "
-        "<a href='/'>Portal &rarr;</a></p>"
-        "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
+        + _admin_nav("settings")
+        + "<p class=sub>SLOP is configured through environment variables in <code>.env</code> "
         "(the gateway host, and each app), applied when the stack is restarted "
         "(<code>sysiblectl &lt;app&gt; up</code>). This page shows the running values and "
         "documents every parameter &mdash; stored passwords and the shared secret are never "
         "displayed (only whether each is set; a one-time temp password from a reset is shown "
         "once, on the reset screen). "
         "Manage users and password resets under <a href='/admin'>Accounts</a>.</p>"
-        f"<fieldset><legend>Identity &amp; passwords</legend>{identity}</fieldset>"
-        f"<fieldset><legend>Login throttle &amp; sessions</legend>{logins}</fieldset>"
-        f"<fieldset><legend>Single sign-on (trust boundary)</legend>{sso}</fieldset>"
-        f"<fieldset><legend>Role mapping (one identity, every app)</legend>"
-        "<p class=sub style='margin:.2rem 0 .6rem'>SLOP is the identity authority; each "
-        "app trusts the gateway-asserted role and maps it to its own.</p>"
-        f"{role_map}</fieldset>"
-        f"<fieldset><legend>Controller RBAC &amp; security parameters</legend>"
-        "<p class=sub style='margin:.2rem 0 .6rem'>These are managed live in the Controller "
-        "(with its own audit trail). Each link opens the exact settings tab &mdash; signed in "
-        "by SSO, no second login.</p>"
-        f"{controller_rbac}</fieldset>"
-        f"<fieldset><legend>App upstreams (set on the gateway)</legend>"
-        "<p class=sub style='margin:.2rem 0 .6rem'>Defaults shown &mdash; override in the "
-        "gateway's <code>.env</code> if an app runs elsewhere.</p>"
-        f"{upstreams}</fieldset>"
-        f"<fieldset><legend>Per-app SSO (set in each app's .env)</legend>{apps}</fieldset>"
-        f"<fieldset><legend>Data store</legend>{store}</fieldset>"
     )
+
+    # The sections, ONCE. The jump index below and the fieldsets are rendered
+    # from this one list, so an index entry can never point at a section that
+    # moved or was renamed — and a new section gets its index entry for free.
+    role_note = ("<p class=sub style='margin:.2rem 0 .6rem'>SLOP is the identity "
+                 "authority; each app trusts the gateway-asserted role and maps it "
+                 "to its own.</p>")
+    rbac_note = ("<p class=sub style='margin:.2rem 0 .6rem'>These are managed live in "
+                 "the Controller (with its own audit trail). Each link opens the exact "
+                 "settings tab &mdash; signed in by SSO, no second login.</p>")
+    up_note = ("<p class=sub style='margin:.2rem 0 .6rem'>Defaults shown &mdash; "
+               "override in the gateway's <code>.env</code> if an app runs "
+               "elsewhere.</p>")
+    sections = (
+        ("identity", "Identity &amp; passwords", identity),
+        ("logins", "Login throttle &amp; sessions", logins),
+        ("sso", "Single sign-on (trust boundary)", sso),
+        ("roles", "Role mapping (one identity, every app)", role_note + role_map),
+        ("rbac", "Controller RBAC &amp; security parameters", rbac_note + controller_rbac),
+        ("upstreams", "App upstreams (set on the gateway)", up_note + upstreams),
+        ("perapp", "Per-app SSO (set in each app's .env)", apps),
+        ("store", "Data store", store),
+    )
+    # Eight tables, roughly three thousand pixels of them, and no way to reach
+    # any one of them except scrolling past the others. The index is what makes
+    # the page a reference instead of a document.
+    index = ("<nav class=cfgindex aria-label='Configuration sections'>"
+             "<span class=cfgindex-h>Jump to</span>"
+             + "".join(f"<a href='#cfg-{sid}'>{legend}</a>"
+                       for sid, legend, _html in sections)
+             + "</nav>")
+    body += index + "".join(
+        f"<fieldset id='cfg-{sid}'><legend>{legend}</legend>{html}</fieldset>"
+        for sid, legend, html in sections)
+
     return _page("Configuration · SLOP", body + _PILL_POLL, wide=True)
 
 
@@ -1626,6 +1746,45 @@ _APP_ADMIN = {
     "slep": ("Sysible Linux Engineering Platform", "/slep/", []),
     "connect": ("Sysible Connect", "/connect/", []),
 }
+
+
+# When an app is down, or behind a gateway route that answers 404, the frame
+# renders whatever came back. That was a 700px black panel containing the two
+# words {"detail":"Not Found"} and a "Pretty-print" checkbox — the browser's own
+# JSON viewer, shown to an operator as if it were a console.
+#
+# SLOP is ONE origin, so this frame is same-origin and its document can be read.
+# A real admin console is hundreds of elements; a failure is a handful and a
+# line of text. That is the test — not the status code, which the frame does not
+# expose.
+_APPFRAME_JS = r"""
+(function(){
+  var f=document.getElementById('appframe'), box=document.getElementById('framefail');
+  if(!f||!box)return;
+  function describe(d){
+    var t=((d.body&&d.body.textContent)||'').trim();
+    var n=d.body?d.body.querySelectorAll('*').length:0;
+    // A console has structure. Few elements AND little text is a failure page,
+    // a bare JSON body, or nothing at all.
+    if(n>12||t.length>600) return null;
+    if(!t) return 'It returned an empty page.';
+    return 'It returned: ' + (t.length>200 ? t.slice(0,200)+'\u2026' : t);
+  }
+  f.addEventListener('load', function(){
+    var why=null;
+    try{
+      var d=f.contentDocument;
+      // No document at all means cross-origin, which this is not supposed to be
+      // \u2014 leave the frame alone rather than guess.
+      if(!d) return;
+      why=describe(d);
+    }catch(e){ return; }
+    var failed=!!why;
+    f.hidden=failed; box.hidden=!failed;
+    if(failed) document.getElementById('framewhy').textContent=why;
+  });
+})();
+"""
 
 
 def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
@@ -1657,23 +1816,32 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Apps</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · "
-        "<a href='/admin/settings'>Configuration</a> · "
-        "<a href='/admin/updates'>Software &amp; services</a> · "
-        "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
-        "<p class=sub>Each app&rsquo;s own administration, hosted here &mdash; you are signed "
+        + _admin_nav("apps")
+        +         "<p class=sub>Each app&rsquo;s own administration, hosted here &mdash; you are signed "
         "in once and stay in Administration. Accounts and password resets are NOT here per "
         "app: SLOP owns identity, so they live under "
         "<a href='/admin'>Accounts</a> for every app at once.</p>"
         f"<div class=prodtabs>{prod}</div>"
         f"{sub}"
+        # The hint used to sit AFTER the iframe while saying "the panel below".
+        f"<p class=sub>This is {escape(label)}&rsquo;s own administration, embedded. "
+        f"It can also be opened "
+        f"<a href='{escape(src)}' target=_blank rel=noopener>on its own &rarr;</a>.</p>"
         f"<iframe class=appframe id=appframe src='{escape(src)}' "
+        f"data-label='{escape(label)}' data-src='{escape(src)}' "
         f"title='{escape(label)} administration'></iframe>"
-        f"<p class=sub>If the panel below is blank, open "
-        f"<a href='{escape(src)}' target=_blank rel=noopener>{escape(label)} &rarr;</a> "
-        f"directly &mdash; the app may still be starting.</p>"
+        # Shown in place of the frame when the app answers with something that is
+        # not its console. See _APPFRAME_JS.
+        f"<div class=framefail id=framefail hidden>"
+        f"<b>{escape(label)} did not load its administration.</b>"
+        f"<p class=sub id=framewhy></p>"
+        f"<p class=sub>The app may still be starting. "
+        f"<a href='{escape(src)}' target=_blank rel=noopener>Open {escape(label)} "
+        f"directly &rarr;</a> &middot; "
+        f"<a href='/admin/updates'>check whether it is running</a></p>"
+        f"</div>"
     )
-    return _page("Apps · SLOP", body, wide=True)
+    return _page("Apps · SLOP", body + f"<script>{_APPFRAME_JS}</script>", wide=True)
 
 
 @app.get("/admin/apps", response_class=HTMLResponse)
@@ -2287,9 +2455,8 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Software &amp; services</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
-        f"<p class=sub>{_PILL}<a href='/admin'>Accounts</a> · <a href='/admin/settings'>Configuration</a> · "
-        "<a href='/account'>Your account</a> · <a href='/'>Portal &rarr;</a></p>"
-        f"{note}"
+        + _admin_nav("updates")
+        +         f"{note}"
         f"<input type=hidden id=csrf value='{escape(tok)}'>"
         # The remote tip is memoised by the updater — the header pill polls this
         # page's data endpoint from EVERY Administration page, and each product

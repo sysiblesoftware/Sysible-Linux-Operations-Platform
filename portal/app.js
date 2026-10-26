@@ -103,12 +103,14 @@
       var who = document.getElementById("who");
       if (who) who.textContent = me.user + (me.role ? " · " + me.role : "");
       if (me.role === "superuser") {
-        // The Administration tile (accounts + all SLOP configuration) is the superuser
-        // entry point to /admin — superuser-only, revealed here.
-        var adminCard = document.getElementById("card-admin");
-        if (adminCard) adminCard.hidden = false;
+        // Administration (accounts + all SLOP configuration) is the superuser
+        // entry point to /admin. It is a tab in the header, not a tile: it is
+        // not an app, and it does not belong in a grid that answers "which tool
+        // do I want". Superuser-only, revealed here.
+        var admTab = document.getElementById("admtab");
+        if (admTab) admTab.hidden = false;
         // Only now: /admin/updates/status answers 403 to anyone else, and the
-        // tile the badge lives on is superuser-only anyway.
+        // tab the badge lives on is superuser-only anyway.
         checkUpdates();
         // Hourly, so a portal left open overnight notices a release without a
         // reload. NOT on the 15s health cadence: an update is not a heartbeat,
@@ -120,7 +122,7 @@
     })
     .catch(function () { /* not signed in / IdP unreachable — leave chip hidden */ });
 
-  // How many products have an update waiting, shown on the Administration tile.
+  // How many products have an update waiting, shown on the Administration tab.
   // Without this the only way to find out was to open Administration and look —
   // so the one screen everybody lands on said nothing, and an update sat unseen.
   // Deliberately NOT a refresh=1 call: that forces a git fetch per product, and

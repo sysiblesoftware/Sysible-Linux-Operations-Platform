@@ -57,14 +57,25 @@ body { background: var(--bg); color: var(--text); font-family: var(--font);
 .card h2 { margin: 6px 0 0; font-size: 17px; }
 .card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; flex: 1; }
 .go { color: var(--accent); font-weight: 600; font-size: 13.5px; margin-top: 6px; }
-/* "2 updates" on the Administration tile. Amber, the same colour this platform
+/* Administration, in the header rather than among the app tiles. Styled as a
+   tab: a quiet outline that lights up on hover, distinct from the app cards
+   below and from the plain text links beside it, so it reads as "a different
+   place" rather than "another app" or "another link". */
+.admtab { display: inline-flex; align-items: center; gap: 7px; text-decoration: none;
+  color: var(--muted); font-size: 13.5px; padding: 6px 12px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--panel); white-space: nowrap; }
+.admtab:hover { color: var(--text); border-color: var(--accent); }
+.admtab svg { opacity: .85; }
+
+/* "2 updates" on the Administration tab. Amber, the same colour this platform
    uses for an update everywhere else (the IdP's .upd-pill, the Controller's
    badge), so it reads as the same fact in a different place. Hidden when there
    is nothing to say — a tile that always carries a badge teaches people to stop
    seeing it. */
 .upd { display: inline-flex; align-items: center; gap: 6px;
   border: 1px solid #e0a83a; color: #e0a83a; border-radius: 20px;
-  padding: 1px 9px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  padding: 0 8px; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  line-height: 17px; }
 /* The `hidden` attribute is only `display:none` from the UA stylesheet, so ANY
    explicit display rule silently beats it — and .card and .userbox both set one.
    So every `hidden` in the markup and every `el.hidden = false` in app.js was

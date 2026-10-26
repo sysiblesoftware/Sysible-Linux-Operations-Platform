@@ -113,10 +113,21 @@ FAVICON_SVG = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Sysible Baseline — canonical mark. Family tile (dark rounded square + thin
-  brand-green ring, see controller.svg); the glyph says what Baseline IS: a
-  declared line the fleet is held to. A brand-green baseline rule with two
-  hosts sitting exactly on it, and a blue one pulled above being snapped back
-  down to it — drift, corrected, which is the whole product in one picture.
+  brand-green ring, see controller.svg).
+
+  The glyph is a CHECKLIST: the things a host must be true about, each one met.
+  That is what Baseline is — a declaration, and a fleet held to it — and it is
+  what the state builder now looks like, so the mark and the screen agree.
+
+  It replaces a drawing of hosts standing on a declared line. That was a nice
+  picture of the idea and the wrong picture for an icon: at the 40px the portal
+  actually renders it at, "small upright rounded bars with a green stroke
+  across them" is also the Visualizer, and the two tiles were indistinguishable
+  sitting next to each other. Checks and rules share no silhouette with
+  anything else in the family.
+
+  Geometry is deliberately centred: content spans 28–100 across and 32–96 down,
+  so the 128 box has equal margins and the glyph does not drift toward the ring.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Sysible Baseline">
   <defs>
@@ -126,16 +137,19 @@ FAVICON_SVG = """\
   </defs>
   <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#bl-tile)"/>
   <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
-  <!-- The declared line. -->
-  <line x1="28" y1="84" x2="100" y2="84" stroke="#6ddb73" stroke-width="6" stroke-linecap="round"/>
-  <!-- Two hosts already on it (green). -->
-  <rect x="34" y="64" width="15" height="20" rx="3" fill="#6ddb73"/>
-  <rect x="56" y="64" width="15" height="20" rx="3" fill="#6ddb73"/>
-  <!-- One drifted above (blue), with an arrow pulling it back to the line. -->
-  <rect x="78" y="40" width="15" height="20" rx="3" fill="#7aa2ff"/>
-  <path d="M85.5 66 L85.5 78" fill="none" stroke="#7aa2ff" stroke-width="5" stroke-linecap="round"/>
-  <path d="M79 72 L85.5 79 L92 72" fill="none" stroke="#7aa2ff" stroke-width="5"
-        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Met (brand green): three ticks, one per declared item. -->
+  <g fill="none" stroke="#6ddb73" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M28 40 L36 48 L50 32"/>
+    <path d="M28 64 L36 72 L50 56"/>
+    <path d="M28 88 L36 96 L50 80"/>
+  </g>
+  <!-- The declared items themselves (brand blue). The last is short so the
+       block reads as a list rather than a grid. -->
+  <g fill="#7aa2ff">
+    <rect x="60" y="36" width="40" height="8" rx="4"/>
+    <rect x="60" y="60" width="40" height="8" rx="4"/>
+    <rect x="60" y="84" width="26" height="8" rx="4"/>
+  </g>
 </svg>
 """
 

@@ -181,9 +181,18 @@ def test_both_halves_of_the_page_are_labelled_the_same_way(cl):
     assert body.count('<h2 class=sect>') == 2
 
 
-def test_the_explanation_is_not_chained_onto_the_link_list(cl):
+def test_the_explanation_is_not_chained_onto_the_links(cl):
     """It was joined to the nav links with the same separator the links use, so
-    it read as a sixth link."""
+    it read as a sixth link.
+
+    The links themselves are a real <nav> now rather than a run of text, which
+    settles this structurally: the explanation is a sibling paragraph, not a
+    fragment inside the navigation.
+    """
     html = _page(cl)
-    assert "<a href='/'>Portal →</a><br>" in html
-    assert "Portal →</a> · one credential" not in html
+    nav = re.search(r"<nav class=anav.*?</nav>", html, re.S)
+    assert nav, "the Administration nav is gone"
+    assert "One credential signs a user" not in nav.group(0), \
+        "the explanation is inside the nav again"
+    assert "<p class=sub>One credential signs a user" in html, \
+        "the explanation is no longer its own paragraph"
