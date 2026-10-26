@@ -2246,14 +2246,57 @@ _UPDATES_JS = r"""
     box.textContent=(j.log||[]).join('\n');
     box.scrollTop=box.scrollHeight;
   }
+  // THE UPDATER IS PART OF THE STACK IT UPDATES. Updating SLOP recreates it,
+  // so it is guaranteed to be unreachable for a few seconds every single time —
+  // and this page used to give up permanently on that: one sticky toast, every
+  // product row left at "checking\u2026", and no retry anywhere. The condition
+  // heals itself in seconds and the screen did not.
+  var tries = 0, retryTimer = null;
   function load(fresh){
     return fetch('/admin/updates/status'+(fresh?'?refresh=1':''),{cache:'no-store'})
       .then(function(r){return r.ok?r.json():Promise.reject(new Error('HTTP '+r.status));})
       .then(function(d){
-        if(d.error){pushToast(d.error,{title:'Software & services',kind:'warn',ttl:0});return;}
-        paint(d);
+        if(d.error){ unreachable(d.error); return; }
+        reachable(); paint(d);
       })
-      .catch(function(e){pushToast(String(e.message||e),{title:'Software & services',kind:'error'});});
+      .catch(function(e){ unreachable(String(e.message||e)); });
+  }
+  function reachable(){
+    tries = 0;
+    if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+    var box = document.getElementById('updfail');
+    if(box) box.hidden = true;
+  }
+  function unreachable(why){
+    var box = document.getElementById('updfail');
+    if(box){
+      box.hidden = false;
+      document.getElementById('updwhy').textContent = why;
+    }
+    // A row still saying "checking\u2026" on a page that has finished is the
+    // same lie as a spinner that never stops.
+    document.querySelectorAll('#updtable .prod').forEach(function(row){
+      var key = (row.id||'').replace(/^p-/,'');
+      var td = document.getElementById('u-'+key);
+      if(td && /checking/i.test(td.textContent||'')){
+        td.innerHTML='';
+        td.appendChild(st('unk','Not known',"the updater could not be asked"));
+      }
+      hide('b-'+key); hide('m-'+key);
+      staleModules(key);
+    });
+    if(tries < 5){
+      tries++;
+      var wait = Math.min(2000 * tries, 8000);
+      var note = document.getElementById('updretry');
+      if(note) note.textContent = 'Trying again in ' + Math.round(wait/1000) + 's.';
+      if(retryTimer) clearTimeout(retryTimer);
+      retryTimer = setTimeout(function(){ retryTimer = null; load(); }, wait);
+    } else {
+      var n = document.getElementById('updretry');
+      if(n) n.textContent = 'Gave up after ' + tries +
+        ' attempts \u2014 press Check now to try again.';
+    }
   }
   function poll(selfUpdate){
     if(polling)return;
@@ -2470,6 +2513,22 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         + _admin_nav("updates")
         +         f"{note}"
         f"<input type=hidden id=csrf value='{escape(tok)}'>"
+        # Shown when the updater cannot be reached. A toast was wrong for this:
+        # it is a STATE the page is in, not an event that happened, and it has
+        # an explanation worth keeping on screen while it is true.
+        "<div class=framefail id=updfail hidden>"
+        "<b>The updater is not answering.</b>"
+        "<p class=sub id=updwhy></p>"
+        "<p class=sub>This service is what carries out this page, and it lives "
+        "inside the Operations Platform stack \u2014 so updating SLOP restarts it, "
+        "and for a few seconds afterwards this is expected. "
+        "<span id=updretry></span></p>"
+        "<p class=sub>If it does not come back: "
+        "<code>sysiblectl slop status</code> says whether the container is "
+        "running, and <code>sysiblectl slop logs</code> gives its own words. "
+        "Updates can always be applied on the host with "
+        "<code>sysiblectl &lt;product&gt; update</code>.</p>"
+        "</div>"
         # The remote tip is memoised by the updater — the header pill polls this
         # page's data endpoint from EVERY Administration page, and each product
         # costs a round-trip to its git remote. This button is how an operator says

@@ -356,3 +356,117 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
     assert not errors, f"the page logged errors: {errors}"
     unexpected = [u for u in missing if not served_by_gateway(u)]
     assert not unexpected, f"the page asked for something the IdP does not serve: {unexpected}"
+
+
+# ---- when the updater cannot be reached ------------------------------------
+# Reported: "updater not reachable".
+#
+# The updater is PART OF THE STACK IT UPDATES — updating SLOP recreates it — so
+# it is guaranteed to be unreachable for a few seconds every single time. This
+# page gave up permanently on that: one sticky toast, every product row left at
+# "checking…", and no retry anywhere. The condition heals itself in seconds and
+# the screen did not.
+def test_the_page_retries_instead_of_giving_up(page):
+    assert "function unreachable(" in page, "there is no failure path at all"
+    assert "setTimeout" in page and "load()" in page, \
+        "nothing re-asks after a failure — the page stays broken until a reload"
+    assert "tries < 5" in page, "it retries forever or not at all"
+
+
+def test_the_failure_explains_itself_rather_than_naming_an_exception(page):
+    assert "carries out this page" in page, \
+        "nothing says what the updater IS, so the message is just a stack trace"
+    assert "updating SLOP restarts it" in page, \
+        "it does not say that this is expected right after an update"
+    for cmd in ("sysiblectl slop status", "sysiblectl slop logs"):
+        assert cmd in page, f"the failure does not name {cmd}"
+
+
+def test_a_row_does_not_keep_saying_checking_forever(page):
+    """A spinner on a page that has finished. The same fault the unreported-
+    product rows had, arriving by a different route."""
+    m = re.search(r"function unreachable\(.*?\n  \}", page, re.S)
+    assert m, "the failure path is gone"
+    body = m.group(0)
+    assert "Not known" in body, \
+        "a failed poll leaves every row saying 'checking…' on a finished page"
+    assert "staleModules" in body, \
+        "the module sections keep whatever state they were last painted with"
+
+
+@pytest.mark.skipif(not _playwright(), reason="playwright not installed")
+def test_an_unreachable_updater_recovers_on_its_own(tmp_path):
+    """Driven, because the point is the page healing itself without a reload."""
+    import threading
+    import time
+
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+
+    os.environ.update(
+        SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
+        SLOP_ADMIN_USER="admin", SLOP_ADMIN_PASSWORD=ADMIN_PW,
+        SLOP_ADMIN_FORCE_CHANGE="0", SLOP_ALLOW_INSECURE_COOKIE="1",
+    )
+    import app as m
+    m = importlib.reload(m)
+    down = {"yes": True}
+
+    def status(*a, **k):
+        if down["yes"]:
+            return None, "updater unreachable (ConnectError)"
+        return {"apps": APPS, "job": None}, None
+
+    m.updates.status = status
+    m.updates.job = lambda *a, **k: ({"job": None}, None)
+    m.updates.configured = lambda: True
+
+    cfg = uvicorn.Config(m.app, host="127.0.0.1", port=8808, log_level="error")
+    server = uvicorn.Server(cfg)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.1)
+    assert server.started
+    try:
+        chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+        with sync_playwright() as p:
+            try:
+                b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
+            except Exception as e:
+                pytest.skip(f"no chromium to drive ({e})")
+            pg = b.new_page(viewport={"width": 1280, "height": 900})
+            pg.goto("http://127.0.0.1:8808/login", wait_until="domcontentloaded")
+            pg.fill("input[name=username]", "admin")
+            pg.fill("input[name=password]", ADMIN_PW)
+            pg.click("form button[type=submit]")
+            pg.wait_for_timeout(400)
+            pg.goto("http://127.0.0.1:8808/admin/updates", wait_until="domcontentloaded")
+
+            pg.wait_for_selector("#updfail:not([hidden])", timeout=5000)
+            txt = pg.text_content("#updfail")
+            assert "ConnectError" in txt, txt
+            assert "carries out this page" in txt, txt
+            assert "Trying again in" in txt, f"it does not say it will retry: {txt}"
+            # No row may still claim to be checking.
+            assert "checking" not in (pg.text_content("#updtable") or "").lower(), \
+                "rows are still spinning on a page that has finished"
+
+            # The updater comes back, as it does seconds after every SLOP update.
+            down["yes"] = False
+            # state="hidden", not a [hidden] selector: wait_for_selector waits
+            # for VISIBLE by default, so `#updfail[hidden]` waits for a hidden
+            # element to become visible and times out however well the page
+            # recovers. The first version of this test did exactly that and
+            # failed against working code — the log read "26 x locator resolved
+            # to hidden".
+            pg.wait_for_selector("#updfail", state="hidden", timeout=15000)
+            assert "Up to date" in (pg.text_content("#updtable") or ""), \
+                "the page did not repaint once the updater answered again"
+            pg.close()
+            b.close()
+    finally:
+        server.should_exit = True
+        t.join(timeout=10)
