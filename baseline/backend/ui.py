@@ -100,7 +100,7 @@ label.f span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
    past the viewport and takes its own Save button with it — the list gets
    longer exactly as the reason to save it gets stronger. */
 dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);
-       color:var(--text);padding:0;width:min(760px,94vw);max-height:92vh}
+       color:var(--text);padding:0;width:min(880px,96vw);max-height:92vh}
 dialog form{display:flex;flex-direction:column;max-height:92vh}
 dialog .db{overflow:auto;flex:1 1 auto;min-height:0}
 dialog .dh,dialog .df{flex:0 0 auto}
@@ -144,6 +144,11 @@ button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
 .yamlnote{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5}
 .yamlnote.warn{color:var(--amber)}
 #s-yaml textarea[readonly]{opacity:.85}
+/* The YAML view is for READING a whole state — eight items of generated SLS is
+   fifty lines, and the shared 230px textarea showed eight of them. It gets the
+   height the dialog has going spare, which in this mode is nearly all of it:
+   there is only a name field and a note above. Still drag-resizable. */
+#s-sls{min-height:min(60vh,640px);font-size:13px;line-height:1.55}
 .msg{padding:.6em 1em;font-size:13px;border-bottom:1px solid var(--line)}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 .msg.ok{background:rgba(76,175,90,.12);color:var(--ok)}

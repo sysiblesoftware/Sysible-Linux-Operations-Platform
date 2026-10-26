@@ -157,6 +157,49 @@
       .catch(function () { /* best effort, exactly like the health dots */ });
   }
 
+  // ---- is this page's stylesheet the one it was written for? --------------
+  // index.html, style.css and app.js are three files with three cache entries.
+  // The gateway now sends no-cache for all three, but a browser that cached one
+  // of them BEFORE that header existed keeps serving it from heuristic
+  // freshness — and the result is a page that renders with the wrong rules and
+  // gives no sign of it. The Administration tab arrived that way: new markup,
+  // old stylesheet, so it rendered as underlined visited-purple at the
+  // inherited size, which is just what an <a> looks like unstyled.
+  //
+  // Reading it from a custom property rather than probing a specific rule means
+  // the check keeps working as the CSS changes, and costs one getComputedStyle.
+  var WANT_ASSETS = 2;
+
+  function assetsAreCurrent() {
+    try {
+      var got = getComputedStyle(document.documentElement)
+        .getPropertyValue("--portal-assets").trim();
+      // No value at all = a stylesheet from before this marker existed.
+      return got !== "" && Number(got) >= WANT_ASSETS;
+    } catch (e) {
+      return true;   // cannot tell; never cry wolf
+    }
+  }
+
+  function warnStale() {
+    if (document.getElementById("stale")) return;
+    var b = document.createElement("div");
+    b.id = "stale";
+    b.setAttribute("role", "status");
+    // Styled INLINE on purpose: the whole point is that this page's stylesheet
+    // is the thing that is out of date, so a class would be the one rule that
+    // cannot be relied on.
+    b.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:99;padding:10px 16px;" +
+      "background:#e0a83b;color:#1b2431;font:600 13px/1.4 system-ui,sans-serif;" +
+      "text-align:center";
+    b.textContent = "Your browser is showing an older copy of this page's " +
+      "stylesheet, so parts of it will look wrong. Reload with Ctrl-Shift-R " +
+      "(\u2318-Shift-R on a Mac) to update.";
+    document.body.appendChild(b);
+  }
+
+  if (!assetsAreCurrent()) warnStale();
+
   // Theme toggle, persisted; default follows the OS until the user chooses.
   var KEY = "slop-theme";
   var root = document.documentElement;

@@ -136,6 +136,52 @@ def test_the_yaml_view_shows_what_the_list_builds(browser, server):
         ctx.close()
 
 
+def test_the_yaml_view_is_big_enough_to_read_a_whole_state(browser, server):
+    """Reported: "the YAML window needs to be bigger as it's hard to see what
+    you're doing." It was sharing the 230px textarea rule with the small
+    single-field inputs, so a state of eight items — about fifty lines of
+    generated SLS — was read eight lines at a time.
+
+    In YAML mode the dialog has almost nothing else in it (a name field and one
+    line of explanation), so the box gets the height going spare.
+    """
+    pg, ctx, errs = _page(browser, server)
+    try:
+        _build(pg, "roomy", ["package", "service", "file", "user",
+                             "group", "sysctl", "cron", "command"])
+        pg.fill("#it-0-names", "nginx")
+        pg.fill("#it-1-name", "nginx")
+        pg.fill("#it-2-path", "/etc/motd")
+        pg.fill("#it-2-contents", "hello")
+        pg.fill("#it-3-name", "deploy")
+        pg.fill("#it-4-name", "devs")
+        pg.fill("#it-5-name", "vm.swappiness")
+        pg.fill("#it-5-value", "10")
+        pg.fill("#it-6-command", "/usr/local/bin/x")
+        pg.fill("#it-7-command", "/usr/local/bin/y")
+        pg.click("[data-mode=yaml]")
+        pg.wait_for_timeout(700)
+        box = pg.evaluate(
+            "() => {var t=document.getElementById('s-sls');"
+            " var s=getComputedStyle(t); var r=t.getBoundingClientRect();"
+            " return {h:Math.round(r.height), w:Math.round(r.width),"
+            "         line:parseFloat(s.lineHeight), vh:innerHeight,"
+            "         scroll:t.scrollHeight};}")
+        lines = box["h"] / box["line"]
+        assert lines >= 24, (
+            f"the YAML box shows {lines:.0f} lines — a generated state is "
+            f"longer than that: {box}")
+        # It must not have grown past the window it lives in.
+        assert box["h"] < box["vh"], f"the YAML box is taller than the viewport: {box}"
+        assert pg.evaluate(
+            "() => {var b=document.getElementById('s-save').getBoundingClientRect();"
+            " return b.bottom <= innerHeight && b.top >= 0;}"), \
+            "the taller YAML box pushed Save off screen"
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
 def test_switching_modes_does_not_lose_what_was_typed(browser, server):
     """Reading the YAML is something you do WHILE building — so the trip back
     must keep the form, and the trip out must pick up what changed since.

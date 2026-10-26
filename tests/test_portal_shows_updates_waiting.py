@@ -43,7 +43,8 @@ def _apps(available_count, total=4):
 def portal():
     """The real portal page, with /auth/me and the updates endpoint stubbed."""
     class Portal:
-        def open(self, role="superuser", status=None, status_code=200, me_status=200):
+        def open(self, role="superuser", status=None, status_code=200, me_status=200,
+                 css=None):
             pw = sync_playwright().start()
             browser = pw.chromium.launch(executable_path=CHROMIUM)
             page = browser.new_page()
@@ -71,9 +72,16 @@ def portal():
                                      body=json.dumps({"ok": True}))
                 return r.fulfill(status=404, body="")
 
-            page.route("**/*", lambda r, q: route(r, q)
-                       if "/auth/me" in q.url or "/admin/" in q.url or "/healthz/" in q.url
-                       else r.continue_())
+            def dispatch(r, q):
+                # Stand in for a browser holding an OLD style.css next to this
+                # page — the three portal files have three cache entries.
+                if css is not None and q.url.endswith("style.css"):
+                    return r.fulfill(status=200, content_type="text/css", body=css)
+                if ("/auth/me" in q.url or "/admin/" in q.url or "/healthz/" in q.url):
+                    return route(r, q)
+                return r.continue_()
+
+            page.route("**/*", dispatch)
             page.goto("file://" + os.path.join(PORTAL, "index.html"))
             page.wait_for_timeout(600)
             self.page = page
@@ -239,3 +247,65 @@ def test_the_role_is_matched_without_caring_about_case(portal):
 def test_a_non_superuser_is_the_one_case_that_hides_it(portal, role):
     p = portal.open(role=role, status=_apps(2))
     assert not _tab_visible(p), f"a {role} is shown the Administration tab"
+
+
+# ---- a stylesheet from before this page was written ------------------------
+# Reported, looking at the header: "Why is this purple? The font looks weird
+# too." The Administration tab was rendering as underlined visited-purple at
+# the inherited font size — which is exactly what an <a> looks like with no
+# rule applied, because the browser was holding a style.css from before
+# .admtab existed.
+#
+# The gateway now sends no-cache for all three portal files, but that does
+# nothing for a copy cached BEFORE the header shipped: it keeps being served
+# from heuristic freshness. The page renders with the wrong rules and says
+# nothing about it, which is the part worth fixing.
+_OLD_CSS = ":root{--bg:#0d1117;--text:#e6edf5;--muted:#93a1b5;--font:sans-serif}\n" \
+           "body{background:var(--bg);color:var(--text);font-family:var(--font)}\n"
+
+
+def test_a_current_stylesheet_says_nothing(portal):
+    p = portal.open(role="superuser", status=_apps(0))
+    assert p.query_selector("#stale") is None, \
+        "the stale-asset warning fires on a perfectly current page"
+
+
+def test_a_stylesheet_from_before_this_page_is_called_out(portal):
+    """Otherwise the only symptom is 'why is this purple'."""
+    p = portal.open(role="superuser", status=_apps(0), css=_OLD_CSS)
+    el = p.query_selector("#stale")
+    assert el is not None, \
+        "an out-of-date stylesheet renders the page wrong and says nothing"
+    assert el.is_visible()
+    text = el.text_content()
+    assert "older copy" in text, text
+    assert "Ctrl-Shift-R" in text, "the message does not say how to fix it"
+
+
+def test_the_warning_does_not_depend_on_the_stylesheet_it_is_warning_about(portal):
+    """A class would be the one rule that cannot be relied on here."""
+    p = portal.open(role="superuser", status=_apps(0), css=_OLD_CSS)
+    # NOT offsetParent: it is null for a position:fixed element by spec, so the
+    # first version of this check called a perfectly visible banner invisible.
+    # Measure the box instead.
+    styled = p.evaluate(
+        "() => {var e=document.getElementById('stale');"
+        " if(!e) return null; var s=getComputedStyle(e); var r=e.getBoundingClientRect();"
+        " return {pos:s.position, bg:s.backgroundColor,"
+        "         w:Math.round(r.width), h:Math.round(r.height)};}")
+    assert styled and styled["w"] > 200 and styled["h"] > 10, styled
+    assert styled["pos"] == "fixed", styled
+    assert styled["bg"] != "rgba(0, 0, 0, 0)", f"the banner has no background: {styled}"
+
+
+def test_an_unreadable_stylesheet_never_cries_wolf(portal):
+    """If the marker cannot be read at all, saying nothing beats saying the
+    wrong thing — a false 'your page is stale' is worse than none."""
+    p = portal.open(role="superuser", status=_apps(0))
+    broke = p.evaluate("""() => {
+        var orig = window.getComputedStyle;
+        window.getComputedStyle = function(){ throw new Error('nope'); };
+        try { return true; } finally { window.getComputedStyle = orig; }
+    }""")
+    assert broke
+    assert p.query_selector("#stale") is None
