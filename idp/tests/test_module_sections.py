@@ -130,6 +130,28 @@ def test_a_product_with_no_modules_gets_an_empty_hidden_container(page):
 
 
 # ---- no per-module update, and the page says why ---------------------------
+def test_the_screen_says_why_a_module_is_filed_under_a_product(page):
+    """Asked, looking at it: "Why are some not in SLOP but others are?"
+
+    A fair question the screen did not answer. Flashback, Baseline and the
+    Visualizer are products in their own right — their own portal tiles, their
+    own marks, their own manuals — so finding them filed under another product
+    while Connect gets a row of its own looks arbitrary until you know the rule.
+
+    The rule is that this screen groups by WHAT UPDATES TOGETHER: a row is one
+    git checkout, and the sections are the services built from it. The footer
+    gave only the consequence ("updating it updates all of them"), which is the
+    answer to a question nobody was asking.
+    """
+    assert "checkout gets its own row above" in page, \
+        "nothing on the screen says why the other products are not in this list"
+    assert "Inside this checkout" in page, \
+        "the section header does not name what the modules are inside OF"
+    # ...and the long explanation states the principle, not just the list.
+    assert "what updates together" in page, \
+        "the help text does not give the rule the grouping follows"
+
+
 def test_there_is_no_per_module_update_button(page):
     """One git tree, one compose file: that button would rebuild the whole stack
     while claiming to touch one service."""

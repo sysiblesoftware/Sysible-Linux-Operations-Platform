@@ -1990,12 +1990,21 @@ _UPDATES_JS = r"""
     box.innerHTML='';
     if(!mods.length){ box.hidden=true; return; }
     box.hidden=false;
-    box.appendChild(el('div','mods-h','Inside '+(a.label||a.key)));
+    box.appendChild(el('div','mods-h','Inside the '+(a.label||a.key)+' checkout'));
     mods.forEach(function(m){ box.appendChild(modRow(a,m)); });
+    // Says WHY these six are here and the other products are not. The footer
+    // used to give only the consequence ("updating it updates all of them"),
+    // which leaves the obvious question unanswered: Flashback and Baseline are
+    // products in their own right — own tiles, own marks, own manuals — so
+    // finding them filed under another product looks arbitrary until you know
+    // the rule. This screen groups by WHAT UPDATES TOGETHER, which is a
+    // different question from what is a product, and it is the question the
+    // screen exists to answer.
     box.appendChild(el('div','mods-f', a.installed
-      ? ('These are built from the one ' + (a.label||a.key) + ' checkout by one '
-         + 'compose file, so updating it updates all of them together \u2014 there '
-         + 'is no separate update for a module.')
+      ? ('These ship inside the one ' + (a.label||a.key) + ' checkout and are '
+         + 'built by one compose file, so updating it updates all of them '
+         + 'together \u2014 there is no separate update for a module. A product '
+         + 'with its own checkout gets its own row above.')
       : ('These come with ' + (a.label||a.key) + ', which is not installed here.')));
   }
   function modRow(a, m){
@@ -2388,7 +2397,7 @@ def _skeleton_modules(key: str) -> str:
         f"</div>"
         for mk, lbl in mods)
     return (f"<div class=prod-mods id='mods-{key}'>"
-            f"<div class=mods-h>Inside this product</div>{inner}</div>")
+            f"<div class=mods-h>Inside this checkout</div>{inner}</div>")
 
 
 def _updates_page(sess: sqlite3.Row, tok: str) -> str:
@@ -2436,10 +2445,13 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<p>The Operations Platform itself cannot be STOPPED from here: that would "
         "take down the gateway, this page and the updater together, leaving no way "
         "back except the host. Restart it instead.</p>"
-        "<p><b>Inside this product</b> lists the modules that ship in one "
-        "checkout &mdash; Flashback, Baseline, the Visualizer, sign-in and the "
-        "gateway for the Operations Platform &mdash; with what each one is and "
-        "whether it is running. There is no per-module <b>Update now</b> on "
+        "<p>This screen groups by <b>what updates together</b>, which is not the "
+        "same question as what is a product. A row is one git checkout on this "
+        "host; <b>Inside this checkout</b> lists the services built from it. "
+        "Flashback, Baseline and the Visualizer are products in their own right "
+        "and appear there because their source ships in the Operations Platform "
+        "checkout &mdash; Connect and the Controller have checkouts of their own, "
+        "so they get rows. There is no per-module <b>Update now</b> on "
         "purpose: they are one git tree built by one compose file, so updating "
         "any of them is updating all of them. Their restart/stop/start/recreate "
         "<i>are</i> per-service, and appear under <b>Manage</b> with the "
