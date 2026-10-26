@@ -40,6 +40,83 @@ def configured() -> bool:
     return bool(httpx and _SSO_SECRET and _CONTROLLER)
 
 
+def _url() -> str:
+    return (f"https://{_CONTROLLER}" if ":443" in _CONTROLLER
+            else f"http://{_CONTROLLER}")
+
+
+def list_targets(identity) -> tuple[list, list, str | None]:
+    """(hosts, environments, note) — what an operator can assign a state TO.
+
+    The assign box used to be a free-text field you typed a host id into, which
+    means knowing the fleet by heart and getting it exactly right: a typo
+    assigns a state to a host that does not exist, and nothing says so until
+    somebody notices the host was never configured.
+
+    Baseline does not know the fleet — the Controller does, and this is the
+    same host list its own console uses. Both agent and SSH hosts are offered,
+    because the Controller dispatches a Baseline apply over either.
+
+    Never raises, and a note rather than an error: a Controller that is down
+    costs the LIST, not the ability to assign. The console keeps its free-text
+    box for exactly that case.
+    """
+    if not configured():
+        return [], [], unavailable_reason()
+    headers = {"Accept": "application/json",
+               "X-Sysible-Auth": _SSO_SECRET,
+               "X-Sysible-User": identity.user,
+               "X-Sysible-Role": identity.role}
+    try:
+        with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
+            r = c.get(f"{_url()}/api/hosts", headers=headers)
+    except Exception as e:
+        return [], [], (f"could not reach the Controller ({type(e).__name__}), so this "
+                        "is the fleet it knows about rather than a list — type the "
+                        "target instead")
+    if r.status_code in (401, 403):
+        return [], [], (f"the Controller did not permit a host list for role "
+                        f"'{identity.role}' — type the target instead")
+    if r.status_code >= 400:
+        return [], [], (f"the Controller returned HTTP {r.status_code} for its host "
+                        "list — type the target instead")
+    try:
+        data = r.json()
+    except Exception:
+        return [], [], "the Controller returned a malformed host list"
+    rows = (data or {}).get("hosts") if isinstance(data, dict) else data
+    hosts, envs = [], set()
+    for h in rows or []:
+        if not isinstance(h, dict):
+            continue
+        hid = str(h.get("id") or "").strip()
+        if not hid or not _TARGET_RE.match(hid):
+            # A host the Controller would accept but this service would refuse
+            # to build a URL from is not one to offer.
+            continue
+        env = str(h.get("environment") or "").strip()
+        if env and _TARGET_RE.match(f"env:{env}"):
+            envs.add(env)
+        hosts.append({"id": hid, "label": str(h.get("label") or hid),
+                      "environment": env, "kind": str(h.get("kind") or ""),
+                      "address": str(h.get("address") or ""),
+                      "online": h.get("online")})
+    hosts.sort(key=lambda h: ((h["environment"] or "~").lower(), h["label"].lower()))
+    return hosts, sorted(envs, key=str.lower), None
+
+
+def unavailable_reason() -> str | None:
+    if httpx is None:                                # pragma: no cover
+        return ("this build of Baseline has no HTTP client, so it cannot ask the "
+                "Controller anything")
+    if not _SSO_SECRET:
+        return ("Baseline has no SLOP shared secret, so it cannot prove to the "
+                "Controller who is asking. Re-run install.sh.")
+    if not _CONTROLLER:                              # pragma: no cover
+        return "no Controller address is configured"
+    return None
+
+
 def request_apply(identity, target: str, preview: bool = False) -> tuple[bool, str]:
     """(ok, message). Asks the Controller to run this target's desired state."""
     if not _TARGET_RE.match(target or ""):
@@ -51,7 +128,7 @@ def request_apply(identity, target: str, preview: bool = False) -> tuple[bool, s
     if not _SSO_SECRET:
         return False, ("Baseline has no SLOP shared secret, so it cannot prove "
                        "to the Controller who is asking. Re-run install.sh.")
-    url = f"https://{_CONTROLLER}" if ":443" in _CONTROLLER else f"http://{_CONTROLLER}"
+    url = _url()
     try:
         with httpx.Client(timeout=_TIMEOUT, verify=False) as c:
             r = c.post(f"{url}/api/host/{quote(target, safe='')}/baseline-apply",

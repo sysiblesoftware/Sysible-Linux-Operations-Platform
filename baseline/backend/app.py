@@ -192,6 +192,33 @@ def api_save_state(name: str, request: Request, body: dict = Body(...)) -> dict:
     return store.save_state(name, sls, author=who.user, source=source, items=items)
 
 
+@app.get("/api/targets")
+def api_targets(request: Request) -> dict:
+    """The fleet, for the assign box.
+
+    Typing a host id from memory is how a state gets assigned to a host that
+    does not exist — and nothing says so, because an assignment to an unknown
+    target is indistinguishable from one whose host has not checked in yet.
+    """
+    who = _require_read(request)
+    hosts, envs, note = controller.list_targets(who)
+    return {"hosts": hosts, "environments": envs, "note": note}
+
+
+@app.delete("/api/states/{name}")
+def api_delete_state(name: str, request: Request) -> dict:
+    """Delete a state, its versions, and its assignments.
+
+    There was no way to do this at all: rules had a delete and states did not,
+    so a state created by mistake stayed on the screen for good.
+    """
+    _require(request, "operator")
+    try:
+        return store.delete_state(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such state.")
+
+
 @app.post("/api/assign")
 def api_assign(request: Request, body: dict = Body(...)) -> dict:
     _require(request, "operator")

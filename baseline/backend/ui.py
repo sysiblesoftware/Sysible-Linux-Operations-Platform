@@ -143,6 +143,7 @@ button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
 /* Why the YAML is read-only until you say otherwise. */
 .yamlnote{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5}
 .yamlnote.warn{color:var(--amber)}
+.faint.warn{color:var(--amber)}
 #s-yaml textarea[readonly]{opacity:.85}
 /* The YAML view is for READING a whole state — eight items of generated SLS is
    fifty lines, and the shared 230px textarea showed eight of them. It gets the
@@ -309,13 +310,21 @@ def console_page(who) -> str:
         "<dialog id=dlg-assign><form method=dialog>"
         "<div class=dh>Assign a state</div><div class=db>"
         "<div class=row style='margin-bottom:10px'>"
-        "<label class=f><span>Target</span>"
-        "<input id=a-target placeholder='web-01  or  env:production'></label>"
+        # The fleet, from the Controller. Typing an id from memory is how a
+        # state gets assigned to a host that does not exist — and an assignment
+        # to a target nobody has heard of looks exactly like one whose host has
+        # not checked in yet.
+        "<label class=f><span>Target</span><select id=a-pick></select></label>"
         "<label class=f><span>State</span><select id=a-state></select></label>"
         "</div>"
-        "<div class='faint' style='font-size:12px'>A host id applies to that host. "
-        "<span class=mono>env:&lt;name&gt;</span> applies to every host in that "
-        "environment, in addition to anything assigned to the host itself.</div>"
+        # Kept, and revealed by the 'type it' option: when the Controller is
+        # unreachable the list is empty, and losing the ability to assign
+        # because the host PICKER is down would be worse than typing.
+        "<label class=f id=a-otherwrap hidden><span>Target</span>"
+        "<input id=a-target placeholder='web-01  or  env:production'></label>"
+        "<div class='faint' style='font-size:12px' id=a-note>A host applies to that "
+        "host. An environment applies to every host in it, in addition to anything "
+        "assigned to the host itself.</div>"
         "</div><div class=df>"
         "<button value=cancel>Cancel</button>"
         "<button class=primary id=a-save value=save>Assign</button>"
@@ -390,6 +399,7 @@ function statesTable(rows){
         <td style="text-align:right">
           <button class=sm data-edit="${esc(s.name)}">${CAN_WRITE ? 'Edit' : 'View'}</button>
           ${CAN_WRITE ? `<button class=sm data-assign="${esc(s.name)}">Assign</button>` : ''}
+          ${CAN_WRITE ? `<button class='sm danger' data-delstate="${esc(s.name)}">Delete</button>` : ''}
         </td></tr>`).join('') + '</table>';
 }
 
@@ -562,6 +572,22 @@ async function showYaml(){
   }
   collectItems();
   setMode('yaml');
+  // A state with nothing in it yet has no list to protect, so writing your own
+  // Salt state is just: New state -> YAML -> type. Making that go through
+  // "take this over, the builder cannot be used again" was a warning about
+  // losing something that does not exist, in front of the one path an operator
+  // with an existing .sls file wants.
+  if(!ITEMS.length){
+    SOURCE = 'yaml';
+    $('s-sls').readOnly = !CAN_WRITE;
+    $('s-takeover').hidden = true;
+    $('s-yamlnote').textContent =
+      'Write the state as Salt SLS. Paste an existing one if you have it — ' +
+      'this is saved exactly as typed.';
+    $('s-yamlnote').classList.remove('warn');
+    if(CAN_WRITE) $('s-sls').focus();
+    return;
+  }
   $('s-sls').readOnly = true;
   $('s-yamlnote').textContent = 'Generating…';
   $('s-yamlnote').classList.remove('warn');
@@ -643,7 +669,10 @@ $('s-modes').addEventListener('click', (ev) => {
   ev.preventDefault();
   if(b.dataset.mode === 'yaml'){ showYaml(); }
   else if(SOURCE === 'yaml'){
-    // There is nothing to go back to: this state has no item list.
+    // An untouched YAML box on a new state is not a decision yet — switching
+    // back is free. Once something is typed it IS the state, and the builder
+    // has nothing to show.
+    if(!$('s-sls').value.trim()){ SOURCE = 'builder'; setMode('build'); return; }
     say('This state is written as YAML, so there is no list to build from. ' +
         'Create a new state to use the builder.', 'err');
   }
@@ -698,12 +727,103 @@ function ruleActionChanged(){
     : 'Recorded against the run, and shown in Recent runs.';
 }
 
-function openAssign(stateName){
+// The fleet, as the Controller knows it. Fetched once per dialog open rather
+// than cached for the session: a host enrolled a minute ago should be in the
+// list, and this is one small request against a click.
+// The sentinel for "let me type it instead". It must be something a real
+// target can never be: controller.py's _TARGET_RE requires the first character
+// to be [A-Za-z0-9], so a leading '!' cannot collide.
+//
+// NOT a NUL. The first version used a \\u0000 prefix, which looks unmistakable
+// and is not: the HTML parser replaces U+0000 with U+FFFD, so the attribute
+// read back as a replacement character, the comparison never matched, and the
+// SENTINEL ITSELF was saved as the assignment's target. Invisible in the
+// source, obvious the moment it was clicked.
+const TYPE_IT = '!type-a-target';
+
+async function openAssign(stateName){
   $('a-target').value = '';
   $('a-state').innerHTML = STATE.states.map((s) =>
     `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
   if(stateName) $('a-state').value = stateName;
+
+  const pick = $('a-pick');
+  pick.innerHTML = '<option value="">Loading the fleet…</option>';
+  $('a-otherwrap').hidden = true;
   $('dlg-assign').showModal();
+
+  let d = {hosts: [], environments: [], note: null};
+  try{ d = await api('targets'); }
+  catch(e){ d.note = e.message; }
+
+  const opts = [];
+  if((d.environments || []).length){
+    opts.push('<optgroup label="Environments">' + d.environments.map((e) =>
+      `<option value="env:${esc(e)}">Everything in ${esc(e)}</option>`).join('') +
+      '</optgroup>');
+  }
+  if((d.hosts || []).length){
+    // Grouped by environment, the way an operator holds the fleet in their
+    // head — and the address alongside, because a bare id does not say which
+    // box it is.
+    const byEnv = {};
+    for(const h of d.hosts){ (byEnv[h.environment || ''] = byEnv[h.environment || ''] || []).push(h); }
+    for(const env of Object.keys(byEnv).sort()){
+      const label = env || 'No environment';
+      opts.push(`<optgroup label="${esc(label)}">` + byEnv[env].map((h) => {
+        const extra = [h.address, h.kind === 'ssh' ? 'SSH' : ''].filter(Boolean).join(' · ');
+        return `<option value="${esc(h.id)}">${esc(h.label)}` +
+               `${extra ? ' — ' + esc(extra) : ''}</option>`;
+      }).join('') + '</optgroup>');
+    }
+  }
+  // ALWAYS offered, not only when the list is empty: the Controller's list is
+  // the hosts it knows, and assigning to something it has not enrolled yet is
+  // a legitimate thing to want.
+  opts.push(`<option value="${TYPE_IT}">Type a target instead…</option>`);
+  pick.innerHTML = opts.join('');
+
+  const empty = !(d.hosts || []).length && !(d.environments || []).length;
+  if(empty) pick.value = TYPE_IT;
+  syncAssignPick();
+  $('a-note').textContent = d.note
+    ? d.note
+    : 'A host applies to that host. An environment applies to every host in it, ' +
+      'in addition to anything assigned to the host itself.';
+  $('a-note').classList.toggle('warn', !!d.note);
+}
+
+function syncAssignPick(){
+  const typing = $('a-pick').value === TYPE_IT;
+  $('a-otherwrap').hidden = !typing;
+  if(typing) $('a-target').focus();
+}
+$('a-pick').addEventListener('change', syncAssignPick);
+
+// Remove a state, every version of it, and every assignment to it.
+//
+// The assignments go too, and the confirmation NAMES them before anything
+// happens: those hosts stop being configured by this state, and finding that
+// out afterwards is the kind of thing nobody traces back. Run history is kept
+// — it records what actually happened on hosts, and deleting it because the
+// declaration went away is how an audit trail becomes useless.
+async function deleteState(name){
+  const assigned = STATE.assign.filter((a) => a.state === name).map((a) => a.target);
+  const warn = assigned.length
+    ? `Delete the state "${name}"?\n\n` +
+      `${assigned.length} assignment(s) go with it, so these stop being ` +
+      `configured by it:\n  ${assigned.join('\n  ')}\n\n` +
+      'Every version of the declaration is removed. Past runs are kept.'
+    : `Delete the state "${name}"?\n\nEvery version of it is removed. ` +
+      'It is not assigned to anything. Past runs are kept.';
+  if(!confirm(warn)) return;
+  try{
+    const r = await api('states/' + encodeURIComponent(name), {method: 'DELETE'});
+    const n = (r.unassigned || []).length;
+    say(`Deleted ${r.name} (${r.versions} version${r.versions === 1 ? '' : 's'})` +
+        (n ? `, and unassigned it from ${n} target${n === 1 ? '' : 's'}.` : '.'), 'ok');
+    load();
+  }catch(e){ say(e.message, 'err'); }
 }
 
 async function applyTo(target, preview){
@@ -728,6 +848,7 @@ document.addEventListener('click', async (ev) => {
     if(t.id === 'newstate') return openState('');
     if(t.id === 'newrule')  return openRule('');
     if(t.dataset.edit)      return openState(t.dataset.edit);
+    if(t.dataset.delstate)  return deleteState(t.dataset.delstate);
     if(t.dataset.rule)      return openRule(t.dataset.rule);
     if(t.dataset.assign)    return openAssign(t.dataset.assign);
     if(t.dataset.preview)   return applyTo(t.dataset.preview, true);
@@ -779,9 +900,13 @@ $('dlg-rule').addEventListener('close', async () => {
 $('dlg-assign').addEventListener('close', async () => {
   if($('dlg-assign').returnValue !== 'save' || !CAN_WRITE) return;
   try{
+    const picked = $('a-pick').value;
+    const target = (picked === TYPE_IT || !picked)
+      ? $('a-target').value.trim() : picked;
+    if(!target) return say('Pick a host or environment, or type a target.', 'err');
     await api('assign', {method: 'POST', body: JSON.stringify({
-      target: $('a-target').value.trim(), state: $('a-state').value})});
-    say('Assigned.', 'ok'); load();
+      target: target, state: $('a-state').value})});
+    say(`Assigned ${$('a-state').value} to ${target}.`, 'ok'); load();
   }catch(e){ say(e.message, 'err'); }
 });
 

@@ -197,6 +197,44 @@ def list_states() -> list:
             "ORDER BY name").fetchall()]
 
 
+def delete_state(name: str) -> dict:
+    """Remove a state, every version of it, and every assignment to it.
+
+    THE ASSIGNMENTS GO TOO, and the caller is told exactly which. Leaving them
+    would point hosts at a declaration that no longer exists — they would stop
+    being configured with nothing in the console to say why, which is the worst
+    of the available outcomes. Refusing while assignments exist was the other
+    option; it makes deleting a state a scavenger hunt through the assignment
+    table, and the console can simply name them in the confirmation instead.
+
+    RUNS ARE KEPT. They are the record of what actually happened on hosts, not
+    part of the declaration, and deleting history because the thing it was
+    about went away is how an audit trail becomes useless. They keep naming the
+    state; the console shows runs for a state that no longer exists as exactly
+    that.
+    """
+    with _LOCK, _db() as c:
+        versions = c.execute("SELECT COUNT(*) n FROM states WHERE name=?",
+                             (name,)).fetchone()["n"]
+        if not versions:
+            raise KeyError(name)
+        targets = [r["target"] for r in c.execute(
+            "SELECT target FROM assignments WHERE state_name=? ORDER BY target",
+            (name,)).fetchall()]
+        c.execute("DELETE FROM assignments WHERE state_name=?", (name,))
+        c.execute("DELETE FROM states WHERE name=?", (name,))
+    return {"name": name, "versions": versions, "unassigned": targets}
+
+
+def assignments_for_state(name: str) -> list:
+    """Which targets this state is assigned to — what the console names in the
+    confirmation BEFORE anything is deleted."""
+    with _LOCK, _db() as c:
+        return [r["target"] for r in c.execute(
+            "SELECT target FROM assignments WHERE state_name=? ORDER BY target",
+            (name,)).fetchall()]
+
+
 def assign(target: str, state_name: str) -> None:
     with _LOCK, _db() as c:
         c.execute("INSERT OR IGNORE INTO assignments(target,state_name,created) VALUES(?,?,?)",

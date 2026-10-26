@@ -68,6 +68,26 @@ WEB = [
 ]
 
 
+def _ok_return():
+    """A salt-call --out=json return with one state that applied cleanly."""
+    import json as _json
+    return _json.dumps({"local": {
+        "pkg_|-nginx_|-nginx_|-installed": {
+            "result": True, "changes": {"nginx": {"new": "1.0"}},
+            "comment": "", "name": "nginx"}}})
+
+
+def _declare_items(cl, name="web", host="h1"):
+    """Declare WEB, assign it, and hand back the agent's work item."""
+    assert cl.post(f"/api/states/{name}", headers=OPERATOR,
+                   json={"items": WEB}).status_code == 200
+    assert cl.post("/api/assign", headers=OPERATOR,
+                   json={"target": host, "state": name}).status_code == 200
+    d = cl.get("/api/agent/desired", headers={"authorization": "Bearer " + TOKEN},
+               params={"host_id": host}).json()
+    return d["apply"][0]
+
+
 # ---- the generator ---------------------------------------------------------
 def test_a_list_of_things_becomes_a_salt_state():
     from backend import build
@@ -283,3 +303,119 @@ def test_what_the_host_runs_is_the_generated_sls(cl):
     assert d["apply"], d
     cmd = d["apply"][0]["command"]
     assert "salt-call" in cmd and "nginx" in cmd, cmd
+
+
+# ---- deleting a state ------------------------------------------------------
+# Reported: "I can't delete a state." There was no way to, anywhere: rules had
+# DELETE /api/rules/{name} and states had nothing, so a state created by
+# mistake stayed on the screen permanently.
+def test_a_state_can_be_deleted(cl):
+    cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB})
+    r = cl.delete("/api/states/web", headers=OPERATOR)
+    assert r.status_code == 200, r.text
+    assert cl.get("/api/states/web", headers=OPERATOR).status_code == 404
+    assert cl.get("/api/states", headers=OPERATOR).json()["states"] == []
+
+
+def test_deleting_takes_every_version_with_it(cl):
+    for _ in range(3):
+        cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB})
+    r = cl.delete("/api/states/web", headers=OPERATOR).json()
+    assert r["versions"] == 3, r
+    # ...and the name is free again, starting from v1.
+    again = cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB}).json()
+    assert again["version"] == 1, again
+
+
+def test_deleting_removes_the_assignments_and_says_which(cl):
+    """Leaving them would point hosts at a declaration that no longer exists:
+    they stop being configured, with nothing in the console to say why."""
+    cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB})
+    for target in ("h1", "h2", "env:prod"):
+        cl.post("/api/assign", headers=OPERATOR, json={"target": target, "state": "web"})
+    r = cl.delete("/api/states/web", headers=OPERATOR).json()
+    assert sorted(r["unassigned"]) == ["env:prod", "h1", "h2"], r
+    assert cl.get("/api/assignments", headers=OPERATOR).json()["assignments"] == []
+
+
+def test_deleting_one_state_leaves_another_states_assignments_alone(cl):
+    cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB})
+    cl.post("/api/states/db", headers=OPERATOR, json={"items": WEB})
+    cl.post("/api/assign", headers=OPERATOR, json={"target": "h1", "state": "web"})
+    cl.post("/api/assign", headers=OPERATOR, json={"target": "h1", "state": "db"})
+    cl.delete("/api/states/web", headers=OPERATOR)
+    left = cl.get("/api/assignments", headers=OPERATOR).json()["assignments"]
+    assert [(a["target"], a["state"]) for a in left] == [("h1", "db")], left
+
+
+def test_deleting_a_state_keeps_the_record_of_what_it_did(cl):
+    """Runs are what actually happened on hosts, not part of the declaration.
+    Deleting history because the thing it was about went away is how an audit
+    trail becomes useless."""
+    item = _declare_items(cl, "web", host="h1")
+    cl.post("/api/agent/result", headers={"authorization": "Bearer " + TOKEN},
+            json={"run_id": item["run_id"], "output": _ok_return(), "preview": False})
+    before = len(cl.get("/api/runs", headers=OPERATOR).json()["runs"])
+    assert before >= 1, "the run was not recorded, so this test proves nothing"
+    cl.delete("/api/states/web", headers=OPERATOR)
+    after = cl.get("/api/runs", headers=OPERATOR).json()["runs"]
+    assert len(after) == before, "deleting a state deleted the record of what it did"
+    assert any(r["state_name"] == "web" for r in after), after
+
+
+def test_deleting_a_state_that_is_not_there_is_a_404(cl):
+    assert cl.delete("/api/states/ghost", headers=OPERATOR).status_code == 404
+
+
+def test_an_auditor_cannot_delete_a_state(cl):
+    cl.post("/api/states/web", headers=OPERATOR, json={"items": WEB})
+    assert cl.delete("/api/states/web", headers=AUDITOR).status_code == 403
+    assert cl.get("/api/states/web", headers=OPERATOR).status_code == 200
+
+
+# ---- the fleet, for the assign box ----------------------------------------
+def test_the_targets_endpoint_degrades_to_a_note(cl):
+    """No Controller wired up in this harness. It must answer with an empty
+    list and a reason, never an error — the console falls back to typing, and
+    losing the ability to assign because the PICKER is down would be worse."""
+    r = cl.get("/api/targets", headers=OPERATOR)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["hosts"] == [] and d["environments"] == []
+    assert d["note"], "an unreachable Controller produced no explanation"
+
+
+def test_the_targets_endpoint_is_readable_by_an_auditor(cl):
+    assert cl.get("/api/targets", headers=AUDITOR).status_code == 200
+
+
+def test_a_host_id_this_service_would_refuse_is_never_offered(cl, monkeypatch):
+    """The ids come back into a URL that reaches the Controller. One that would
+    be refused at apply time must not be in the list that produced it."""
+    from backend import controller
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"hosts": [
+                {"id": "web-01", "label": "web-01", "environment": "prod", "kind": "agent"},
+                {"id": "../etc/passwd", "label": "evil", "environment": "prod"},
+                {"id": "has space", "label": "spacey", "environment": ""},
+                {"id": "", "label": "nameless", "environment": ""},
+            ]}
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **k): return _R()
+
+    monkeypatch.setattr(controller, "_SSO_SECRET", "s" * 32)
+    monkeypatch.setattr(controller, "httpx", type("h", (), {"Client": _C}))
+    hosts, envs, note = controller.list_targets(
+        type("I", (), {"user": "alice", "role": "operator"})())
+    assert [h["id"] for h in hosts] == ["web-01"], hosts
+    assert envs == ["prod"], envs
+    assert note is None

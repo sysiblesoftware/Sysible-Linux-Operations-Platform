@@ -321,3 +321,154 @@ def test_an_auditor_gets_a_console_that_can_actually_read(browser, server):
         assert not errs, errs
     finally:
         ctx.close()
+
+
+# ---- deleting a state ------------------------------------------------------
+def test_a_state_can_be_deleted_from_the_list(browser, server):
+    """Reported: "I can't delete a state." There was no button and no route."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        asked = {}
+        pg.on("dialog", lambda d: (asked.update(text=d.message), d.accept()))
+        _build(pg, "throwaway", ["group"])
+        pg.fill("#it-0-name", "temp")
+        pg.click("#s-save")
+        pg.wait_for_timeout(700)
+        pg.wait_for_selector('[data-delstate="throwaway"]')
+        pg.click('[data-delstate="throwaway"]')
+        pg.wait_for_timeout(800)
+        assert "Deleted throwaway" in (pg.text_content("#msg") or ""), pg.text_content("#msg")
+        assert pg.locator("[data-delstate=throwaway]").count() == 0, \
+            "the deleted state is still listed"
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
+def test_the_confirmation_names_the_hosts_that_stop_being_configured(browser, server):
+    """The assignments go with the state. Finding that out afterwards is the
+    kind of thing nobody traces back."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        asked = {}
+        pg.on("dialog", lambda d: (asked.update(text=d.message), d.dismiss()))
+        _build(pg, "assigned-one", ["group"])
+        pg.fill("#it-0-name", "temp")
+        pg.click("#s-save")
+        pg.wait_for_timeout(700)
+        # Assign it by typing, since this harness has no Controller to list.
+        pg.click('[data-assign="assigned-one"]')
+        pg.wait_for_timeout(700)
+        pg.select_option("#a-pick", pg.evaluate(
+            "() => [...document.querySelectorAll('#a-pick option')].pop().value"))
+        pg.wait_for_timeout(150)
+        pg.fill("#a-target", "web-01")
+        pg.click("#a-save")
+        pg.wait_for_timeout(700)
+
+        pg.click('[data-delstate="assigned-one"]')
+        pg.wait_for_timeout(400)
+        assert "web-01" in asked.get("text", ""), \
+            f"the confirmation does not name what stops being configured: {asked}"
+        assert "stop being" in asked.get("text", ""), asked
+        # It was dismissed, so nothing may have happened.
+        assert pg.locator("[data-delstate=assigned-one]").count() == 1, \
+            "cancelling the confirmation deleted it anyway"
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
+# ---- picking a target ------------------------------------------------------
+def test_the_assign_box_offers_the_fleet_rather_than_a_blank_field(browser, server):
+    """Typing an id from memory is how a state gets assigned to a host that
+    does not exist — and that looks exactly like one whose host has not checked
+    in yet. This harness has no Controller, so the list is empty and the dialog
+    must fall back to typing WITH the reason shown, not silently."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        _build(pg, "pickable", ["group"])
+        pg.fill("#it-0-name", "temp")
+        pg.click("#s-save")
+        pg.wait_for_timeout(700)
+        pg.click('[data-assign="pickable"]')
+        pg.wait_for_selector("#a-pick")
+        pg.wait_for_timeout(800)
+        assert pg.is_visible("#a-target"), \
+            "no fleet and no way to type either — the dialog cannot assign anything"
+        note = pg.text_content("#a-note") or ""
+        assert note.strip(), "nothing explains why there is no list"
+        assert "Controller" in note or "type the target" in note, note
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
+def test_typing_a_target_is_always_offered(browser, server):
+    """Even with a full fleet: assigning to a host the Controller has not
+    enrolled yet is a legitimate thing to want."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        _build(pg, "typeable", ["group"])
+        pg.fill("#it-0-name", "temp")
+        pg.click("#s-save")
+        pg.wait_for_timeout(700)
+        pg.click('[data-assign="typeable"]')
+        pg.wait_for_selector("#a-pick")
+        pg.wait_for_timeout(800)
+        labels = pg.evaluate(
+            "() => [...document.querySelectorAll('#a-pick option')].map(o => o.textContent)")
+        assert any("Type a target" in t for t in labels), labels
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
+# ---- your own Salt state ---------------------------------------------------
+def test_a_new_state_can_be_written_as_yaml_without_building_anything(browser, server):
+    """Reported: "there needs to be way to add your own salt states not just
+    from a currated list." YAML was reachable only by adding an item and then
+    taking the state over through a confirm warning about losing the list — a
+    warning about losing something that does not exist, in front of the one
+    path an operator with an existing .sls file wants."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        dialogs = []
+        pg.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+        pg.click("#newstate")
+        pg.wait_for_selector("#s-kind")
+        pg.fill("#s-name", "my-own")
+        pg.click("[data-mode=yaml]")
+        pg.wait_for_timeout(600)
+        assert pg.evaluate("() => document.getElementById('s-sls').readOnly") is False, \
+            "an empty new state still opens YAML read-only"
+        assert not dialogs, f"it asked something before letting anyone type: {dialogs}"
+        pg.fill("#s-sls", "my_thing:\n  file.managed:\n  - name: /etc/mine\n  - contents: hi\n")
+        pg.click("#s-save")
+        pg.wait_for_timeout(800)
+        assert "Saved my-own v1" in (pg.text_content("#msg") or ""), pg.text_content("#msg")
+
+        pg.click('[data-edit="my-own"]')
+        pg.wait_for_timeout(600)
+        assert pg.is_visible("#s-yaml"), "it reopened in the builder"
+        assert "my_thing" in pg.input_value("#s-sls")
+        assert not errs, errs
+    finally:
+        ctx.close()
+
+
+def test_an_untouched_yaml_box_can_still_go_back_to_the_builder(browser, server):
+    """Opening the YAML tab on a new state is not a decision yet."""
+    pg, ctx, errs = _page(browser, server)
+    try:
+        pg.click("#newstate")
+        pg.wait_for_selector("#s-kind")
+        pg.click("[data-mode=yaml]")
+        pg.wait_for_timeout(500)
+        pg.click("[data-mode=build]")
+        pg.wait_for_timeout(300)
+        assert pg.is_visible("#s-build"), "the builder is unreachable again"
+        assert pg.is_visible("#s-kind")
+        assert not errs, errs
+    finally:
+        ctx.close()
