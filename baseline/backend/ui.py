@@ -156,7 +156,7 @@ button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 .msg.ok{background:rgba(76,175,90,.12);color:var(--ok)}
 
-"""
+""" + build_info.CSS
 
 FAVICON_SVG = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -218,9 +218,8 @@ def _shell(title: str, body: str, who: str = "", tail: str = "") -> str:
         f"<style>{_CSS}</style></head><body>"
         "<header class=head><div class=brand>Sysible <b>Baseline</b> — desired-state "
         "configuration</div>"
-        f"<span class=who>{who}</span></header>"
+        f"<span class=who>{who}</span>{build_info.chip()}</header>"
         + body + tail
-        + build_info.footer("Sysible Baseline")
         + "</body></html>"
     )
 

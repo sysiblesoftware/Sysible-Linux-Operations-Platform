@@ -83,16 +83,50 @@ def portal():
 
             page.route("**/*", dispatch)
             if visit_admin:
-                # Make /admin a VISITED link. A fresh profile has visited
-                # nothing, so :visited never applies and an unstyled <a> is not
-                # purple — which is why every earlier test missed the reported
-                # symptom entirely.
-                page.goto("file://" + os.path.join(PORTAL, "index.html") + "#admin-visited")
-                page.evaluate("() => { var a=document.getElementById('admtab');"
-                              " if(a) a.click(); }")
-                page.wait_for_timeout(100)
-            page.goto("file://" + os.path.join(PORTAL, "index.html"))
-            page.wait_for_timeout(600)
+                # Put the tab's href in history — on a THROWAWAY page, not this
+                # one — so the element under test is in the state the operator's
+                # browser was in when they reported it.
+                #
+                # Worth being exact about what this does and does not prove.
+                # getComputedStyle deliberately reports the UNVISITED colour for
+                # privacy, so the purple itself is not observable from here; an
+                # unstyled tab reads as UA link blue, rgb(0,0,238). What the
+                # assertions below actually catch is the tab falling back to the
+                # user agent's anchor styling at all — wrong colour, underlined,
+                # no border, inherited size — which is the defect. Purple was the
+                # symptom of it, not a separate thing to reproduce.
+                #
+                # History is per-profile, so a visit made anywhere in this
+                # browser counts for the page under test. Doing it here was the
+                # flake: the href is /admin, which does not resolve under
+                # file://, so Chromium starts an asynchronous navigation to its
+                # error page. Whatever this fixture did next raced it, and the
+                # following goto died with "interrupted by another navigation to
+                # chrome-error://chromewebdata/". The old fixed 100ms usually
+                # outran that and under load sometimes did not. A separate page
+                # keeps the failing navigation off the one being measured.
+                scratch = browser.new_page()
+                try:
+                    scratch.goto("file:///admin", wait_until="load", timeout=10000)
+                except Exception:
+                    pass        # it does not resolve; being in history is the point
+                finally:
+                    scratch.close()
+            page.goto("file://" + os.path.join(PORTAL, "index.html"), wait_until="load")
+            # app.js writes the user chip from /auth/me, so a non-empty #who is
+            # the moment the identity has been processed and the page painted.
+            # That is the condition the old `wait_for_timeout(600)` was standing
+            # in for — and the reason this test flaked under a full-suite run.
+            if me_status == 200:
+                page.wait_for_function(
+                    "() => {var w=document.getElementById('who');"
+                    " return !!(w && w.textContent && w.textContent.trim());}",
+                    timeout=20000)
+            else:
+                # Nothing to paint from: the chip stays empty by design, so wait
+                # for the page itself to have settled instead.
+                page.wait_for_function("() => document.readyState === 'complete'",
+                                       timeout=20000)
             self.page = page
             return page
 

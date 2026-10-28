@@ -131,7 +131,7 @@ border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 .topo-legend .ring{display:inline-block;width:10px;height:10px;border-radius:50%;
 border:2px solid #e06c6c;vertical-align:middle;margin-right:.35em}
 .topo-legend .hint{margin-left:auto;color:var(--faint)}
-"""
+""" + build_info.CSS
 
 _JS = r"""
 const $=s=>document.querySelector(s);
@@ -760,7 +760,7 @@ def page(user: str, role: str) -> str:
         "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
         f"<style>{_CSS}</style></head><body>"
         "<header class=head><div class=brand>Sysible <b>Visualizer</b> — activity, logs &amp; fleet topology</div>"
-        f"<span class=who>{who}</span></header>"
+        f"<span class=who>{who}</span>{build_info.chip()}</header>"
         "<div class=home id=home>"
         "<h2>What would you like to look at?</h2>"
         "<p class=lede>Visualizer reads the rest of the platform. It changes nothing "
@@ -814,7 +814,6 @@ def page(user: str, role: str) -> str:
         "<div id=msgs></div>"
         "<div class=wrap><div id=body></div><div id=log></div>"
         "<div id=topo hidden></div></div>"
-        + build_info.footer("Sysible Visualizer")
         + f"<script>{_JS}</script>"
         + "</body></html>"
     )

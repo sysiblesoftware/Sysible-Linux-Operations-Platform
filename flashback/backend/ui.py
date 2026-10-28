@@ -102,7 +102,7 @@ pre.diff .a{color:var(--err)}pre.diff .d{color:var(--ok)}pre.diff .h{color:var(-
 .msg.ok{background:rgba(76,175,90,.12);color:var(--ok)}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 .foot{color:var(--faint);font-size:11px;padding:.5em 1em;border-top:1px solid var(--line)}
-"""
+""" + build_info.CSS
 
 # The interactive layer: plain fetch() against /api/*. No framework. XSS-safe —
 # every dynamic string is inserted with textContent, never innerHTML.
@@ -932,7 +932,7 @@ def page(user: str, role: str, can_write: bool) -> str:
         f"<style>{_CSS}</style></head>"
         f"<body data-can-write='{'1' if can_write else '0'}'>"
         "<header class=head><div class=brand>Sysible <b>Flashback</b> — config history and restore</div>"
-        f"<span class=who>{who}</span></header>"
+        f"<span class=who>{who}</span>{build_info.chip()}</header>"
         "<div class=msg id=msg hidden></div>"
         "<div class=wrap id=wrap>"
         "<div class=col id=hosts></div>"
@@ -956,7 +956,6 @@ def page(user: str, role: str, can_write: bool) -> str:
         "drifted from the rest of the fleet.</div>"
         "</div>"
         "</div>"
-        + build_info.footer("Sysible Flashback")
         + f"<script>{_JS}</script>"
         + "</body></html>"
     )
