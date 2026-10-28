@@ -267,23 +267,34 @@ def test_the_page_fits_its_card_and_the_toggle_is_inert(tmp_path):
 
 
 def test_a_finished_update_reloads_the_page():
-    """The containers were just recreated with new code, so the page and every
-    asset it is holding come from the build that was replaced. Without this the
-    operator is told it updated while still looking at the old one."""
+    """When THIS page's own code was replaced, and only then.
+
+    A SLOP update recreates the container serving this page, so the document and
+    every asset it is holding come from the build that was just replaced — the
+    operator would be told it updated while still looking at the old one.
+
+    An update of something else is different, and this used to reload for that
+    too. The progress panel is the record of what just happened, and reloading
+    throws it away: for a product whose update did not touch this page, re-reading
+    the table is enough and the result stays on screen.
+    """
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
-    block = src[src.index("if(j.state!=='running'){"):]
-    block = block[:block.index("function startUpdate")]
+    block = src[src.index("function finishJob"):]
+    block = block[:block.index("\n  }")]
     assert "location.reload()" in block, "a finished update never refreshes the page"
-    # The reload must sit INSIDE the success branch. Checking only that the string
-    # "succeeded" appears nearby passes even when the reload is unconditional — the
-    # toast two lines above mentions it too, which is how the first version of this
-    # test stayed green while the guard was removed.
-    m = re.search(r"if\(j\.state==='succeeded'\)\{\s*"
-                  r"setTimeout\(function\(\)\{location\.reload\(\);\},(\d+)\);\s*\}", block)
-    assert m, "the reload is not guarded by the update having SUCCEEDED"
-    # Not instant: the toast carrying the outcome has to be readable first.
+    # Guarded by BOTH, and checked as one expression. Asserting that the words
+    # appear somewhere in the function passes just as happily when the reload is
+    # unconditional — the comment above it mentions success and SLOP by name,
+    # which is how an earlier version of this test stayed green through exactly
+    # that regression.
+    m = re.search(r"if\(ok\s*&&\s*selfJob\)\{\s*"
+                  r"setTimeout\(function\(\)\{location\.reload\(\);\},(\d+)\);\s*\}",
+                  block)
+    assert m, ("the reload is not guarded by the update having SUCCEEDED and "
+               "having been a self-update")
+    # Not instant: the outcome has to be readable first.
     assert int(m.group(1)) >= 1500, "reloads before the result can be read"
 
 
@@ -293,7 +304,10 @@ def test_update_all_offers_only_what_is_updatable():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
     assert "id=updateall hidden" in src, "the button is visible before anything is known"
-    block = src[src.index("var able=(d.apps||[])"):src.index("if(d.job)showJob(d.job);")]
+    # Anchored on the next STATEMENT, not on a line further down the function:
+    # the old end marker was `if(d.job)showJob(d.job);`, which grew into a block
+    # when the job panel landed, and this test stopped slicing at all.
+    block = src[src.index("var able=(d.apps||[])"):src.index("    if(d.job){")]
     assert "a.can_update" in block, "it counts rows that cannot actually be updated"
     assert "able.length < 2" in block, "it shows for a single product, where the row's own button is clearer"
 

@@ -42,14 +42,20 @@ HELPER = "sysible-slop-selfupdate"
 # CONSTANTS. No f-strings, no interpolation, nothing derived from a request.
 # `-w` puts us in the checkout, so git needs no path; safe.directory='*' because
 # the checkout is owned by whoever cloned it on the host, not by this container.
+# The `>>> step:` lines are the SAME markers jobs.py writes in process, so one
+# parser (jobs.step_of) reads the phase of either kind of job. The helper's log
+# is raw command output — there is no argv echo here to infer a phase from — and
+# this is the console's only way to say "pulling" rather than "running".
 SCRIPT_UPDATE = ("set -e; "
+                 "echo '>>> step: pull'; "
                  "git -c safe.directory='*' pull --ff-only; "
+                 "echo '>>> step: build'; "
                  "exec docker compose up -d --build")
 SCRIPT_ACTIONS = {
-    "restart":  "exec docker compose restart",
-    "start":    "exec docker compose start",
-    "stop":     "exec docker compose stop",
-    "recreate": "exec docker compose up -d",
+    "restart":  "echo '>>> step: act'; exec docker compose restart",
+    "start":    "echo '>>> step: act'; exec docker compose start",
+    "stop":     "echo '>>> step: act'; exec docker compose stop",
+    "recreate": "echo '>>> step: act'; exec docker compose up -d",
 }
 
 # How long a finished helper's result is worth reporting. Past this the console

@@ -51,7 +51,10 @@ def current() -> dict | None:
         fresh = detached.status()
         if fresh is not None:
             _forget_after_detached_pull(fresh)
+            fresh["step"] = step_of(fresh.get("log"))
             return fresh
+    if j is not None:
+        j["step"] = step_of(j.get("log"))
     return j
 
 
@@ -71,6 +74,45 @@ def _forget_after_detached_pull(job: dict) -> None:
         return
     _forgotten.add(str(root))
     git.forget_remote(root)
+
+
+# ---- which phase a job is in ------------------------------------------------
+# The console shows an update as a sequence, not a log dump, so it needs to know
+# where the job has got to. The job announces each phase into its own log with a
+# marker, and this reads the last one back.
+#
+# A MARKER, not a guess at the output. Two reasons it cannot be inferred: a
+# self-affecting job runs in a detached helper (see detached.py) whose log is raw
+# command output with no argv echo to key off, and docker compose's own wording
+# is not ours to depend on. The marker is written by the same code that starts
+# the phase, in both paths, and reads fine to a human tailing the log.
+STEP_MARK = ">>> step: "
+#   pull  — fetching the new code
+#   build — `compose up -d --build`: the long one, minutes not seconds
+#   act   — a lifecycle action (restart/stop/start/recreate)
+STEPS = ("pull", "build", "act")
+
+
+def mark(step: str) -> str:
+    """The log line that announces a phase."""
+    return f"{STEP_MARK}{step}"
+
+
+def step_of(log) -> str:
+    """The phase a job's log says it reached, or "" when it has not said.
+
+    Empty is a real answer — a job that has only just started, or one whose log
+    was trimmed past its markers — and the console renders that as "starting"
+    rather than inventing a phase it cannot see.
+    """
+    step = ""
+    for line in log or ():
+        text = str(line).strip()
+        if text.startswith(STEP_MARK):
+            found = text[len(STEP_MARK):].strip()
+            if found in STEPS:
+                step = found
+    return step
 
 
 def _set(**fields) -> None:
@@ -133,6 +175,7 @@ def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
     steps — a queue that drifted from the single update would be a second code
     path nobody tests.
     """
+    _log(mark("pull"))
     rc = _run(["git", "-C", str(root), "-c", f"safe.directory={root}",
                "pull", "--ff-only"], root)
     # The pull moved HEAD, so whatever was memoised about this checkout's remote
@@ -152,6 +195,7 @@ def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
     # there breaks callers that never pass one; and _run echoes the argv it is
     # about to execute, so this way the job log records the exact revision that
     # was stamped instead of leaving it invisible.
+    _log(mark("build"))
     rc = _run(["env", f"SYSIBLE_SLOP_REV={_rev(root)}",
                "docker", "compose", "up", "-d", "--build"], compose)
     if rc != 0:
@@ -391,6 +435,7 @@ def _action_worker(key: str, compose: Path, argv: list[str], verb: str,
                    module: str | None = None) -> None:
     subject = module or key
     try:
+        _log(mark("act"))
         rc = _run(argv, compose)
         if rc != 0:
             _set(state="failed", finished=time.time(),

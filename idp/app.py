@@ -772,6 +772,76 @@ border-radius:20px;font-size:12.5px;color:var(--muted);text-decoration:none}
 [hidden]{display:none !important}
 .appframe{width:100%;height:min(72vh,900px);border:1px solid var(--line);
 border-radius:12px;background:var(--panel);display:block}
+/* The progress panel for a running update.
+
+   An update is minutes long and recreates the containers serving this page, so
+   "it is running" is not enough to show: what phase, how long, which product of
+   how many, and what has already finished. The log is still there, but behind a
+   disclosure — a wall of compose output is a reference, not a progress bar. */
+.jobpanel{margin-top:1.1rem;padding:.9rem 1rem 1rem;border:1px solid var(--line);
+border-radius:12px;background:var(--panel)}
+.jobpanel.ok{border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.jobpanel.bad{border-color:color-mix(in srgb,var(--err) 55%,var(--line))}
+.job-head{display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
+.job-title{font-weight:600;font-size:14.5px}
+.job-meta{margin-left:auto;display:flex;gap:.9rem;color:var(--muted);font-size:12px;
+font-variant-numeric:tabular-nums}
+/* The phases, as a rail. Grid so the labels sit under their own marker however
+   many there are, and the connectors stretch evenly. */
+.job-steps{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;
+margin:.85rem 0 .2rem;padding:0;list-style:none}
+.job-step{position:relative;padding-top:1.45rem;text-align:center;
+color:var(--faint);font-size:11.5px;letter-spacing:.02em}
+.job-step::before{content:'';position:absolute;top:.15rem;left:50%;
+transform:translateX(-50%);width:11px;height:11px;border-radius:50%;
+border:2px solid var(--line);background:var(--panel);z-index:1}
+/* The connector runs from this marker to the next one, so the last step has
+   none — a line running off the end reads as another phase that is missing. */
+.job-step::after{content:'';position:absolute;top:calc(.15rem + 4px);left:50%;
+width:100%;height:3px;background:var(--line)}
+.job-step:last-child::after{display:none}
+.job-step.done{color:var(--muted)}
+.job-step.done::before{border-color:var(--ok);background:var(--ok)}
+.job-step.done::after{background:var(--ok)}
+.job-step.now{color:var(--text);font-weight:600}
+.job-step.now::before{border-color:var(--accent2);background:var(--accent2);
+animation:jobpulse 1.4s ease-in-out infinite}
+.job-step.bad::before{border-color:var(--err);background:var(--err);animation:none}
+.job-step.bad{color:var(--err)}
+@keyframes jobpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent2) 60%,transparent)}
+50%{box-shadow:0 0 0 5px transparent}}
+/* Respect a reduced-motion preference: the pulse is decoration, and the phase
+   is already carried by colour and weight. */
+@media(prefers-reduced-motion:reduce){.job-step.now::before{animation:none}}
+.job-say{margin-top:.75rem;font-size:13px;line-height:1.5;color:var(--muted)}
+.job-say b{color:var(--text);font-weight:600}
+.job-say .waiting{color:var(--amber)}
+/* The whole waiting line is one sentence, so the lead-in is emphasis WITHIN it
+   rather than a differently coloured fragment stuck to the front. */
+.job-say .waiting b{color:inherit}
+/* display:contents on the rows, so the mark, the name and the outcome line up
+   down the panel. As three flex rows the columns start wherever each product's
+   name happens to end, which on names of very different lengths reads as a
+   list that was not laid out at all. */
+.job-done{margin-top:.6rem;display:grid;gap:.25rem .7rem;font-size:12.5px;
+grid-template-columns:1rem max-content 1fr}
+.job-done .d{display:contents}
+.job-done .d .k{color:var(--text)}
+.job-done .d.ok .m{color:var(--muted)}
+.job-done .d.bad .m{color:var(--err)}
+.job-done .d .mark{text-align:center}
+.job-done .d.ok .mark{color:var(--ok)}
+.job-done .d.bad .mark{color:var(--err)}
+.job-done .d.now .mark{color:var(--accent2)}
+/* Narrow: a max-content name column leaves the outcome a few characters wide,
+   and "controller updated and restarted." comes out one word per line. Give
+   the name the row and put the outcome under it. */
+@media(max-width:620px){
+  .job-done{grid-template-columns:1rem 1fr}
+  .job-done .d .m{grid-column:2;margin-bottom:.2rem}
+  .job-meta{margin-left:0}
+}
+.job-tools{margin-top:.7rem;display:flex;gap:.5rem;align-items:center}
 .upd-log{margin:.6rem 0 0;padding:.6rem .8rem;background:var(--field,#0d1320);
 border:1px solid var(--line);border-radius:8px;max-height:40vh;overflow:auto;
 font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
@@ -2117,7 +2187,11 @@ _UPDATES_JS = r"""
         if(!res.ok){ pushToast(res.d.detail||'Refused',
           {title:'Software & services',kind:'warn',ttl:0}); b.disabled=false; return; }
         pushToast(res.d.message||(act+' '+m.key),{title:'Software & services'});
-        load();
+        // Restarting a module OF SLOP can be this very console: the gateway and
+        // the IdP are two of them. Treat the whole product as self-affecting
+        // rather than keeping a list of which services serve this page, which
+        // would be one more thing to keep in step with the compose file.
+        startWatch(a.key==='slop');
       })
       .catch(function(e){ pushToast(String(e.message||e),
         {title:'Software & services',kind:'error',ttl:0}); b.disabled=false; });
@@ -2160,7 +2234,11 @@ _UPDATES_JS = r"""
         if(!res.ok){ pushToast(res.d.detail||'Refused',
           {title:'Software & services',kind:'warn',ttl:0}); b.disabled=false; return; }
         pushToast(res.d.message||(act+' '+key),{title:'Software & services'});
-        load();
+        // A lifecycle action is a job like any other, and restarting or
+        // recreating SLOP hands off to the same detached helper an update does
+        // (see start_action) — so it takes this console down with it. Watching
+        // it is what turns that drop into "restarting" instead of silence.
+        startWatch(key==='slop');
       })
       .catch(function(e){ pushToast(String(e.message||e),
         {title:'Software & services',kind:'error',ttl:0}); b.disabled=false; });
@@ -2220,7 +2298,13 @@ _UPDATES_JS = r"""
       all.textContent = 'Update all (' + able.length + ')';
       all.dataset.slop = able.some(function(a){return a.key==='slop';}) ? '1' : '';
     }
-    if(d.job)showJob(d.job);
+    if(d.job){
+      showJob(d.job);
+      // Opening this page in the middle of an update — or landing back on it
+      // after the restart — should show the job running, not a frozen snapshot
+      // of the moment the page happened to load.
+      if(d.job.state==='running') startWatch(!!d.job.self_update);
+    }
   }
   // The skeleton names every product this platform knows about, so the list is
   // still useful when the updater cannot be reached. But when the updater DOES
@@ -2262,19 +2346,166 @@ _UPDATES_JS = r"""
       st.appendChild(modSt('unk',"Can't check",'the updater did not report it'));
     });
   }
-  function showJob(j){
-    var box=document.getElementById('joblog');
-    if(!box||!j)return;
-    box.hidden=false;
-    // In a batch, "Update of connect — running" alone hides how far along it is,
-    // which on a four-product run is the only thing worth knowing.
-    var where = (j.queue && j.queue.length>1)
-      ? (' (' + ((j.index||0)+1) + ' of ' + j.queue.length + ')') : '';
-    document.getElementById('jobtitle').textContent =
-      (j.action ? (j.action.charAt(0).toUpperCase()+j.action.slice(1)+' of ')
-                : 'Update of ')+j.app+where+' \u2014 '+j.state;
-    box.textContent=(j.log||[]).join('\n');
-    box.scrollTop=box.scrollHeight;
+  // ---- what a running update looks like ------------------------------------
+  //
+  // An update is minutes long, so "running" on its own is not a thing to watch.
+  // These are the phases, as the server reports them on the job (see
+  // updater/backend/jobs.py: the job writes a marker into its own log at the
+  // start of each one, in process and in the detached helper alike).
+  var PHASES = {
+    update: [['pull','Pull'],['build','Build & start'],['done','Done']],
+    act:    [['act','Working'],['done','Done']]
+  };
+  var SAYS = {
+    pull:  'Fetching the new code.',
+    build: 'Building images and recreating containers — this is the long '
+           +'part, minutes rather than seconds.',
+    act:   'Asking Docker to carry it out.'
+  };
+  var jobTimer=null, lastJob=null;
+
+  function fmtDur(sec){
+    sec=Math.floor(sec);
+    var m=Math.floor(sec/60), s=sec%60;
+    return m ? (m+'m '+(s<10?'0':'')+s+'s') : (s+'s');
+  }
+  // The container's clock is not this browser's. A duration that comes out
+  // negative, or longer than a day, is skew rather than a very slow update —
+  // and no timer at all is better than a wrong one ticking confidently.
+  function elapsedOf(j){
+    if(!j||!j.started) return null;
+    var d=(j.finished||(Date.now()/1000))-j.started;
+    return (d>=0 && d<86400) ? d : null;
+  }
+  // The product's real name, taken from the row the page already rendered, so
+  // this panel and the table above cannot call the same thing two names.
+  function prettyName(key){
+    var row=document.getElementById('p-'+key);
+    var n=row&&row.querySelector('.prod-name');
+    return (n&&n.textContent.trim())||key||'';
+  }
+  function paintSteps(j, how){
+    var ol=document.getElementById('jobsteps'); if(!ol)return;
+    var phases=j.action?PHASES.act:PHASES.update;
+    var keys=phases.map(function(p){return p[0];});
+    // A FAILURE marks the phase it happened in, not the end of the rail. Keying
+    // off "terminal" alone put the cross on "Done" — a step the job never
+    // reached — and left the phase that actually failed showing as complete.
+    var at=keys.indexOf((how.terminal && !how.failed) ? 'done' : (j.step||keys[0]));
+    if(at<0)at=0;
+    ol.innerHTML='';
+    phases.forEach(function(p,n){
+      var cls='job-step';
+      if(how.ok) cls+=' done';                       // all of it is behind us
+      else if(n<at) cls+=' done';
+      else if(n===at) cls+=(how.failed?' bad':' now');
+      ol.appendChild(el('li',cls,p[1]));
+    });
+  }
+  // In a batch, which products are finished and how each went. One failure does
+  // not stop the rest (see _queue_worker), so "3 of 4" is not the whole story —
+  // WHICH one failed is.
+  function paintDone(j){
+    var box=document.getElementById('jobdone'); if(!box)return;
+    var queue=j.queue||[], results=j.done||[];
+    if(queue.length<2 && !results.length){ box.hidden=true; box.innerHTML=''; return; }
+    box.hidden=false; box.innerHTML='';
+    var seen={}; results.forEach(function(d){ seen[d.key]=d; });
+    (queue.length?queue:[j.app]).forEach(function(k){
+      var d=seen[k], running=(!d && k===j.app && j.state==='running');
+      var row=el('div','d '+(d?(d.ok?'ok':'bad'):(running?'now':'')));
+      row.appendChild(el('span','mark', d?(d.ok?'✓':'✗'):(running?'…':'')));
+      row.appendChild(el('span','k', prettyName(k)));
+      row.appendChild(el('span','m',
+        d?(d.message||(d.ok?'done':'failed')):(running?'in progress':'waiting')));
+      box.appendChild(row);
+    });
+  }
+  // The log is a reference, not the progress display it used to be: a wall of
+  // compose output is where you go when something looks wrong, not what you
+  // watch to see how far along an update is.
+  function paintLog(j){
+    var pre=document.getElementById('joblog'), t=document.getElementById('joblogtoggle');
+    if(!pre||!t)return;
+    var lines=(j.log||[]).filter(function(l){
+      // The phase markers are this page's own wiring. They are readable, but
+      // they are not output the operator asked to see.
+      return String(l).indexOf('>>> step: ')!==0;
+    });
+    var stick = pre.scrollTop+pre.clientHeight >= pre.scrollHeight-24;
+    pre.textContent=lines.join('\n');
+    t.hidden=!lines.length;
+    t.textContent=(pre.hidden?'Show log':'Hide log')
+      +' ('+lines.length+' line'+(lines.length===1?'':'s')+')';
+    // Follow the tail only when already at it, so reading further up is not
+    // yanked back by the next poll.
+    if(!pre.hidden && stick) pre.scrollTop=pre.scrollHeight;
+  }
+  function startTimer(j){
+    if(jobTimer){clearInterval(jobTimer);jobTimer=null;}
+    var out=document.getElementById('jobtime'); if(!out)return;
+    var paint=function(){ var d=elapsedOf(j); out.textContent=(d==null)?'':fmtDur(d); };
+    paint();
+    // Ticks locally rather than waiting on the next poll, so the elapsed time
+    // keeps moving even while the service it is timing is unreachable.
+    if(!j.finished) jobTimer=setInterval(paint,1000);
+  }
+  // The table above is painted from /admin/updates/status, which is NOT re-read
+  // while a job runs. Without this the row for the product being updated keeps
+  // whatever it said before the button was pressed — "Up to date", most often,
+  // which is the one thing it certainly is not in the middle of being updated.
+  function markRowBusy(j){
+    var running=(j.state==='running');
+    var td=document.getElementById('u-'+j.app);
+    if(td && running){
+      td.innerHTML='';
+      td.appendChild(st('due', j.action?'Working…':'Updating…',
+                        SAYS[j.step||'']||''));
+    }
+    var btn=document.getElementById('b-'+j.app);
+    if(btn && running){ btn.disabled=true; }
+  }
+  // `note` is [kind, text] when the console cannot see the job right now, and
+  // the panel then keeps showing the last phase it DID see rather than blanking.
+  function showJob(j, note){
+    var panel=document.getElementById('jobpanel'); if(!panel||!j)return;
+    lastJob=j;
+    panel.hidden=false;
+    var ok=(j.state==='succeeded'), failed=(j.state==='failed');
+    var terminal=ok||failed;
+    panel.className='jobpanel'+(note?'':(ok?' ok':(failed?' bad':'')));
+    var verb=j.action?(j.action.charAt(0).toUpperCase()+j.action.slice(1)):'Update';
+    var title=document.getElementById('jobtitle');
+    if(title) title.textContent=verb+' of '+prettyName(j.app)
+      +(note?'':(ok?' — done':(failed?' — failed':'')));
+    var cnt=document.getElementById('jobcount');
+    if(cnt) cnt.textContent=(j.queue&&j.queue.length>1)
+      ? (((j.index||0)+1)+' of '+j.queue.length) : '';
+    paintSteps(j,{ok:ok&&!note, failed:failed&&!note, terminal:terminal&&!note});
+    var say=document.getElementById('jobsay');
+    if(say){
+      say.innerHTML='';
+      if(note){
+        var w=el('span','waiting');
+        if(note[0]==='restart'){
+          w.appendChild(el('b',null,'SLOP is restarting itself. '));
+          w.appendChild(document.createTextNode(
+            'This console is part of what is being updated, so it drops out for '
+            +'a few seconds and comes back on its own. '));
+        } else {
+          w.appendChild(el('b',null,'Lost contact with the updater. '));
+          w.appendChild(document.createTextNode(
+            'The job is still running on the host. '));
+        }
+        w.appendChild(document.createTextNode(note[1]));
+        say.appendChild(w);
+      } else if(terminal){
+        say.textContent=j.message||(ok?'Finished.':'Failed.');
+      } else {
+        say.textContent=SAYS[j.step||'']||'Starting…';
+      }
+    }
+    paintDone(j); paintLog(j); startTimer(j); markRowBusy(j);
   }
   // THE UPDATER IS PART OF THE STACK IT UPDATES. Updating SLOP recreates it,
   // so it is guaranteed to be unreachable for a few seconds every single time —
@@ -2328,40 +2559,98 @@ _UPDATES_JS = r"""
         ' attempts \u2014 press Check now to try again.';
     }
   }
-  function poll(selfUpdate){
-    if(polling)return;
-    polling=setInterval(function(){
-      fetch('/admin/updates/job',{cache:'no-store'})
-        .then(function(r){return r.json();})
-        .then(function(d){
-          var j=d.job; if(!j)return;
-          showJob(j);
-          if(j.state!=='running'){
-            clearInterval(polling); polling=null;
-            pushToast(j.message||('Update '+j.state),
-                      {title:'Software & services',
-                       kind:j.state==='succeeded'?'success':'error',
-                       ttl:j.state==='succeeded'?9000:0});
-            load();
-            // The containers were just recreated with new code, so this page and
-            // every asset it is holding are from the build that was replaced.
-            // Reloading is the difference between "it updated" and "it updated and
-            // I am looking at it". Long enough for the toast to be read first.
-            if(j.state==='succeeded'){
-              setTimeout(function(){location.reload();},2500);
-            }
-          }
-        })
-        .catch(function(){
-          // SLOP updating ITSELF recreates this container mid-job, so losing the
-          // connection here is the expected outcome, not a failure.
-          if(selfUpdate){
-            clearInterval(polling); polling=null;
-            pushToast('SLOP is rebuilding and will restart \u2014 reload this page in a moment.',
-                      {title:'Software & services',kind:'warn',ttl:0});
-          }
-        });
-    },2000);
+  // ---- watching a job through a restart ------------------------------------
+  //
+  // THE UPDATER IS PART OF THE STACK IT UPDATES. `compose up -d --build` on the
+  // SLOP project recreates this very container, so the connection to it WILL
+  // drop, every time, by design.
+  //
+  // This page used to treat that as the end: it stopped polling and put up a
+  // sticky toast telling the operator to reload by hand in a moment. That is
+  // the one moment they most want to be told what is happening, and it was
+  // exactly the moment the screen gave up and handed the job back to them — to
+  // sit refreshing until something changed. (The old wording is deliberately
+  // paraphrased here: a test asserts that sentence appears nowhere on the page,
+  // and a comment quoting it verbatim is the fifth assertion in this repo to be
+  // tripped by its own explanation.)
+  //
+  // There is an answer to wait for. A self-affecting job runs in a detached
+  // helper container that compose never touches (updater/backend/detached.py),
+  // so the WORK survives the restart and so do its log and its exit code. The
+  // poller waits for the service to come back and reads it.
+  var lost=0, selfJob=false, watching=false;
+
+  function stopWatch(){
+    if(polling){clearTimeout(polling);polling=null;}
+    watching=false;
+  }
+  // A restart is seconds, so stay quick at first. A longer outage is worth
+  // slowing down for — but never worth giving up on, because something on the
+  // other side is still holding the result.
+  function backoffMs(n){ return n<10 ? 1000 : (n<30 ? 2000 : 5000); }
+  function pollIn(ms){
+    if(polling)clearTimeout(polling);
+    polling=setTimeout(pollOnce,ms);
+  }
+  function startWatch(isSelf){
+    selfJob = selfJob || !!isSelf;
+    if(watching)return;
+    watching=true; lost=0;
+    pollIn(600);
+  }
+  function unreachableJob(why){
+    lost++;
+    var note = selfJob
+      ? ['restart','Reconnecting… (attempt '+lost+')']
+      : ['lost','Reconnecting… (attempt '+lost+')'];
+    if(lastJob) showJob(lastJob, note);
+    pollIn(backoffMs(lost));
+  }
+  function pollOnce(){
+    fetch('/admin/updates/job',{cache:'no-store'})
+      .then(function(r){
+        // The SESSION, not the updater. Restarting SLOP takes the IdP with it,
+        // and if the session did not survive, the right destination is the
+        // login page — not another poll that will be refused the same way.
+        if(r.status===401||r.status===403){ stopWatch(); location.reload(); return null; }
+        return r.ok ? r.json() : Promise.reject(new Error('HTTP '+r.status));
+      })
+      .then(function(d){
+        if(!d)return;
+        // A 200 carrying an error is the updater unreachable from the IdP,
+        // which during a restart means the same thing as a dropped connection.
+        if(d.error){ unreachableJob(d.error); return; }
+        var j=d.job;
+        if(!j){
+          // It finished and aged out of the helper's reporting window while we
+          // were away. Nothing left to report, so stop and re-read the table.
+          stopWatch(); load(); return;
+        }
+        lost=0;
+        selfJob = selfJob || !!j.self_update;
+        showJob(j);
+        if(j.state==='running'){ pollIn(2000); return; }
+        finishJob(j);
+      })
+      .catch(function(e){ unreachableJob(String(e.message||e)); });
+  }
+  function finishJob(j){
+    stopWatch();
+    var ok=(j.state==='succeeded');
+    pushToast(j.message||('Update '+j.state),
+              {title:'Software & services', kind:ok?'success':'error',
+               ttl:ok?9000:0});
+    load();
+    // Only when this page's OWN code was replaced. The panel is the record of
+    // what just happened, and reloading throws it away — so for an update of
+    // something else, re-reading the table is enough and the result stays on
+    // screen. For SLOP, this document and every asset it holds came from the
+    // build that was just replaced, and looking at it is not the same as
+    // having updated it.
+    if(ok && selfJob){
+      setTimeout(function(){location.reload();},4000);
+    }
+    selfJob=false;
   }
   function startUpdate(key, b){
         if(key==='slop' && !confirm('Updating SLOP rebuilds the gateway and this console. '
@@ -2377,7 +2666,7 @@ _UPDATES_JS = r"""
                                   {title:'Software & services',kind:'error',ttl:0});
               b.disabled=false; return;}
             pushToast(res.d.message||('Updating '+key),{title:'Software & services'});
-            poll(key==='slop');
+            startWatch(key==='slop');
           })
           .catch(function(e){pushToast(String(e.message||e),
                 {title:'Software & services',kind:'error',ttl:0}); b.disabled=false;});
@@ -2402,9 +2691,9 @@ _UPDATES_JS = r"""
           pushToast('Skipped (blocked): '+res.d.skipped.join(', '),
                     {title:'Software & services',kind:'warn',ttl:0});
         }
-        // Tell the poller SLOP is in the batch, so losing the connection at the
-        // end reads as the expected restart rather than a failure.
-        poll((res.d.products||[]).indexOf('slop')>=0);
+        // Tell the watcher SLOP is in the batch, so losing the connection at
+        // the end reads as the expected restart rather than a failure.
+        startWatch((res.d.products||[]).indexOf('slop')>=0);
       })
       .catch(function(e){pushToast(String(e.message||e),
             {title:'Software & services',kind:'error',ttl:0}); b.disabled=false;});
@@ -2422,6 +2711,16 @@ _UPDATES_JS = r"""
     // The remote tip is memoised by the updater (browsing Administration would
     // otherwise cost a round-trip to GitHub per product per page). This is the
     // way to say "no, ask now" — so a cached answer is never the only answer.
+    // The log, behind a disclosure. It starts closed because it is a reference
+    // for when something looks wrong, not the progress display.
+    var lt=document.getElementById('joblogtoggle');
+    if(lt) lt.addEventListener('click',function(){
+      var pre=document.getElementById('joblog'); if(!pre)return;
+      pre.hidden=!pre.hidden;
+      lt.setAttribute('aria-expanded', pre.hidden?'false':'true');
+      if(lastJob) paintLog(lastJob);
+      if(!pre.hidden) pre.scrollTop=pre.scrollHeight;
+    });
     var chk=document.getElementById('checknow');
     if(chk) chk.addEventListener('click',function(){
       chk.disabled=true;
@@ -2570,8 +2869,21 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<span class=sub>Availability is remembered for a few minutes; this re-asks "
         "every product&rsquo;s git remote.</span></div>"
         f"{table}"
-        "<div id=joblog-wrap>"
-        "<div id=jobtitle class=sub style='margin-top:1rem'></div>"
+        # The progress panel. Everything in it is written by showJob(); it stays
+        # hidden until there is a job, so a quiet page has nothing extra on it.
+        "<div id=jobpanel class=jobpanel hidden "
+        "role=status aria-live=polite aria-atomic=false>"
+        "<div class=job-head>"
+        "<div class=job-title id=jobtitle></div>"
+        "<div class=job-meta><span id=jobcount></span><span id=jobtime></span></div>"
+        "</div>"
+        "<ol class=job-steps id=jobsteps></ol>"
+        "<div class=job-say id=jobsay></div>"
+        "<div class=job-done id=jobdone></div>"
+        "<div class=job-tools>"
+        "<button class='btn ghost sm' id=joblogtoggle aria-expanded=false "
+        "aria-controls=joblog hidden>Show log</button>"
+        "</div>"
         "<pre class=upd-log id=joblog hidden></pre>"
         "</div>"
         f"<script>{_UPDATES_JS}</script>"
