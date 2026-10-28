@@ -41,8 +41,24 @@ def configured() -> bool:
 
 
 def _url() -> str:
-    return (f"https://{_CONTROLLER}" if ":443" in _CONTROLLER
-            else f"http://{_CONTROLLER}")
+    """The Controller's base url. HTTPS unless told otherwise.
+
+    The Controller serves its own self-signed cert — `uvicorn webgui.server:app`
+    on :8800 is TLS, which is why the gateway proxies to it as https:// with
+    tls_insecure_skip_verify, and why Flashback's client does the same.
+
+    This used to read `https:// if ":443" in upstream else http://`, so the
+    default upstream (host.docker.internal:8800) was addressed as PLAIN HTTP.
+    Sending a plaintext request to a TLS listener gets the connection closed
+    mid-request, which surfaces as httpx.RemoteProtocolError — reported on the
+    console as "could not reach the Controller (RemoteProtocolError)". It looked
+    like a network or firewall problem; the Controller was up the whole time and
+    answering the gateway perfectly well on the same port.
+
+    It cost both of this module's calls, not just one: the host list AND Apply.
+    """
+    u = (_CONTROLLER or "").strip().rstrip("/")
+    return u if u.startswith(("http://", "https://")) else f"https://{u}"
 
 
 def list_targets(identity) -> tuple[list, list, str | None]:
