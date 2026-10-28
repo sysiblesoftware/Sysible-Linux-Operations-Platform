@@ -77,6 +77,51 @@ th{text-align:left;font-size:11.5px;letter-spacing:.04em;text-transform:uppercas
 td{padding:7px 8px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
 tr:last-child td{border-bottom:0}
 .empty{color:var(--muted);font-size:13px;padding:6px 2px}
+/* THE FLEET. One line per host, and columns that have to earn their place.
+   Read as a list of machines, not as a grid of repeated sentences. */
+/* The day-one panel, in place of the three zeros. */
+.start{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+padding:16px 18px}
+.start b{font-size:15px}
+.start p{margin:.5em 0 .7em;color:var(--muted);font-size:13px;line-height:1.6;max-width:70ch}
+.start em{font-style:normal;color:var(--text)}
+.start ol{margin:0 0 .9em;padding-left:1.3em;color:var(--muted);font-size:13px;line-height:1.75}
+.start ol b{font-size:13px;color:var(--text)}
+.envhead{display:flex;align-items:baseline;gap:.7em;flex-wrap:wrap;
+padding:14px 8px 7px;border-bottom:1px solid var(--line)}
+.envhead:first-child{padding-top:4px}
+.envhead b{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.envhead .sum{color:var(--faint);font-size:12px}
+.envhead button{margin-left:auto}
+table.fleet td{padding:4px 8px;border-bottom:1px solid var(--line);
+font-size:13px;vertical-align:middle;line-height:1.5}
+table.fleet tr:last-child td{border-bottom:0}
+table.fleet tr:hover{background:var(--panel2)}
+/* The address belongs beside the name, not on a line of its own: a second line
+   per host is a second screenful per fifty hosts. */
+.addr{color:var(--faint);font-size:11.5px;margin-left:.7em;font-family:var(--mono)}
+.hmust{width:34%}
+.hstate{width:9.5rem;white-space:nowrap}
+/* The status is a word and a colour. The sentence explaining it is the same on
+   every row of a kind, so it lives in the title and in one note per group. */
+.hstate i.dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+background:currentColor;margin-right:.55em;vertical-align:middle;opacity:.9}
+.hact{text-align:right;white-space:nowrap}
+/* The row controls are quiet until the row is pointed at: sixteen identical
+   buttons down the right of a list is the loudest thing on the screen, and
+   none of them is the one to press. */
+table.fleet .hact button{opacity:.55;transition:opacity .12s}
+table.fleet tr:hover .hact button,table.fleet .hact button:focus{opacity:1}
+@media(hover:none){table.fleet .hact button{opacity:1}}
+.envnote{color:var(--faint);font-size:11.5px;padding:7px 8px 2px}
+.hfilter input{padding:.3em .6em;border-radius:7px;border:1px solid var(--line);
+background:var(--field,var(--panel2));color:var(--text);font-family:inherit;
+font-size:12.5px;width:15rem}
+.hfilter input:focus{outline:none;border-color:var(--accent2)}
+@media(max-width:700px){
+  .hmust{display:none}
+  .hfilter input{width:9rem}
+}
 button,.btn{font-family:inherit;font-size:12.5px;padding:.42em .85em;border-radius:8px;
   border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer}
 button:hover{border-color:var(--accent)}
@@ -239,6 +284,10 @@ def console_page(who) -> str:
         # existed on this screen only inside the Assign dialog.
         "  <h2>Hosts <span class=n id=nhosts></span>"
         "    <span style='margin-left:auto'></span>"
+        # Shown only once the fleet is big enough to need it (see hostsTable),
+        # so a three-host lab is not given a search box to ignore.
+        "    <span class=hfilter hidden><input id=hostfilter type=search "
+        "placeholder='Filter hosts\u2026' aria-label='Filter hosts'></span>"
         "  </h2>"
         "  <div class=card id=hosts><div class=empty>Loading&hellip;</div></div>"
 
@@ -389,8 +438,37 @@ let STATE = {states: [], rules: [], runs: [], drift: null, assign: []};
 
 // ---- rendering -------------------------------------------------------------
 
+// Day one: nothing declared and nothing assigned. The panel at the top of the
+// page explains the whole flow, so the sections below do not each explain their
+// own part of it again.
+function startingOut(){
+  return !(STATE.states || []).length && !(STATE.assign || []).length;
+}
+
 function drift(d){
   const n = d.drifted.length, f = d.failed.length;
+  // NOTHING DECLARED YET is not a score of zero. The page used to open with
+  // three big numbers — 0 as declared, 0 drifted, 0 failing — which is the same
+  // "nothing is set up" said a fourth time, in the largest type on the screen
+  // and in the place the eye lands first. Day one needs the way in, not a
+  // scoreboard of a game that has not started.
+  if(startingOut()){
+    const hosts = (STATE.hosts || []).length;
+    return `<div class=start style="grid-column:1/-1">
+      <b>Nothing is managed yet</b>
+      <p>Baseline applies <em>declared states</em> to hosts and tells you when a
+      host has drifted from one.${hosts ? ` ${hosts} host${hosts === 1 ? ' is' : 's are'}
+      enrolled and ${hosts === 1 ? 'it has' : 'none has'} a state assigned, so
+      ${hosts === 1 ? 'it is' : 'none of them is'} being checked.` : ''}</p>
+      <ol>
+        <li><b>Declare a state</b> \u2014 the packages, files and services a host must have.</li>
+        <li><b>Assign it</b> to a host, or to a whole environment at once.</li>
+        <li><b>Apply it</b>, and from then on Baseline reports what has drifted.</li>
+      </ol>
+      ${CAN_WRITE ? `<button class='primary' id=startstate>Declare the first state</button>`
+                  : `<span class=faint>Ask an operator to declare the first state.</span>`}
+    </div>`;
+  }
   return `
     <div class=stat><b>${d.clean}</b><span>as declared</span></div>
     <div class=stat><b class="${n ? 'amber' : ''}">${n}</b><span>drifted</span></div>
@@ -414,79 +492,124 @@ function statesFor(host){
   return {direct, viaEnv, all: direct.concat(viaEnv)};
 }
 
+// `rank` orders the list. A fleet is read for what needs attention, and sorting
+// it alphabetically buries the one failing host among fifty that are fine.
 function hostStatus(host, declared){
   // "Nothing declared for it" is NOT compliance, and it is the state most of a
   // fleet is in on day one. Saying "as declared" there would report an entirely
   // unconfigured fleet as green.
-  if(!declared.length) return {cls: 'faint', label: 'Not managed',
-                               note: 'no state assigned to it or its environment'};
+  if(!declared.length) return {cls: 'faint', label: 'not managed', rank: 4,
+                               note: 'no state is assigned to it or to its environment, '
+                                     + 'so Baseline does not look at it'};
   const d = STATE.drift || {drifted: [], failed: []};
-  if((d.failed || []).includes(host.id)) return {cls: 'err', label: 'Failing',
+  if((d.failed || []).includes(host.id)) return {cls: 'err', label: 'failing', rank: 0,
                                                  note: 'the last run could not finish'};
-  if((d.drifted || []).includes(host.id)) return {cls: 'amber', label: 'Drifted',
+  if((d.drifted || []).includes(host.id)) return {cls: 'amber', label: 'drifted', rank: 1,
                                                   note: 'the last run had to change it'};
   const ran = (STATE.runs || []).some((r) => r.host_id === host.id && !r.preview);
-  if(!ran) return {cls: 'faint', label: 'Never applied',
+  if(!ran) return {cls: 'faint', label: 'never applied', rank: 2,
                    note: 'declared, but nothing has been applied to it yet'};
-  return {cls: 'ok', label: 'As declared', note: 'the last run changed nothing'};
+  return {cls: 'ok', label: 'as declared', rank: 3, note: 'the last run changed nothing'};
 }
 
 function hostsTable(){
   const hosts = STATE.hosts || [];
   $('nhosts').textContent = hosts.length
     ? `${hosts.length} from the Controller` : '';
+  const box = $('hostfilter');
+  if(box) box.parentNode.hidden = hosts.length < 12;
   if(!hosts.length){
     return `<div class=empty>${esc(STATE.fleetNote ||
       'The Controller has no hosts enrolled yet.')}<br>
       States can still be declared and assigned by typing a target.</div>`;
   }
+  const q = (box && box.value || '').trim().toLowerCase();
   const byEnv = {};
   for(const h of hosts){ (byEnv[h.environment || ''] = byEnv[h.environment || ''] || []).push(h); }
-  let out = '';
+  let out = '', shown = 0;
   for(const env of Object.keys(byEnv).sort()){
     const label = env || 'No environment';
-    // The environment is itself a target — assigning here is how one state
-    // covers a whole environment, which is otherwise a piece of syntax you
-    // have to know (env:<name>) rather than a thing you can click.
-    out += `<table><tr><th colspan=4 style="padding-top:14px">${esc(label)}
-      ${env && CAN_WRITE ? `<button class='sm' style='margin-left:10px'
-        data-assignenv="${esc(env)}">Assign to all of ${esc(label)}</button>` : ''}
-      </th></tr>
-      <tr><th>Host</th><th>Must satisfy</th><th>State</th><th></th></tr>`;
-    out += byEnv[env].map((h) => {
+    const rows = byEnv[env].map((h) => {
       const d = statesFor(h);
-      const st = hostStatus(h, d.all);
-      const must = d.all.length
-        ? d.direct.map((n) => `<span class=mono>${esc(n)}</span>`).join(', ') +
-          (d.viaEnv.length
-            ? (d.direct.length ? ', ' : '') + d.viaEnv.map((n) =>
-                `<span class=mono>${esc(n)}</span> <span class=faint>(via ${esc(h.environment)})</span>`).join(', ')
-            : '')
-        : '<span class=faint>nothing</span>';
+      return {h, d, st: hostStatus(h, d.all)};
+    });
+    // WHEN NOTHING IN AN ENVIRONMENT IS MANAGED, every row carries the same two
+    // columns and the same sentence. Sixteen hosts came to 840px of screen whose
+    // whole content was "nothing is set up yet" — said thirty-two times. The
+    // group says it once, and the rows go back to being a list of hosts.
+    const managed = rows.filter((r) => r.d.all.length).length;
+    const hit = (r) => !q || (r.h.label || r.h.id).toLowerCase().includes(q)
+      || (r.h.address || '').toLowerCase().includes(q)
+      || r.st.label.includes(q)
+      || r.d.all.some((n) => n.toLowerCase().includes(q));
+    const visible = rows.filter(hit);
+    if(!visible.length) continue;
+    shown += visible.length;
+    // Attention first, then by name. Alphabetical across the whole fleet puts
+    // the failing host wherever its name happens to fall.
+    visible.sort((a, b) => a.st.rank - b.st.rank
+      || (a.h.label || a.h.id).localeCompare(b.h.label || b.h.id));
+
+    const counts = {};
+    for(const r of rows){ counts[r.st.label] = (counts[r.st.label] || 0) + 1; }
+    const summary = managed
+      ? ['failing', 'drifted', 'never applied', 'as declared', 'not managed']
+          .filter((k) => counts[k])
+          .map((k) => `${counts[k]} ${k}`).join(' \u00b7 ')
+      : `${rows.length} host${rows.length === 1 ? '' : 's'}, none managed yet`;
+
+    out += `<div class=envhead>
+      <b>${esc(label)}</b>
+      <span class=sum>${esc(summary)}${q ? ` \u00b7 ${visible.length} shown` : ''}</span>
+      ${env && CAN_WRITE ? `<button class='sm${managed ? '' : ' primary'}'
+        data-assignenv="${esc(env)}">Assign to all of ${esc(label)}</button>` : ''}
+      </div>`;
+    out += `<table class=fleet>` + visible.map(({h, d, st}) => {
+      const name = `<span class=mono>${esc(h.label || h.id)}</span>${
+        h.address ? `<span class=addr>${esc(h.address)}${
+          h.kind === 'ssh' ? ' \u00b7 SSH' : ''}</span>` : ''}`;
+      // Only where it says something. With nothing assigned anywhere in the
+      // group these two columns are "nothing" and "not managed" on every row —
+      // the same fact, twice, sixteen times over.
+      const cols = managed ? `
+        <td class=hmust>${d.all.length
+          ? d.direct.map((n) => `<span class=mono>${esc(n)}</span>`).join(', ') +
+            (d.viaEnv.length ? (d.direct.length ? ', ' : '') + d.viaEnv.map((n) =>
+              `<span class=mono>${esc(n)}</span> <span class=faint>(via ${esc(h.environment)})</span>`).join(', ') : '')
+          : '<span class=faint>\u2014</span>'}</td>
+        <td class=hstate><span class="${st.cls}" title="${esc(st.note)}"
+            ><i class=dot></i>${esc(st.label)}</span></td>` : '';
       return `<tr>
-        <td><span class=mono>${esc(h.label || h.id)}</span>
-            ${h.address ? `<div class=faint style="font-size:11.5px">${esc(h.address)}${
-              h.kind === 'ssh' ? ' · SSH' : ''}</div>` : ''}</td>
-        <td>${must}</td>
-        <td><span class="${st.cls}">${esc(st.label)}</span>
-            <div class=faint style="font-size:11.5px">${esc(st.note)}</div></td>
-        <td style="text-align:right;white-space:nowrap">
-          ${CAN_WRITE ? `<button class=sm data-assignhost="${esc(h.id)}">Assign…</button>` : ''}
+        <td class=hname>${name}</td>${cols}
+        <td class=hact>
+          ${CAN_WRITE ? `<button class=sm data-assignhost="${esc(h.id)}">Assign\u2026</button>` : ''}
           ${d.all.length ? `<button class=sm data-preview="${esc(h.id)}">Preview</button>` : ''}
-          ${d.all.length && CAN_WRITE ? `<button class='sm primary'
+          ${d.all.length && CAN_WRITE ? `<button class='sm${
+            // Primary only where applying would DO something. A host that is
+            // already as declared gets the same green "Apply now" as the one
+            // that is failing, so a column of them says nothing about which
+            // row to press — and the loudest thing on the screen ends up being
+            // the rows that need nothing.
+            st.rank < 3 ? ' primary' : ''}'
             data-apply="${esc(h.id)}">Apply now</button>` : ''}
         </td></tr>`;
-    }).join('');
-    out += '</table>';
+    }).join('') + '</table>';
+    if(!managed){
+      out += `<div class=envnote>A host with no assigned state is not looked at by
+        Baseline \u2014 it is not reported as compliant, it is simply not checked.</div>`;
+    }
   }
+  if(!shown) return `<div class=empty>No host matches \u201c${esc(q)}\u201d.</div>`;
   return out;
 }
 
 function statesTable(rows){
   $('nstates').textContent = rows.length ? `${rows.length} declared` : '';
-  if(!rows.length) return `<div class=empty>Nothing declared yet. A host with no
-    assigned state is not managed by Baseline — it is simply not looked at.
-    ${CAN_WRITE ? 'Use <b>+ New state</b> to declare one.' : ''}</div>`;
+  if(!rows.length) return startingOut()
+    ? `<div class=empty>Nothing declared yet.</div>`
+    : `<div class=empty>Nothing declared yet. A host with no assigned state is not
+      managed by Baseline — it is simply not looked at.
+      ${CAN_WRITE ? 'Use <b>+ New state</b> to declare one.' : ''}</div>`;
   return '<table><tr><th>State</th><th>Version</th><th></th></tr>' + rows.map((s) => `
     <tr><td class=mono>${esc(s.name)}</td>
         <td class=faint>v${s.version}</td>
@@ -501,9 +624,11 @@ function assignTable(rows){
   // This told people to type a host id, which stopped being how it works when
   // the picker arrived: the instruction on the screen outlived the thing it
   // was describing.
-  if(!rows.length) return `<div class=empty>Nothing assigned yet. Declaring a state
-    does not apply it — use <b>Assign\u2026</b> on a host above, or
-    <b>Assign to all of &lt;environment&gt;</b> to cover a whole environment.</div>`;
+  if(!rows.length) return startingOut()
+    ? `<div class=empty>Nothing assigned yet.</div>`
+    : `<div class=empty>Nothing assigned yet. Declaring a state does not apply it —
+      use <b>Assign\u2026</b> on a host above, or
+      <b>Assign to all of &lt;environment&gt;</b> to cover a whole environment.</div>`;
   return '<table><tr><th>Target</th><th>State</th><th></th></tr>' + rows.map((a) => `
     <tr><td class=mono>${esc(a.target)}</td><td class=mono>${esc(a.state)}</td>
         <td style="text-align:right">
@@ -956,7 +1081,10 @@ async function applyTo(target, preview){
 document.addEventListener('click', async (ev) => {
   const t = ev.target.closest('button'); if(!t) return;
   try{
-    if(t.id === 'newstate') return openState('');
+    // Both buttons open the same editor: the one in the Declared states
+    // header, and the one in the day-one panel that is the whole point of
+    // that panel.
+    if(t.id === 'newstate' || t.id === 'startstate') return openState('');
     if(t.id === 'newrule')  return openRule('');
     if(t.dataset.edit)      return openState(t.dataset.edit);
     if(t.dataset.delstate)  return deleteState(t.dataset.delstate);
@@ -1023,6 +1151,13 @@ $('dlg-assign').addEventListener('close', async () => {
       target: target, state: $('a-state').value})});
     say(`Assigned ${$('a-state').value} to ${target}.`, 'ok'); load();
   }catch(e){ say(e.message, 'err'); }
+});
+
+// Filtering redraws the fleet from STATE, not from the server: it is a view of
+// data the page already has, and a request per keystroke would be a request per
+// keystroke to the Controller.
+$('hostfilter').addEventListener('input', () => {
+  if(STATE && STATE.hosts) $('hosts').innerHTML = hostsTable();
 });
 
 load();
