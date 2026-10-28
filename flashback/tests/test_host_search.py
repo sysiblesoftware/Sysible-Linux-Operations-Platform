@@ -11,7 +11,6 @@ Both columns now use one control, so they cannot drift apart again.
 import re
 from pathlib import Path
 
-import pytest
 
 UI = (Path(__file__).resolve().parents[1] / "backend" / "ui.py").read_text(encoding="utf-8")
 RENDER = UI[UI.index("function renderHosts()"):UI.index("function hostRow(")]

@@ -18,7 +18,6 @@ the normal case — and the platform could not update itself from its own consol
 These read the real docker-compose.yml, because the bug was in the wiring, not in
 any code a unit test would reach.
 """
-import os
 import re
 from pathlib import Path
 

@@ -9,7 +9,6 @@ SLEP refuses a local login under SSO. Surface area, not a way in.)
 connect's own compose has said "the SLOP installer wires this up" since before
 the installer did. Now it does.
 """
-import re
 from pathlib import Path
 
 import pytest

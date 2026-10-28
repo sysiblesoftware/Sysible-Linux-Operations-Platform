@@ -26,10 +26,8 @@ either way:
 
 These tests run the real probe out of install.sh against both shapes of CLI.
 """
-import os
 import re
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest

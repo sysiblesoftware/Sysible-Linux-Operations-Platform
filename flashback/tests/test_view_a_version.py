@@ -5,7 +5,6 @@ version pane did not offer.
 """
 import os
 import sys
-import tempfile
 
 import pytest
 
@@ -90,7 +89,6 @@ def test_an_unknown_version_is_404_not_empty(client):
 
 def test_viewing_needs_an_identity(client, monkeypatch):
     c, st = client
-    import backend.app as app_mod
     assert "_require_identity" in open(
         os.path.join(HERE, "backend", "app.py"), encoding="utf-8").read().split(
         'def api_view(')[1].split("def ")[0]

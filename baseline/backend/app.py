@@ -22,7 +22,6 @@ they describe and record a fleet's configuration, which is not public.
 
 from __future__ import annotations
 
-import os
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse

@@ -8,7 +8,6 @@ needs the room depends entirely on what is being looked at.
 import re
 from pathlib import Path
 
-import pytest
 
 SRC = (Path(__file__).resolve().parents[1] / "backend" / "ui.py").read_text(encoding="utf-8")
 

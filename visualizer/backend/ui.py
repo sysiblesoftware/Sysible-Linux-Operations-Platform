@@ -228,6 +228,11 @@ async function boot(){
 function select(key){
   if(!key){ showHome(); return; }
   cur=key;
+  // Only where there IS a log. Shown unconditionally, this button failed every
+  // time on the apps that expose none — and the server decides, so the control
+  // and the refusal cannot drift apart.
+  const meta=APPS.find((a)=>a.key===key);
+  const lb=$('#logbtn'); if(lb) lb.hidden=!(meta&&meta.log);
   [...document.querySelectorAll('.tab')].forEach(t=>t.classList.toggle('sel',t.dataset.key===key));
   const isTopo = key===TOPO;
   // The app tabs are Activity's, so they only exist inside it.

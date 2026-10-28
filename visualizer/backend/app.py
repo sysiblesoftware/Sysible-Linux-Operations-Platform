@@ -153,7 +153,11 @@ def whoami(request: Request) -> dict:
 @app.get("/api/apps")
 def api_apps(request: Request) -> dict:
     _require_identity(request)
-    return {"apps": [{"key": k, "label": sources.APPS[k][0]} for k in sources.app_keys()]}
+    # `log` so the console can offer the Log button only where there is one to
+    # fetch. It used to be shown for every app and failed on the three that
+    # expose none — the button and the refusal are the same list now.
+    return {"apps": [{"key": k, "label": sources.APPS[k][0], "log": sources.has_log(k)}
+                     for k in sources.app_keys()]}
 
 
 @app.get("/api/activity")

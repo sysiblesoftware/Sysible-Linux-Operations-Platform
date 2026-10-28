@@ -10,10 +10,8 @@ guarded the pill.
 The three views are peers. Activity owns the app tabs; topology and logs have no
 apps, so they do not appear in that row at all.
 """
-import re
 from pathlib import Path
 
-import pytest
 
 SRC = (Path(__file__).resolve().parents[1] / "backend" / "ui.py").read_text(encoding="utf-8")
 

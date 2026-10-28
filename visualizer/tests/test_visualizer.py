@@ -122,8 +122,23 @@ def test_connect_missing_audit_reads_as_a_note(mod):
 
 
 def test_apps_are_separated_by_app(client):
-    keys = [a["key"] for a in client.get("/api/apps", headers=hdr()).json()["apps"]]
-    assert keys == ["controller", "slep", "connect", "flashback"]
+    """Baseline joined this list. It had been missing since it shipped, which
+    made the portal tile ("activity and logs from every app ... Flashback and
+    Baseline") and this console's own description untrue, and left the one app
+    that CHANGES hosts as the one app whose work could not be read here."""
+    apps = client.get("/api/apps", headers=hdr()).json()["apps"]
+    assert [a["key"] for a in apps] == \
+        ["controller", "slep", "connect", "flashback", "baseline"]
+
+
+def test_each_app_says_whether_it_has_a_log(client):
+    """The console draws its Log button from this. It used to be shown for
+    every app and only two expose a log, so on the other three it failed every
+    time — the button and the refusal are one list now."""
+    apps = client.get("/api/apps", headers=hdr()).json()["apps"]
+    has = {a["key"]: a["log"] for a in apps}
+    assert has == {"controller": True, "slep": True, "connect": False,
+                   "flashback": False, "baseline": False}, has
 
 
 def test_unknown_app_404s(client):

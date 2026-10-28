@@ -47,6 +47,8 @@ _CONNECT = os.getenv("SLOP_CONNECT_UPSTREAM", "host.docker.internal:8700")
 # compatibility shim; see tests/test_no_value_falls_back_to_itself.py.
 _FLASHBACK = os.getenv("SLOP_FLASHBACK_UPSTREAM", "flashback:8080")
 
+_BASELINE = os.getenv("SLOP_BASELINE_UPSTREAM", "baseline:8080")
+
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 _TIMEOUT = float(os.getenv("SYSIBLE_VISUALIZER_TIMEOUT_S", "8"))
 # Cap what one fetch can pull back, so a huge upstream trail can't balloon memory.
@@ -105,15 +107,22 @@ SOURCES = ("user", "api", "automation")
 
 # Actor names that are a SERVICE, not a person. These are the identities the apps
 # stamp on their own background work (health sweeps, agent check-ins, schedulers).
-# "flashback" STAYS alongside "flashback". These are matched against actor names
-# in rows that are ALREADY STORED. Flashback used to log its relayed captures as
-# actor "flashback", and those rows are history — dropping the old spelling would
-# reclassify every config-backup event the fleet ever recorded from "automation"
-# to a named human, because an actor this set does not recognise is taken to be
-# a person.
+#
+# Matched against actor names in rows that are ALREADY STORED, which is why old
+# spellings stay: an actor this set does not recognise is taken to be a PERSON,
+# so dropping one reclassifies every event the fleet ever recorded under it from
+# "automation" to a named human.
+#
+# This read `"flashback", "flashback"` — the same name twice, under a comment
+# saying one of them was the old spelling kept for history. It was left behind
+# by a rebrand that was then reverted, so the set protected nothing and the
+# comment described a compatibility shim that was not there. The name the rebrand
+# actually used was "baseline", and it belongs here on its own merits as well:
+# Sysible Baseline is a service that acts on hosts, and the Controller stamps its
+# rule-driven work with that name.
 _SERVICE_ACTORS = {"", "-", "controller", "agent", "system", "systemd",
                    "scheduler", "cron", "sysible", "slep",
-                   "flashback", "flashback"}
+                   "flashback", "baseline"}
 
 
 def _source_for(actor, given=None) -> str:
@@ -248,13 +257,58 @@ def _flashback(identity, limit: int) -> dict:
     return {"events": events, "errors": [], "notes": []}
 
 
+def _baseline(identity, limit: int) -> dict:
+    """Sysible Baseline's runs, as activity.
+
+    Baseline was missing from this console entirely — which made the portal
+    tile ("activity and logs from every app ... Flashback and Baseline") and
+    the Visualizer's own description untrue, and left the one app that CHANGES
+    hosts as the one app whose work could not be read here.
+
+    A run is the event: which host, which state, and what it did. "Already as
+    declared" is deliberately kept rather than filtered — a fleet that needed
+    no changes is the thing an operator most wants to be able to see.
+    """
+    data, err = _get(_url(_BASELINE, "http") + "/api/runs", identity, {"limit": limit})
+    if err:
+        return {"events": [], "errors": [f"runs: {err}"], "notes": []}
+    events = []
+    for r in (data or {}).get("runs", []):
+        state = f"{r.get('state_name') or '?'} v{r.get('state_version') or '?'}"
+        if r.get("error"):
+            what, detail = "baseline.failed", str(r["error"])[:300]
+        elif r.get("failed"):
+            what, detail = "baseline.failed", f"{r['failed']} state(s) failed"
+        elif r.get("changed"):
+            what, detail = "baseline.changed", f"{r['changed']} change(s)"
+        else:
+            what, detail = "baseline.ok", "already as declared"
+        if r.get("preview"):
+            what, detail = "baseline.preview", detail + " (preview, nothing applied)"
+        events.append(_ev(r.get("started"), "baseline", what,
+                          r.get("host_id") or "", f"{state}: {detail}", r.get("id")))
+    return {"events": events, "errors": [], "notes": []}
+
+
 # key -> (label, fetcher). Order is the tab order in the console.
 APPS: dict[str, tuple] = {
     "controller": ("Sysible Controller", _controller),
     "slep": ("Sysible Linux Engineering Platform", _slep),
     "connect": ("Sysible Connect", _connect),
     "flashback": ("Sysible Flashback", _flashback),
+    "baseline": ("Sysible Baseline", _baseline),
 }
+
+# Which apps actually expose a raw log. The console's "Log…" button was shown
+# for ALL of them, so on the three that have none it failed every time with
+# "this app exposes no log endpoint" — a control that could not work, offered
+# unconditionally. Served to the console so the button and the refusal cannot
+# disagree.
+LOG_APPS = ("slep", "controller")
+
+
+def has_log(app: str) -> bool:
+    return app in LOG_APPS
 
 
 def app_keys() -> list[str]:
@@ -344,7 +398,10 @@ def topology(identity, with_posture: bool = False) -> dict:
     got = {}
     # Report in the order the reads are declared, not the order they finished, so
     # the operator sees a stable list rather than one that reshuffles per load.
-    for (path, key, fatal), (rows, err) in zip(reads, results):
+    # strict=True: pool.map guarantees one result per read, and if that ever
+    # stops being true a silent truncation would drop an upstream's rows with
+    # no error anywhere.
+    for (path, _key, fatal), (rows, err) in zip(reads, results, strict=True):
         if err:
             (errors if fatal else notes).append(f"{path}: {err}")
         got[path] = rows

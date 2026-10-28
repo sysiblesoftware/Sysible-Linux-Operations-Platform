@@ -1840,8 +1840,10 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
         f"<p class=sub>This is {escape(label)}&rsquo;s own administration, embedded. "
         f"It can also be opened "
         f"<a href='{escape(src)}' target=_blank rel=noopener>on its own &rarr;</a>.</p>"
+        # No data-label/data-src: nothing ever read them. _APPFRAME_JS works off
+        # the element id and its own fetch, so the attributes were two more
+        # copies of the label and the url to keep in step for no reader.
         f"<iframe class=appframe id=appframe src='{escape(src)}' "
-        f"data-label='{escape(label)}' data-src='{escape(src)}' "
         f"title='{escape(label)} administration'></iframe>"
         # Shown in place of the frame when the app answers with something that is
         # not its console. See _APPFRAME_JS.
@@ -1854,7 +1856,11 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
         f"<a href='/admin/updates'>check whether it is running</a></p>"
         f"</div>"
     )
-    return _page("Apps · SLOP", body + f"<script>{_APPFRAME_JS}</script>", wide=True)
+    # Apps had no _PILL_POLL, so the Software & services tab showed no count
+    # while you were on it — the badge appeared on two of the four admin pages
+    # and nobody could see the rule.
+    return _page("Apps · SLOP",
+                 body + _PILL_POLL + f"<script>{_APPFRAME_JS}</script>", wide=True)
 
 
 @app.get("/admin/apps", response_class=HTMLResponse)
@@ -2184,15 +2190,26 @@ _UPDATES_JS = r"""
     row.appendChild(meta); row.appendChild(ctrls); row.appendChild(mods);
     list.appendChild(row);
   }
+  // Shared with _PILL_POLL, which does the same thing from its own fetch on
+  // every OTHER admin page. Here the data has already arrived, so this page
+  // updates the badge from what it is painting rather than asking again.
+  function setUpdCount(n){
+    var b=document.getElementById('updn');
+    if(!b)return;
+    b.textContent=n;
+    b.hidden=(n===0);
+    b.title=n+' product'+(n===1?'':'s')+' can be updated';
+  }
   function paint(d){
     bindManage();
     (d.apps||[]).forEach(ensureRow);
     (d.apps||[]).forEach(fmtRow);
     resolveUnreported(d.apps||[]);
-    var n=(d.apps||[]).filter(function(a){return a.available;}).length;
-    var pill=document.getElementById('updpill');
-    if(pill){pill.classList.toggle('on',n>0);
-      var b=pill.querySelector('b'); if(b)b.textContent=n;}
+    // The count on the Software & services tab. This wrote to #updpill — the
+    // standalone "Updates available" pill that was REPLACED by the tab badge —
+    // so on the one page that already has this data it set nothing at all, and
+    // pressing Check now never moved the number. The id is the badge's.
+    setUpdCount((d.apps||[]).filter(function(a){return a.available;}).length);
     // "Update all" offers exactly what the rows say is updatable — a blocked
     // checkout is not silently swept in, and the count on the button is the
     // number of rows that would actually move.
@@ -2559,6 +2576,9 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "</div>"
         f"<script>{_UPDATES_JS}</script>"
     )
+    # Not _PILL_POLL here: this page HAS the data, and paint() sets the badge
+    # from it. Polling as well would be a second request for a number already
+    # on screen.
     return _page("Software & services · SLOP", body, wide=True)
 
 

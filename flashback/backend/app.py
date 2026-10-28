@@ -27,7 +27,6 @@ Endpoints
 from __future__ import annotations
 
 import base64
-import os
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse

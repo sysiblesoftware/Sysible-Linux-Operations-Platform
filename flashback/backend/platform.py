@@ -95,8 +95,10 @@ def redact(text: str) -> str:
     out = []
     for line in (text or "").splitlines():
         if _SECRET_LINE.search(line) and not line.lstrip().startswith("#"):
-            key, _, value = re.split(r"([:=])", line, 1)[0], None, line
-            parts = re.split(r"[:=]", line, 1)
+            # This used to compute key and value once and then immediately
+            # overwrite both on the next two lines — dead work, and it passed
+            # maxsplit positionally, which Python 3.13 deprecates.
+            parts = re.split(r"[:=]", line, maxsplit=1)
             key = parts[0]
             value = parts[1] if len(parts) > 1 else ""
             if _ONLY_A_REFERENCE.match(value):

@@ -6,7 +6,6 @@ it — on the screenshot that was ~900 rows between the operator and /etc/X11/Xr
 """
 from pathlib import Path
 
-import pytest
 
 UI = (Path(__file__).resolve().parents[1] / "backend" / "ui.py").read_text(encoding="utf-8")
 FN = UI[UI.index("async function loadFiles"):UI.index("async function loadVersions")]

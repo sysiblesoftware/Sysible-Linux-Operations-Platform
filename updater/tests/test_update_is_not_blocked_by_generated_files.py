@@ -6,7 +6,6 @@ available … the checkout has local changes", while `git pull` on the host said
 "Already up to date". Two separate bugs with one symptom.
 """
 import subprocess
-from pathlib import Path
 
 import pytest
 
