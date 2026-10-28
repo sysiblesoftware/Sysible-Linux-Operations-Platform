@@ -19,9 +19,23 @@
 #      whatever IP this host has. (Accept the one-time self-signed cert warning.)
 #
 # See .env.example for the knobs and docs/SSO.md for the SSO contract.
+#
+# SYSIBLE_SLOP_REV: every built image takes the commit it was built from as a
+# build arg, and each console prints it in its footer. A SLOP console is
+# server-rendered — the whole page comes out of the container — so a stale image
+# and a current one look identical from outside, and "is this my browser, my
+# server, or your code?" had no answer on screen.
+#
+# sysiblectl and the updater set it from `git rev-parse --short HEAD`; install.sh
+# builds through sysiblectl, so it inherits it. Left empty by a bare
+# `docker compose up`, and a console with no revision says "version unknown"
+# rather than inventing one.
 services:
   idp:
-    build: ./idp
+    build:
+      context: ./idp
+      args:
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"   # see the header
     image: sysible-slop-idp
     container_name: sysible-slop-idp
     restart: unless-stopped
@@ -110,7 +124,10 @@ services:
   # `baseline` is NOT a free name to reuse: it belongs to Sysible Baseline, the
   # Salt-driven config manager, which is a different service in this same file.
   flashback:
-    build: ./flashback
+    build:
+      context: ./flashback
+      args:
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"   # see the header
     image: sysible-flashback
     container_name: sysible-flashback
     restart: unless-stopped
@@ -177,7 +194,10 @@ services:
   # flashback-data holds what hosts actually look like. The declaration and the
   # observation must be able to disagree, so they are never the same store.
   baseline:
-    build: ./baseline
+    build:
+      context: ./baseline
+      args:
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"   # see the header
     image: sysible-baseline
     container_name: sysible-baseline
     restart: unless-stopped
@@ -211,7 +231,10 @@ services:
   # fetched live from the app that owns it, using the caller's own forwarded
   # identity so each app applies its own role rules.
   visualizer:
-    build: ./visualizer
+    build:
+      context: ./visualizer
+      args:
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"   # see the header
     image: sysible-visualizer
     container_name: sysible-visualizer
     restart: unless-stopped
@@ -242,7 +265,10 @@ services:
   # host: Administration then simply shows the update state and the command,
   # which needs no socket at all.
   updater:
-    build: ./updater
+    build:
+      context: ./updater
+      args:
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"   # see the header
     image: sysible-slop-updater
     container_name: sysible-slop-updater
     restart: unless-stopped

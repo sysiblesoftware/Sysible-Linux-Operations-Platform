@@ -23,3 +23,15 @@ COPY backend /app/backend
 
 EXPOSE 8080
 CMD ["python3", "-m", "uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# WHICH COMMIT THIS IMAGE WAS BUILT FROM.
+#
+# Three rounds of "is this my browser, my server, or your code?" came down to
+# having no way to see what a container was actually running: the console is
+# server-rendered, so a stale image and a fresh one are indistinguishable from
+# the outside. The console shows this in its footer.
+#
+# Last in the file deliberately — changing it rebuilds one ENV layer rather
+# than invalidating the COPY above and reinstalling every dependency.
+ARG SYSIBLE_REV=""
+ENV SYSIBLE_REV=$SYSIBLE_REV

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from html import escape
 
+from . import build_info
+
 _CSS = """
 :root{--bg:#0d1117;--panel:#131923;--panel2:#1a212d;--line:#26303f;
 --text:#e6edf5;--muted:#93a1b5;--faint:#6f7d92;--accent:#43a047;--accent2:#5580ee;
@@ -954,8 +956,9 @@ def page(user: str, role: str, can_write: bool) -> str:
         "drifted from the rest of the fleet.</div>"
         "</div>"
         "</div>"
-        f"<script>{_JS}</script>"
-        "</body></html>"
+        + build_info.footer("Sysible Flashback")
+        + f"<script>{_JS}</script>"
+        + "</body></html>"
     )
 
 

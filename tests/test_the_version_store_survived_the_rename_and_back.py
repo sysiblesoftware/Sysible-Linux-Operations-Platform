@@ -20,7 +20,6 @@ telling those two cases apart, because nothing about the key itself can.
 """
 import os
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -61,9 +60,18 @@ def test_the_database_file_kept_its_name():
 
 # ---- the two products are separate ---------------------------------------
 
+def _build_dir(svc):
+    """Compose takes `build:` either as a bare path or as a mapping with a
+    context — this repo moved to the mapping to pass SYSIBLE_REV in. Which of
+    the two it is says nothing about which directory is built, so read the
+    directory and let the shape be the shape."""
+    build = svc["build"]
+    return build["context"] if isinstance(build, dict) else build
+
+
 def test_the_backup_service_is_flashback(compose):
     svc = compose["services"]["flashback"]
-    assert svc["build"] == "./flashback"
+    assert _build_dir(svc) == "./flashback"
     assert svc["container_name"] == "sysible-flashback"
     assert svc["image"] == "sysible-flashback"
 
@@ -78,7 +86,7 @@ def test_the_config_manager_is_a_different_service(compose):
     fb = compose["services"]["flashback"]
     assert bl.get("container_name") != fb.get("container_name")
     assert bl.get("image") != fb.get("image")
-    assert bl.get("build") != fb.get("build")
+    assert _build_dir(bl) != _build_dir(fb)
     fb_vols = {v.split(":")[0] for v in (fb.get("volumes") or [])}
     bl_vols = {v.split(":")[0] for v in (bl.get("volumes") or [])}
     assert "flashback-data" not in bl_vols, \

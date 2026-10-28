@@ -25,3 +25,15 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=4s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).status==200 else 1)"
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# WHICH COMMIT THIS IMAGE WAS BUILT FROM.
+#
+# Three rounds of "is this my browser, my server, or your code?" came down to
+# having no way to see what a container was actually running: the console is
+# server-rendered, so a stale image and a fresh one are indistinguishable from
+# the outside. The console shows this in its footer.
+#
+# Last in the file deliberately — changing it rebuilds one ENV layer rather
+# than invalidating the COPY above and reinstalling every dependency.
+ARG SYSIBLE_REV=""
+ENV SYSIBLE_REV=$SYSIBLE_REV

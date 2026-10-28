@@ -80,6 +80,12 @@ def test_login_then_verify_emits_identity_headers(cl):
 def test_auth_me(cl):
     _login(cl, "admin", ADMIN_PW)
     j = cl.get("/auth/me").json()
+    # The build the portal stamps into its footer. Its VALUE depends on how the
+    # image was built, so only its presence and type are fixed here; the rest
+    # stays an exact comparison, because an auth endpoint quietly growing a
+    # field is the thing worth catching.
+    rev = j.pop("rev", "__missing__")
+    assert isinstance(rev, str), f"/auth/me reports the build as {rev!r}"
     assert j == {"authenticated": True, "user": "admin", "role": "superuser", "must_change": False}
 
 
@@ -452,7 +458,6 @@ def test_second_superuser_can_be_demoted(cl):
 # carries the same origin+CSRF guard as every other admin mutation, and that a
 # missing updater degrades to a readable message instead of an error page.
 def test_updates_page_is_superuser_only(cl):
-    import app as m
     _login(cl, "admin", ADMIN_PW)
     cl.post("/admin/users", data={"username": "op", "role": "operator",
             "password": "operatorpass123", "csrf": _tok(cl)}, headers=HDR)

@@ -837,6 +837,8 @@ color:var(--muted);width:34px;height:34px;border-radius:8px;cursor:pointer;font-
 
 # The portal's mark, verbatim (gradient chip + SLOP's nested-arches portal glyph:
 # a bold green outer arch framing a blue inner arch = the single front door).
+_REV = (os.getenv("SYSIBLE_REV") or "").strip()
+
 _MARK = (
     '<svg class="mark" width="34" height="34" viewBox="0 0 128 128" aria-hidden="true">'
     '<defs><linearGradient id="t" x1="0" y1="0" x2="0" y2="1">'
@@ -954,7 +956,14 @@ def _page(title: str, body: str, wide: bool = False) -> str:
         f"<div class='card{' wide' if wide else ''}'>"
         f"<div class=brand>{_MARK}<div class=brand-text>Sysible <b>Linux Operations Platform</b></div></div>"
         f"{body}"
-        f"<div class=foot>Sysible Linux Operations Platform · Community Edition</div>"
+        # The build this container came from. A SLOP console is server-rendered,
+        # so a stale image and a current one look identical from outside — which
+        # is three rounds of "is this my browser, my server, or your code?" with
+        # no way to answer it. Empty means nobody set it (a bare compose up), and
+        # it says so rather than inventing a version.
+        f"<div class=foot>Sysible Linux Operations Platform · Community Edition"
+        f" · <span class=rev title='The commit this container was built from'>"
+        f"{('build ' + escape(_REV)) if _REV else 'version unknown'}</span></div>"
         f"</div>"
         # Toast stack: one per page, outside the card so it can sit in the corner.
         # Pages that have nothing to say simply never call pushToast.
@@ -1123,6 +1132,10 @@ def auth_me(request: Request):
         # changes, and never over-reports a stale privileged role.
         "role": (u["role"] if u else sess["role"]),
         "must_change": bool(u["must_change"]) if u else False,
+        # The build the PLATFORM is running, for the portal's footer. The portal
+        # is static files on a bind mount, so unlike every other console it has
+        # no image of its own to stamp — it asks the IdP, which does.
+        "rev": _REV,
     }
 
 

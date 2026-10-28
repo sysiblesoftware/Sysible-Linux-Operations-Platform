@@ -89,6 +89,23 @@ def _log(line: str) -> None:
             del buf[:len(buf) - MAX_LOG_LINES]
 
 
+def _rev(root: Path) -> str:
+    """The checkout's short commit, for stamping into the images it builds.
+
+    A SLOP console is server-rendered, so a stale image and a current one are
+    indistinguishable from outside. Empty on anything that is not a git
+    checkout, and the console then says "version unknown" rather than claiming
+    a build it cannot prove.
+    """
+    try:
+        out = subprocess.run(["git", "-C", str(root), "-c", f"safe.directory={root}",
+                              "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def _run(argv: list[str], cwd: Path) -> int:
     """Run one step, streaming its output into the job log. Returns the exit code."""
     _log(f"$ {' '.join(argv)}")
@@ -126,7 +143,17 @@ def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
         return False, ("git pull failed — the checkout may have local changes "
                        "or its branch may have diverged.")
     # --build so the image actually picks the new code up; -d so we return.
-    rc = _run(["docker", "compose", "up", "-d", "--build"], compose)
+    #
+    # SYSIBLE_SLOP_REV is read by the compose file as a build arg, so each image
+    # carries the commit it was built from and every console can show it.
+    #
+    # An `env` PREFIX rather than an env parameter on _run, for two reasons: the
+    # runner's signature is positional and widely stubbed, so growing a keyword
+    # there breaks callers that never pass one; and _run echoes the argv it is
+    # about to execute, so this way the job log records the exact revision that
+    # was stamped instead of leaving it invisible.
+    rc = _run(["env", f"SYSIBLE_SLOP_REV={_rev(root)}",
+               "docker", "compose", "up", "-d", "--build"], compose)
     if rc != 0:
         return False, "docker compose up --build failed — see the log."
     return True, f"{key} updated and restarted."

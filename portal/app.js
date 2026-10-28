@@ -102,6 +102,11 @@
       if (!me || !me.authenticated) return;
       var who = document.getElementById("who");
       if (who) who.textContent = me.user + (me.role ? " · " + me.role : "");
+      // The build the platform is running. The portal is static files on a bind
+      // mount with no image of its own, so it asks the IdP — which is stamped
+      // at build time — rather than having nothing to say.
+      var rev = document.getElementById("rev");
+      if (rev && me.rev) rev.textContent = "build " + me.rev;
       // Administration (accounts + all SLOP configuration) is the superuser
       // entry point to /admin, and the only link to it on this page. It is
       // rendered VISIBLE and hidden here — only when /auth/me has actually
