@@ -134,6 +134,13 @@ input,select,textarea{font-family:inherit;font-size:13px;padding:.45em .6em;bord
   border:1px solid var(--line);background:var(--field);color:var(--text);width:100%}
 textarea{font-family:var(--mono);font-size:12.5px;line-height:1.5;min-height:230px;resize:vertical}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+/* `hidden` is only display:none from the user agent stylesheet, so ANY explicit
+   display in here beats it — label.f sets display:block, and the "type a target
+   instead" field was therefore on screen permanently, beside the picker it is
+   the fallback for. Two controls under one label, both called Target.
+   Fourth element in this codebase to be hidden-but-shown by the same rule, so
+   the guard is global and the next one cannot be. */
+[hidden]{display:none !important}
 label.f{display:block;margin-bottom:10px}
 label.f span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
 .row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}

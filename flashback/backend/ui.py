@@ -14,6 +14,11 @@ from html import escape
 from . import build_info
 
 _CSS = """
+/* `hidden` is only display:none from the user agent stylesheet, so ANY explicit
+   display in here beats it — an element given a layout rule elsewhere in this sheet is shown
+   whatever its hidden attribute says. Baseline had two controls under one
+   label because of exactly that; the guard is global so it cannot happen here. */
+[hidden]{display:none !important}
 :root{--bg:#0d1117;--panel:#131923;--panel2:#1a212d;--line:#26303f;
 --text:#e6edf5;--muted:#93a1b5;--faint:#6f7d92;--accent:#43a047;--accent2:#5580ee;
 --ok:#4caf5a;--err:#e5534b;--amber:#e0a83b;--field:#0d1320;
