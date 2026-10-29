@@ -75,6 +75,7 @@ def server(tmp_path_factory):
         SYSIBLE_BASELINE_AGENT_TOKEN="t" * 64, SYSIBLE_BASELINE_DATA=str(tmp))
     os.environ.pop("SYSIBLE_BASELINE_DB", None)
     import importlib
+
     import backend as _pkg
     names = ("backend", "backend.env", "backend.identity", "backend.store",
              "backend.app", "backend.controller", "backend.ui")
@@ -128,7 +129,7 @@ def pg(server):
                             extra_http_headers=OP)
         page = ctx.new_page()
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_selector("#hosts .fleet", timeout=10000)
+        page.wait_for_selector("#browselist .it", timeout=10000)
         page.wait_for_timeout(500)
         yield page
         b.close()

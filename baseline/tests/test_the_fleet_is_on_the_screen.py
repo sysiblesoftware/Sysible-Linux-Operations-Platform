@@ -167,43 +167,57 @@ def pg(browser, server):
     page.on("console", lambda m: errs.append(m.text)
             if m.type == "error" and "Failed to load resource" not in m.text else None)
     page.goto(server + "/", wait_until="domcontentloaded")
-    page.wait_for_selector("#hosts table", timeout=5000)
-    page.wait_for_timeout(400)
+    page.wait_for_selector("#browselist .it", timeout=8000)
+    page.wait_for_timeout(500)
     yield page
     assert not errs, errs
     ctx.close()
 
 
 def _row(page, host):
-    return page.locator("#hosts tr", has=page.locator(f"text='{host}'")).first
+    """One host's row in the browse column."""
+    return page.locator(f"#browselist .it[data-host='{host}']")
+
+
+def _pick(page, host):
+    """Select a host, which is what fills the other two columns."""
+    _row(page, host).click()
+    page.wait_for_timeout(350)
+
+
+def _names(page, sel="#browselist .it .nm"):
+    return page.evaluate(
+        f"() => [...document.querySelectorAll('{sel}')].map(e => e.textContent.trim())")
 
 
 def test_the_fleet_is_on_the_page_without_opening_anything(pg):
     """It used to exist on this screen only inside the Assign dialog."""
-    text = pg.text_content("#hosts")
-    for host in ("web-01", "web-02", "db-01", "lab-01"):
-        assert host in text, f"{host} is not on the page: {text[:300]}"
-    assert "7 from the Controller" in (pg.text_content("#nhosts") or "")
+    text = pg.text_content("#browselist")
+    for h in FLEET:
+        assert h["id"] in text, f"{h['id']} is not on the page: {text[:300]}"
+    assert "7 hosts" in (pg.text_content("#browsecount") or "")
 
 
 def test_hosts_are_grouped_by_environment(pg):
     heads = pg.evaluate(
-        "() => [...document.querySelectorAll('#hosts .envhead b')]"
-        ".map(t => t.textContent.trim())")
+        "() => [...document.querySelectorAll('#browselist .grp')]"
+        ".map(t => t.firstChild.textContent.trim())")
     assert sorted(h.lower() for h in heads) == ["lab", "production", "staging"], heads
 
 
 def test_a_host_shows_what_it_must_satisfy_including_what_it_inherits(pg):
     """Two sources — assigned to the host, and assigned to its environment.
     Before this the operator had to know that rule and apply it themselves
-    against a different table."""
-    row = _row(pg, "web-01").text_content()
-    assert "web-servers" in row, row
-    assert "All Servers" in row, row
-    assert "via production" in row, \
-        f"an inherited state is not marked as inherited: {row}"
+    against a different table. It is the middle column now: pick a host and
+    what it must satisfy is beside it, not further down the page."""
+    _pick(pg, "web-01")
+    mid = pg.text_content("#col2list")
+    assert "web-servers" in mid, mid
+    assert "All Servers" in mid, mid
+    assert "via production" in mid, f"an inherited state is not marked as inherited: {mid}"
 
-    other = _row(pg, "web-02").text_content()
+    _pick(pg, "web-02")
+    other = pg.text_content("#col2list")
     assert "All Servers" in other and "via production" in other, other
     assert "web-servers" not in other, \
         f"web-02 shows a state assigned to a different host: {other}"
@@ -212,77 +226,22 @@ def test_a_host_shows_what_it_must_satisfy_including_what_it_inherits(pg):
 def test_a_host_with_nothing_assigned_is_not_managed_rather_than_compliant(pg):
     """The state most of a fleet is in on day one. Calling it "as declared"
     would report an entirely unconfigured fleet as green."""
-    row = _row(pg, "stg-02").text_content()
-    assert "not managed" in row.lower(), row
-    assert "as declared" not in row.lower(), row
-    # The explanation is the same sentence on every row of a kind, so it is on
-    # the control rather than printed down the page — but it still has to be
-    # reachable, or "not managed" is a phrase with nowhere to look it up.
-    title = _row(pg, "stg-02").locator(".hstate [title]").first.get_attribute("title")
-    assert "no state is assigned" in (title or ""), title
+    _pick(pg, "stg-02")
+    detail = pg.text_content("#col3")
+    assert "not managed" in detail.lower(), detail
+    assert "as declared" not in detail.lower(), detail
+    assert "simply not" in detail.lower(), \
+        f"it does not say what being unmanaged MEANS: {detail[:300]}"
 
 
-def test_an_environment_with_nothing_managed_says_so_once(pg):
-    """The reported screen: sixteen hosts, every one of them unmanaged, and so
-    every row carrying "nothing" in one column and "Not managed \u2014 no state
-    assigned to it or its environment" in the next. Thirty-two restatements of
-    one fact, in 840px of screen.
-
-    When no host in an environment is managed there is nothing to say per row,
-    so the group says it and the rows go back to being a list of hosts.
-    """
-    head = pg.text_content("#hosts .envhead")
-    envs = pg.evaluate(
-        "() => [...document.querySelectorAll('#hosts .envhead')]"
-        ".map(h => h.textContent.replace(/\\s+/g,' ').trim())")
-    lab = [e for e in envs if e.lower().startswith("lab")]
-    assert lab and "none managed yet" in lab[0], (lab, head)
-    # And the row carries no per-host state column at all.
-    assert _row(pg, "lab-01").locator(".hstate").count() == 0, \
-        "the group already said it; the row says it again"
-    assert _row(pg, "lab-01").locator("[data-assignhost]").count() == 1, \
-        "an unmanaged host must still be assignable from its own row"
-
-
-def test_a_mixed_environment_keeps_the_per_host_columns(pg):
-    """The collapse is only for the case where every row would say the same
-    thing. One managed host in the group and the columns have work to do again."""
-    assert _row(pg, "stg-02").locator(".hstate").count() == 1
-    assert _row(pg, "stg-01").locator(".hstate").count() == 1
-
-
-def test_the_list_leads_with_what_needs_attention(pg):
-    """Alphabetical across a fleet buries the one failing host wherever its name
-    happens to fall. db-01 failed; it is the first row of its environment."""
-    order = pg.evaluate(
-        "() => [...document.querySelectorAll('#hosts .fleet .hname .mono')]"
-        ".map(e => e.textContent.trim())")
-    prod = [h for h in order if h in ("web-01", "web-02", "db-01", "aaa-01")]
-    assert prod[0] == "db-01", f"the failing host is not first: {prod}"
-    assert prod[1] == "web-01", f"the drifted host is not second: {prod}"
-    # aaa-01 is fine, and sorts first in the alphabet. It goes last.
-    assert prod[-1] in ("aaa-01", "web-02"), prod
-    assert prod.index("aaa-01") > prod.index("web-01"), \
-        f"the list is in alphabetical order, not attention order: {prod}"
-    stg = [h for h in order if h.startswith("stg-")]
-    assert stg == ["stg-01", "stg-02"], \
-        f"an unmanaged host is not last in its environment: {stg}"
-
-
-def test_a_host_is_one_line(pg):
-    """The address was on a line of its own under the name, which is a second
-    screenful per fifty hosts for a string that fits beside it."""
-    tall = pg.evaluate(
-        "() => [...document.querySelectorAll('#hosts .fleet tr')]"
-        ".map(r => r.getBoundingClientRect().height).filter(h => h > 34)")
-    assert not tall, f"{len(tall)} host rows are taller than one line: {tall}"
-
-
-def test_an_unmanaged_host_is_not_offered_apply(pg):
+def test_an_unmanaged_host_still_offers_the_one_thing_it_can_do(pg):
     """There is nothing to apply, and a button that cannot do anything is a
-    promise the screen cannot keep."""
-    assert _row(pg, "lab-01").locator("[data-apply]").count() == 0
-    assert _row(pg, "web-01").locator("[data-apply]").count() == 1
+    promise the screen cannot keep — but assigning is exactly what it needs."""
+    _pick(pg, "stg-02")
+    assert pg.locator("#col3 [data-apply]").count() == 0
+    assert pg.locator("#col3 [data-assignhost]").count() == 1
+    _pick(pg, "web-01")
+    assert pg.locator("#col3 [data-apply]").count() == 1
 
 
 @pytest.mark.parametrize("host,want", [
@@ -291,15 +250,106 @@ def test_an_unmanaged_host_is_not_offered_apply(pg):
     ("db-01", "failing"),
 ])
 def test_each_host_says_what_the_last_run_made_of_it(pg, host, want):
-    row = _row(pg, host).text_content()
-    assert want in row.lower(), f"{host} should read {want!r}: {row}"
+    _pick(pg, host)
+    detail = pg.text_content("#col3")
+    assert want in detail.lower(), f"{host} should read {want!r}: {detail[:300]}"
 
 
+def test_the_list_leads_with_what_needs_attention(pg):
+    """Alphabetical across a fleet buries the one failing host wherever its name
+    happens to fall. db-01 failed; it is the first row of its environment."""
+    order = _names(pg)
+    prod = [h for h in order if h in ("web-01", "web-02", "db-01", "aaa-01")]
+    assert prod[0] == "db-01", f"the failing host is not first: {prod}"
+    assert prod[1] == "web-01", f"the drifted host is not second: {prod}"
+    # aaa-01 is fine, and sorts first in the alphabet. It goes last.
+    assert prod.index("aaa-01") > prod.index("web-01"), \
+        f"the list is in alphabetical order, not attention order: {prod}"
+
+
+def test_the_console_opens_on_what_needs_attention(pg):
+    """Three empty columns is not a starting point, and the host worth opening
+    on is the one that is broken."""
+    sel = pg.evaluate(
+        "() => {const e = document.querySelector('#browselist .it.sel');"
+        " return e ? e.dataset.host : null;}")
+    assert sel == "db-01", f"it opened on {sel!r} rather than the failing host"
+    assert (pg.text_content("#col3") or "").strip(), "the detail column is empty"
+
+
+def test_a_host_is_one_line(pg):
+    """The address was on a line of its own under the name, which is a second
+    screenful per fifty hosts for a string that fits beside it."""
+    tall = pg.evaluate(
+        "() => [...document.querySelectorAll('#browselist .it')]"
+        ".map(r => r.getBoundingClientRect().height).filter(h => h > 34)")
+    assert not tall, f"{len(tall)} host rows are taller than one line: {tall}"
+
+
+def test_the_fleet_does_not_scroll_the_page(pg):
+    """The complaint behind the whole shape: the console was five full-width
+    sections stacked, so reading it meant scrolling and holding the earlier
+    ones in your head. The columns scroll; the page does not."""
+    over = pg.evaluate(
+        "() => document.documentElement.scrollHeight - window.innerHeight")
+    assert over <= 1, f"the page scrolls by {over}px"
+
+
+# ---- pivoting ---------------------------------------------------------------
+def test_a_state_can_be_reached_from_the_host_that_must_satisfy_it(pg):
+    _pick(pg, "web-01")
+    pg.click("#col2list .it[data-pickstate='web-servers']")
+    pg.wait_for_timeout(400)
+    assert "web-servers" in (pg.text_content("#col3 h2") or "")
+    assert "nginx" in (pg.text_content("#col3 pre.sls") or ""), \
+        "the state's detail does not show what it declares"
+
+
+def test_the_other_end_lists_states_and_their_hosts(pg):
+    """The relationship runs both ways, and the console used to offer only one
+    direction."""
+    pg.click("#by-state")
+    pg.wait_for_timeout(500)
+    names = _names(pg)
+    assert "All Servers" in names and "web-servers" in names, names
+    pg.click("#browselist .it[data-state='web-servers']")
+    pg.wait_for_timeout(450)
+    assert "web-01" in (pg.text_content("#col2list") or ""), \
+        "the hosts a state lands on are not listed beside it"
+
+
+def test_a_host_can_be_reached_from_the_state_it_satisfies(pg):
+    pg.click("#by-state")
+    pg.wait_for_timeout(500)
+    pg.click("#browselist .it[data-state='All Servers']")
+    pg.wait_for_timeout(450)
+    pg.click("#col2list .it[data-pickhost='db-01']")
+    pg.wait_for_timeout(450)
+    detail = pg.text_content("#col3") or ""
+    assert "db-01" in detail, detail[:200]
+    assert "All Servers" in (pg.text_content("#col3 h2") or ""), \
+        "following a host from a state should keep the state in view"
+
+
+def test_switching_ends_keeps_each_end_s_place(pg):
+    _pick(pg, "web-02")
+    pg.click("#by-state")
+    pg.wait_for_timeout(400)
+    pg.click("#by-host")
+    pg.wait_for_timeout(400)
+    sel = pg.evaluate(
+        "() => {const e = document.querySelector('#browselist .it.sel');"
+        " return e ? e.dataset.host : null;}")
+    assert sel == "web-02", f"going to states and back lost the host: {sel!r}"
+
+
+# ---- assigning --------------------------------------------------------------
 def test_assigning_starts_from_the_host(pg):
     """The dialog opens with that host already chosen — it was reached from
     the host's own row, so making you find it again in the list is work the
     screen already knows the answer to."""
-    _row(pg, "db-01").locator("[data-assignhost]").click()
+    _pick(pg, "db-01")
+    pg.click("#col3 [data-assignhost]")
     pg.wait_for_selector("#a-pick")
     pg.wait_for_timeout(700)
     assert pg.input_value("#a-pick") == "db-01", pg.input_value("#a-pick")
@@ -308,25 +358,21 @@ def test_assigning_starts_from_the_host(pg):
 
 def test_a_whole_environment_can_be_assigned_by_clicking_it(pg):
     """env:<name> was a piece of syntax you had to know before it was a button."""
-    pg.click("[data-assignenv=production]")
+    pg.click("#browselist [data-assignenv=production]")
     pg.wait_for_selector("#a-pick")
     pg.wait_for_timeout(700)
     assert pg.input_value("#a-pick") == "env:production", pg.input_value("#a-pick")
     pg.click("#dlg-assign button[value=cancel]")
 
 
-def test_the_empty_assignments_text_does_not_tell_you_to_type_an_id(pg):
+def test_the_screen_does_not_tell_you_to_type_a_host_id(pg):
     """It said "assign it to a host id" long after the picker replaced typing —
     an instruction that outlived the thing it described."""
-    import re
-    html = pg.content()
-    body = re.search(r"<div class=card id=assign>(.*?)</div>", html, re.S)
-    # With assignments present this is a table; the copy still must not be in
-    # the page source anywhere.
-    assert "assign it to a host id" not in html, \
+    assert "assign it to a host id" not in pg.content(), \
         "the screen still tells people to type a host id"
 
 
+# ---- when the Controller is not there ---------------------------------------
 def test_an_unreachable_controller_costs_the_host_list_not_the_console(browser, server):
     """Everything else on this page comes from Baseline's own store and has no
     reason to disappear because the Controller is down."""
@@ -338,12 +384,13 @@ def test_an_unreachable_controller_costs_the_host_list_not_the_console(browser, 
     page.on("pageerror", lambda e: errs.append(str(e)))
     try:
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_timeout(1200)
-        hosts = page.text_content("#hosts") or ""
-        assert "could not reach the Controller" in hosts, hosts
-        # ...and the rest of the console still works.
-        assert "All Servers" in (page.text_content("#states") or "")
-        assert "env:production" in (page.text_content("#assign") or "")
+        page.wait_for_timeout(1500)
+        assert "could not reach the Controller" in (page.text_content("#browselist") or "")
+        # ...and the states are still browsable, which is the half of this
+        # console that never needed the Controller at all.
+        page.click("#by-state")
+        page.wait_for_timeout(500)
+        assert "All Servers" in (page.text_content("#browselist") or "")
         assert not errs, errs
     finally:
         FLEET_REACHABLE["ok"] = True
@@ -358,9 +405,9 @@ def test_the_console_survives_the_host_endpoint_failing_outright(browser, server
     which means the test above passes whether or not the browser guards the
     call, and it took re-breaking the guard to notice. This makes the endpoint
     itself fail, so the request rejects. Without the guard the whole
-    Promise.all rejects with it and NOTHING on the page renders: the states,
-    assignments, rules and runs all come from Baseline's own store and have no
-    reason to vanish because one request did.
+    Promise.all rejects with it and NOTHING renders: the states, assignments,
+    rules and runs all come from Baseline's own store and have no reason to
+    vanish because one request did.
     """
     FLEET_REACHABLE["raise"] = True
     ctx = browser.new_context(viewport={"width": 1280, "height": 1000},
@@ -368,41 +415,29 @@ def test_the_console_survives_the_host_endpoint_failing_outright(browser, server
     page = ctx.new_page()
     try:
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_timeout(1500)
-        assert "All Servers" in (page.text_content("#states") or ""), \
+        page.wait_for_timeout(1800)
+        page.click("#by-state")
+        page.wait_for_timeout(500)
+        assert "All Servers" in (page.text_content("#browselist") or ""), \
             "one failing request emptied the whole console"
-        assert "env:production" in (page.text_content("#assign") or "")
-        assert (page.text_content("#hosts") or "").strip(), \
-            "the host panel says nothing at all about why it is empty"
     finally:
         FLEET_REACHABLE["raise"] = False
         ctx.close()
 
 
 # ---- finding a host in a fleet that does not fit on a screen ---------------
-def test_a_small_fleet_is_not_given_a_search_box(pg):
-    """Six hosts fit. A filter over a list you can already see is a control to
-    read past, not a tool."""
-    assert pg.evaluate(
-        "() => document.querySelector('.hfilter').hidden") is True
-
-
 def _filter(page, text):
     """Type into the filter.
 
-    Set-and-dispatch rather than page.fill, because the control is hidden for a
-    fleet this size (see the test above) and fill waits for visibility. What is
-    under test here is the filtering, not the threshold.
+    It heads the browse column now rather than being revealed once a fleet gets
+    big: in a column that scrolls there is nowhere else to look for it.
     """
-    page.evaluate(
-        """(t) => { const b = document.getElementById('hostfilter');
-                    b.value = t; b.dispatchEvent(new Event('input')); }""", text)
+    page.fill("#browsefilter", text)
+    page.wait_for_timeout(300)
 
 
 def _shown(page):
-    return page.evaluate(
-        "() => [...document.querySelectorAll('#hosts .fleet .hname .mono')]"
-        ".map(e => e.textContent.trim())")
+    return _names(page)
 
 
 def test_filtering_narrows_the_fleet_without_asking_the_server(pg):
@@ -428,16 +463,14 @@ def test_a_host_can_be_found_by_its_address(pg):
 
 
 def test_a_host_can_be_found_by_the_state_it_must_satisfy(pg):
-    """"Which hosts have web-servers on them?" is a fleet question, and the
-    answer was only readable by joining two tables by eye."""
     _filter(pg, "web-servers")
     assert sorted(_shown(pg)) == ["stg-01", "web-01"], _shown(pg)
 
 
 def test_a_filter_that_matches_nothing_says_so(pg):
-    """An empty card is indistinguishable from a fleet that failed to load."""
+    """An empty column is indistinguishable from a fleet that failed to load."""
     _filter(pg, "zzzz")
-    assert "No host matches" in pg.text_content("#hosts")
+    assert "Nothing matches" in (pg.text_content("#browselist") or "")
 
 
 def test_clearing_the_filter_brings_everything_back(pg):
@@ -446,15 +479,50 @@ def test_clearing_the_filter_brings_everything_back(pg):
     assert len(_shown(pg)) == len(FLEET), _shown(pg)
 
 
-# ---- the first thing on the page -------------------------------------------
-def test_apply_is_only_the_loud_button_where_it_would_change_something(pg):
-    """A column of identical green "Apply now" buttons says nothing about which
-    row to press, and the loudest thing on the screen ends up being the hosts
-    that need nothing."""
-    def primary(host):
-        return _row(pg, host).locator("[data-apply].primary").count()
-    assert primary("db-01") == 1, "the failing host does not offer the action"
-    assert primary("web-01") == 1, "the drifted host does not offer the action"
-    assert primary("web-02") == 0, "a host that is already as declared shouts Apply"
-    # Still available, just not shouting.
-    assert _row(pg, "web-02").locator("[data-apply]").count() == 1
+def test_the_filter_searches_states_in_state_mode_too(pg):
+    pg.click("#by-state")
+    pg.wait_for_timeout(400)
+    _filter(pg, "web")
+    assert _shown(pg) == ["web-servers"], _shown(pg)
+
+
+def test_a_state_is_judged_by_ITSELF_on_its_hosts(pg):
+    """Not by how its hosts are doing overall.
+
+    web-01 is drifted — because of "All Servers", which is the only state
+    anything has ever been applied for. "web-servers" is also on web-01 and has
+    never been applied anywhere, so it is "never applied". Rolling the HOST's
+    status up to the state instead put a red dot beside a state that was
+    nowhere near the problem, and the fix went in without a test until a
+    deliberate re-break sailed through.
+    """
+    pg.click("#by-state")
+    pg.wait_for_timeout(500)
+    dots = pg.evaluate(
+        """() => {const o = {};
+             document.querySelectorAll('#browselist .it[data-state]').forEach((e) => {
+               const d = e.querySelector('.dot');
+               o[e.dataset.state] = d ? d.className.replace('dot ', '') : null;});
+             return o;}""")
+    assert dots.get("web-servers") == "faint", (
+        f"web-servers has never been applied, so its dot should be faint: {dots}")
+    assert dots.get("All Servers") == "err", (
+        f"All Servers has a failing host, so its dot should be red: {dots}")
+
+
+def test_a_state_on_one_host_reports_THAT_host(pg):
+    """The middle column lists the states one host must satisfy, so a dot there
+    means "this state, on this host". Showing the state's worst host anywhere
+    puts a red dot beside a state that is fine here."""
+    _pick(pg, "web-01")
+    dots = pg.evaluate(
+        """() => {const o = {};
+             document.querySelectorAll('#col2list .it[data-pickstate]').forEach((e) => {
+               const d = e.querySelector('.dot');
+               o[e.dataset.pickstate] = d ? d.className.replace('dot ', '') : null;});
+             return o;}""")
+    # db-01 is the failing host, and it is not this one.
+    assert dots.get("All Servers") == "amber", \
+        f"web-01's own run of All Servers changed things, so amber: {dots}"
+    assert dots.get("web-servers") == "faint", \
+        f"web-servers has never run on web-01: {dots}"

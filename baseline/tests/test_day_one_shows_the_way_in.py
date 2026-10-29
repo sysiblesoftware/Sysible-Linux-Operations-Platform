@@ -136,7 +136,7 @@ def pg(server):
         errs = []
         page.on("pageerror", lambda e: errs.append(str(e)))
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_selector("#hosts .fleet", timeout=10000)
+        page.wait_for_selector("#browselist .it", timeout=10000)
         page.wait_for_timeout(500)
         yield page
         assert not errs, errs
@@ -145,16 +145,17 @@ def pg(server):
 
 # ---- what the page opens with ----------------------------------------------
 def test_it_does_not_open_with_a_scoreboard_of_zeros(pg):
-    """Three large zeros are the same "nothing is set up" a fourth time, in the
+    """Three large zeros are the same "nothing is set up" said again, in the
     largest type on the page."""
-    assert pg.locator("#drift .stat").count() == 0, \
+    assert pg.locator(".stat").count() == 0, \
         "the page still leads with a tally of a fleet nobody has configured"
-    assert pg.locator("#drift .start").count() == 1
+    assert pg.locator("#col3 .start").count() == 1, \
+        "there is no way in where the tally used to be"
 
 
 def test_it_says_what_baseline_does_and_how_to_start(pg):
     import re
-    panel = re.sub(r"\s+", " ", pg.text_content("#drift .start")).strip()
+    panel = re.sub(r"\s+", " ", pg.text_content("#col3 .start")).strip()
     assert "Nothing is managed yet" in panel, panel
     assert "16 hosts are enrolled" in panel, \
         f"it does not connect the advice to this fleet: {panel}"
@@ -170,8 +171,8 @@ def test_the_way_in_is_a_button_that_works(pg):
 
 
 def test_a_reader_who_cannot_write_is_not_told_to_press_it(server):
-    """An operator can declare a state; an auditor cannot, and the panel must not
-    hand them a button that will be refused.
+    """An operator can declare a state; an auditor cannot, and the panel must
+    not hand them a control that will be refused.
 
     Takes `server` and not `pg`: a second sync_playwright cannot be opened
     inside the one that fixture is already holding.
@@ -188,46 +189,50 @@ def test_a_reader_who_cannot_write_is_not_told_to_press_it(server):
             "x-sysible-auth": SECRET})
         page = ctx.new_page()
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_selector("#drift .start", timeout=10000)
+        page.wait_for_selector("#col3 .start", timeout=10000)
         assert page.locator("#startstate").count() == 0, \
             "an auditor is offered a button the server will refuse"
-        assert "Ask an operator" in page.text_content("#drift .start")
+        assert "Ask an operator" in page.text_content("#col3 .start")
         b.close()
 
 
-# ---- the fleet below it -----------------------------------------------------
+# ---- the fleet beside it ----------------------------------------------------
 def test_the_fleet_does_not_repeat_it_once_per_host(pg):
     """Sixteen hosts came to 840px of screen whose entire content was "nothing
     is set up yet", said thirty-two times."""
-    text = pg.text_content("#hosts")
-    assert text.lower().count("not managed") <= 1, \
-        f"'not managed' appears {text.lower().count('not managed')} times in the fleet"
+    text = pg.text_content("#browselist")
     assert text.count("no state assigned to it or its environment") == 0, \
         "the per-row explanation is back"
-    head = pg.text_content("#hosts .envhead")
-    assert "none managed yet" in head, head
+    assert text.lower().count("not managed") <= 1, \
+        f"'not managed' appears {text.lower().count('not managed')} times in the list"
+    head = pg.text_content("#browselist .grp")
+    assert "none managed" in head, head
 
 
 def test_every_host_is_still_listed_and_still_assignable(pg):
     """Collapsing what they all say must not collapse the hosts themselves."""
     names = pg.evaluate(
-        "() => [...document.querySelectorAll('#hosts .fleet .hname .mono')]"
+        "() => [...document.querySelectorAll('#browselist .it .nm')]"
         ".map(e => e.textContent.trim())")
-    assert names == [h["id"] for h in FLEET], names
-    assert pg.locator("#hosts [data-assignhost]").count() == len(FLEET)
+    assert sorted(names) == sorted(h["id"] for h in FLEET), names
     # And the action that covers all of them at once is the prominent one.
-    assert pg.locator("#hosts [data-assignenv].primary").count() == 1
+    assert pg.locator("#browselist [data-assignenv].primary").count() == 1
 
 
-def test_the_fleet_fits_in_a_reasonable_amount_of_screen(pg):
+def test_the_fleet_fits_in_a_column_rather_than_a_page(pg):
     """The measurement that started this: 840px, 52.5px per host, to say
-    nothing. A host is one line."""
-    h = pg.evaluate("() => document.getElementById('hosts').getBoundingClientRect().height")
-    per = h / len(FLEET)
-    assert per < 45, f"{round(per, 1)}px per host — the rows are not one line"
+    nothing. A host is one line, and the column scrolls instead of the page."""
+    per = pg.evaluate(
+        """() => {const r = [...document.querySelectorAll('#browselist .it')];
+             return r.length ? r.reduce((a, e) =>
+               a + e.getBoundingClientRect().height, 0) / r.length : 999;}""")
+    assert per < 34, f"{round(per, 1)}px per host — the rows are not one line"
+    over = pg.evaluate(
+        "() => document.documentElement.scrollHeight - window.innerHeight")
+    assert over <= 1, f"the page scrolls by {over}px"
 
 
-def test_a_big_fleet_is_given_a_way_to_search_it(pg):
-    """Sixteen is where scrolling to find a host starts to be the way you find
-    a host."""
-    assert pg.evaluate("() => document.querySelector('.hfilter').hidden") is False
+def test_the_filter_is_there_whatever_the_size_of_the_fleet(pg):
+    """It heads the column. In a list that scrolls, a control that appears only
+    past some size is a control nobody finds."""
+    assert pg.locator("#browsefilter").is_visible() is True
