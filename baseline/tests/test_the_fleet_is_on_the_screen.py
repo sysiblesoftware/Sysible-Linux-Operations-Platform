@@ -113,6 +113,10 @@ def server(tmp_path_factory):
                        "alice", source="yaml")
     m.store.save_state("web-servers", "nginx:\n  pkg.installed: []\n",
                        "alice", source="yaml")
+    # Declared and assigned to nothing, which is a real state to be in and the
+    # one where every apply control must be absent.
+    m.store.save_state("idle-state", "htop:\n  pkg.installed: []\n",
+                       "alice", source="yaml")
     m.store.assign("env:production", "All Servers")
     m.store.assign("web-01", "web-servers")
     m.store.assign("stg-01", "web-servers")
@@ -526,3 +530,77 @@ def test_a_state_on_one_host_reports_THAT_host(pg):
         f"web-01's own run of All Servers changed things, so amber: {dots}"
     assert dots.get("web-servers") == "faint", \
         f"web-servers has never run on web-01: {dots}"
+
+
+# ---- applying ---------------------------------------------------------------
+def test_a_state_can_be_applied_to_everything_it_is_assigned_to(pg):
+    """Reported, over a state assigned to sixteen hosts whose only action was
+    "Apply to arch-01": "It should be the state and then assign it to the hosts
+    then apply and be able to do it to all."
+
+    Sixteen hosts meant visiting sixteen hosts. Declare, assign, apply — the
+    third step has to be able to mean the same set as the second.
+    """
+    posted = []
+    pg.on("request", lambda r: posted.append(r.url)
+          if r.method == "POST" and "/apply" in r.url else None)
+    pg.on("dialog", lambda d: d.accept())
+    pg.click("#by-state")
+    pg.wait_for_timeout(450)
+    pg.click("#browselist .it[data-state='All Servers']")
+    pg.wait_for_timeout(500)
+
+    btn = pg.locator("#col3 [data-applyall]")
+    assert btn.count() == 1, "there is no way to apply a state to all of its hosts"
+    label = btn.inner_text()
+    assert "all" in label.lower() and "host" in label.lower(), label
+
+    btn.click()
+    pg.wait_for_timeout(900)
+    # env:production is ONE call: the Controller expands an environment into
+    # every host in it (_run_baseline_cycle), so fanning out here as well would
+    # run each host twice.
+    assert posted, "pressing it posted nothing"
+    assert any("env%3Aproduction" in u or "env:production" in u for u in posted), posted
+
+
+def test_the_count_on_the_button_is_the_number_of_hosts_it_reaches(pg):
+    """A state assigned to one environment is assigned to one TARGET and
+    reaches every host in it. Counting targets would have said "all 1 host"
+    over a fleet of sixteen."""
+    pg.click("#by-state")
+    pg.wait_for_timeout(450)
+    pg.click("#browselist .it[data-state='All Servers']")
+    pg.wait_for_timeout(500)
+    label = pg.locator("#col3 [data-applyall]").inner_text()
+    hosts = len([h for h in FLEET if h["environment"] == "production"])
+    assert str(hosts) in label, f"{label!r} does not name the {hosts} hosts it reaches"
+
+
+def test_applying_to_everything_asks_first_and_says_what_it_will_do(pg):
+    """It is a fleet-wide change, and it converges each host to its WHOLE
+    desired state — not only the state whose page the button is on."""
+    seen = []
+    pg.once("dialog", lambda d: (seen.append(d.message), d.dismiss()))
+    pg.click("#by-state")
+    pg.wait_for_timeout(450)
+    pg.click("#browselist .it[data-state='All Servers']")
+    pg.wait_for_timeout(500)
+    pg.click("#col3 [data-applyall]")
+    pg.wait_for_timeout(600)
+    assert seen, "a fleet-wide apply went ahead without asking"
+    assert "host" in seen[0], seen
+    assert "other than" in seen[0], \
+        f"it does not say it applies more than this one state: {seen[0]!r}"
+
+
+def test_a_state_assigned_to_nothing_offers_no_apply_at_all(pg):
+    """A button that cannot do anything is a promise the screen cannot keep."""
+    pg.click("#by-state")
+    pg.wait_for_timeout(450)
+    pg.click("#browselist .it[data-state='idle-state']")
+    pg.wait_for_timeout(500)
+    assert pg.locator("#col3 [data-applyall]").count() == 0
+    assert pg.locator("#col3 [data-apply]").count() == 0
+    assert "does not apply it" in (pg.text_content("#col3") or ""), \
+        "it does not say why there is nothing to apply"

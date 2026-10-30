@@ -862,6 +862,11 @@ function hostDetail(h){
 function stateDetail(name, host){
   const s = (STATE.states || []).find((x) => x.name === name) || {name, version: '?'};
   const on = hostsWith(name);
+  // The selected host is only RELEVANT here if it actually has to satisfy this
+  // state. Carrying it over regardless offered "Just deb-web-1" on a state
+  // deb-web-1 was never assigned — an apply that would run the host's own
+  // desired state and nothing of what the page was showing.
+  if(host && !on.some((h) => h.id === host.id)) host = null;
   const st = stateStatus(name);
   const hostRuns = host ? runsFor(host.id).filter((r) => r.state_name === name) : [];
   const last = hostRuns[0];
@@ -869,12 +874,17 @@ function stateDetail(name, host){
     <div class=sub>v${esc(s.version)} · on ${on.length} host${on.length === 1 ? '' : 's'}
       · <span class="${st.cls}">${esc(st.label)}</span></div>
     <div class=bar>
-      ${host && CAN_WRITE ? `<button class=primary data-apply="${esc(host.id)}">Apply to ${esc(host.label || host.id)}</button>` : ''}
-      ${host ? `<button data-preview="${esc(host.id)}">Preview</button>` : ''}
-      <button data-edit="${esc(name)}">${CAN_WRITE ? 'Edit' : 'View'}</button>
+      ${on.length && CAN_WRITE ? `<button class=primary data-applyall="${esc(name)}"
+        >Apply to all ${on.length} host${on.length === 1 ? '' : 's'}</button>` : ''}
+      ${on.length ? `<button data-previewall="${esc(name)}">Preview on all</button>` : ''}
+      ${host && CAN_WRITE ? `<button data-apply="${esc(host.id)}"
+        >Just ${esc(host.label || host.id)}</button>` : ''}
       ${CAN_WRITE ? `<button data-assign="${esc(name)}">Assign…</button>` : ''}
+      <button data-edit="${esc(name)}">${CAN_WRITE ? 'Edit' : 'View'}</button>
       ${CAN_WRITE ? `<button class=danger data-delstate="${esc(name)}">Delete</button>` : ''}
-    </div>`;
+    </div>
+    ${on.length ? '' : `<p class=note>Declaring a state does not apply it. Assign
+      it to a host, or to a whole environment, and it becomes appliable.</p>`}`;
   if(host){
     const hst = hostStateStatus(host, name);
     out += `<div class=sec><h4>On ${esc(host.label || host.id)}</h4><div class=box>
@@ -1339,6 +1349,52 @@ async function deleteState(name){
   }catch(e){ say(e.message, 'err'); }
 }
 
+// Every target this state is assigned to. Usually one — an environment, which
+// the Controller fans out across every host in it — but a state can also be
+// assigned to hosts directly, and then there is one per host.
+function targetsOf(stateName){
+  return (STATE.assign || []).filter((a) => a.state === stateName)
+    .map((a) => a.target);
+}
+
+// APPLY IT TO ALL OF THEM. The console only ever offered "Apply to <one host>",
+// so a state assigned to sixteen hosts meant visiting sixteen hosts — which is
+// not a workflow, it is the absence of one. Declare, assign, apply: the third
+// step has to be able to mean the same set as the second.
+//
+// Worth being exact about what apply DOES, because it is not "apply this one
+// state". Baseline is a convergence tool: the Controller asks for a host's
+// WHOLE desired state and runs all of it (see _run_baseline_cycle). So this
+// brings every host the state reaches up to everything it must satisfy, and
+// the confirmation says so rather than implying a narrower promise.
+async function applyEverywhere(stateName, preview){
+  const targets = targetsOf(stateName);
+  if(!targets.length) return say('That state is not assigned to anything yet.', 'err');
+  const hosts = hostsWith(stateName).length;
+  if(!preview && !confirm(
+      `Apply on ${hosts} host${hosts === 1 ? '' : 's'}?\n\n`
+      + `This brings ${hosts === 1 ? 'it' : 'them'} up to everything they must `
+      + `satisfy, which may include states other than "${stateName}".`)) return;
+  say(`${preview ? 'Previewing' : 'Applying'} on ${hosts} host${hosts === 1 ? '' : 's'}…`);
+  let ok = 0;
+  const failed = [];
+  for(const t of targets){
+    try{
+      await api('hosts/' + encodeURIComponent(t) + '/apply',
+                {method: 'POST', body: JSON.stringify({preview: !!preview})});
+      ok++;
+    }catch(e){ failed.push(`${t}: ${e.message}`); }
+  }
+  // One failed target out of three is not a failure and not a success, and
+  // reporting either would be a lie about the other two.
+  if(failed.length && ok) say(
+    `${ok} of ${targets.length} started; ${failed.join('; ')}`, 'err');
+  else if(failed.length) say(failed.join('; '), 'err');
+  else say(`${preview ? 'Preview' : 'Apply'} requested for `
+           + `${hosts} host${hosts === 1 ? '' : 's'}.`, 'ok');
+  setTimeout(load, 1500);
+}
+
 async function applyTo(target, preview){
   // Baseline does not talk to hosts — the Controller does. This asks the
   // Controller to run this host's desired state over the agent channel it
@@ -1371,6 +1427,8 @@ document.addEventListener('click', async (ev) => {
     if(t.dataset.assignenv)  return openAssign('', 'env:' + t.dataset.assignenv);
     if(t.dataset.rule)      return openRule(t.dataset.rule);
     if(t.dataset.assign)    return openAssign(t.dataset.assign);
+    if(t.dataset.previewall) return applyEverywhere(t.dataset.previewall, true);
+    if(t.dataset.applyall)   return applyEverywhere(t.dataset.applyall, false);
     if(t.dataset.preview)   return applyTo(t.dataset.preview, true);
     if(t.dataset.apply)     return applyTo(t.dataset.apply, false);
     if(t.dataset.delrule){

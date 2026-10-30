@@ -392,10 +392,22 @@ export SYSIBLE_UPDATER_SECRET="$UPD_SECRET"
 # whole fleet, with both halves looking correctly configured.
 _fb_token_from_env() {
   [ -f "$ENV_FILE" ] || return 0
-  sed -n 's/^SYSIBLE_BASELINE_AGENT_TOKEN=\(..*\)$/\1/p
-          s/^SYSIBLE_FLASHBACK_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+  # FLASHBACK's own key WINS, and the Baseline one is only a fallback for an
+  # install written before these two were told apart. One sed over both keys
+  # taking the last line picked whichever happened to sit lower in the file —
+  # so a correctly configured install, which has both, handed Flashback
+  # Baseline's token.
+  _fbt="$(sed -n 's/^SYSIBLE_FLASHBACK_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1)"
+  [ -n "$_fbt" ] || _fbt="$(sed -n 's/^SYSIBLE_BASELINE_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1)"
+  printf '%s' "$_fbt"
 }
-FB_TOKEN="${SYSIBLE_BASELINE_AGENT_TOKEN:-${SYSIBLE_FLASHBACK_AGENT_TOKEN:-$(_fb_token_from_env || true)}}"
+# FLASHBACK's own name first. The rebrand left this block reading and writing
+# SYSIBLE_BASELINE_AGENT_TOKEN — Baseline's key — so Flashback's token was
+# stored under Baseline's name, SYSIBLE_FLASHBACK_AGENT_TOKEN was never written
+# at all, and docker-compose.yml (which passes each service its OWN key) started
+# the Flashback container with an empty token. Agent auth fails closed, so
+# config backup was refused fleet-wide.
+FB_TOKEN="${SYSIBLE_FLASHBACK_AGENT_TOKEN:-$(_fb_token_from_env || true)}"
 if [ -z "$FB_TOKEN" ]; then
   FB_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # Same reasoning as the SSO secret: /bin/sh has no pipefail, so a partial
@@ -406,11 +418,14 @@ if [ -z "$FB_TOKEN" ]; then
     *[!0-9a-f]* | "") die "failed to generate a valid Baseline agent token (need 64 hex chars)." ;;
   esac
   [ "${#FB_TOKEN}" -eq 64 ] || die "generated Baseline agent token is not 64 hex chars (got ${#FB_TOKEN})."
-  _upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$FB_TOKEN"
-  say "Generated a Baseline agent token into $ENV_FILE"
+  _upsert_env SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+  say "Generated a Flashback agent token into $ENV_FILE"
 fi
-export SYSIBLE_BASELINE_AGENT_TOKEN="$FB_TOKEN"
-export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"   # pre-rebrand name, for an older Controller
+# Persisted under Flashback's name even when it was FOUND under Baseline's: an
+# install from before this fix has it there, and leaving it would mean the key
+# compose actually reads stays empty for ever.
+_upsert_env SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+export SYSIBLE_FLASHBACK_AGENT_TOKEN="$FB_TOKEN"
 # Where the Controller reaches Baseline's agent API: the loopback port the
 # compose file publishes (see docker-compose.yml). Overridable for a split host.
 # host.docker.internal, NOT 127.0.0.1: the Controller runs in a container here,
@@ -457,6 +472,14 @@ _bl_token_from_env() {
   sed -n 's/^SYSIBLE_BASELINE_AGENT_TOKEN=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
 }
 BL_TOKEN="${SYSIBLE_BASELINE_AGENT_TOKEN:-$(_bl_token_from_env || true)}"
+# ...unless what we found is FLASHBACK's. Before this fix the block above wrote
+# Flashback's token into SYSIBLE_BASELINE_AGENT_TOKEN, so this read it straight
+# back and the two services shared one token — the exact thing the comment above
+# says must not happen. A token equal to Flashback's is not Baseline's; mint one.
+if [ -n "$BL_TOKEN" ] && [ "$BL_TOKEN" = "$FB_TOKEN" ]; then
+  BL_TOKEN=""
+  say "Baseline was sharing Flashback's agent token; issuing it one of its own."
+fi
 if [ -z "$BL_TOKEN" ]; then
   BL_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   case "$BL_TOKEN" in
@@ -466,6 +489,7 @@ if [ -z "$BL_TOKEN" ]; then
   _upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$BL_TOKEN"
   say "Generated a Baseline token into $ENV_FILE"
 fi
+_upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$BL_TOKEN"
 export SYSIBLE_BASELINE_AGENT_TOKEN="$BL_TOKEN"
 BL_URL="${SYSIBLE_BASELINE_URL:-http://host.docker.internal:${SYSIBLE_BASELINE_AGENT_PORT:-8771}}"
 BL_BIND="${SYSIBLE_BASELINE_AGENT_BIND:-}"
@@ -542,8 +566,17 @@ if [ "$WANT_APPS" -eq 1 ]; then
       # as the SSO secret: otherwise it lives only in this run's ambient env and
       # the next `docker compose up -d` brings the Controller back without it.
       if [ "$p" = "controller" ]; then
-        _upsert_kv "$_aenv" SYSIBLE_BASELINE_URL "$FB_URL"
-        _upsert_kv "$_aenv" SYSIBLE_BASELINE_AGENT_TOKEN "$FB_TOKEN"
+        # TWO services, two ports, two tokens. Flashback holds what a host's
+        # configuration WAS; Baseline declares what it must BECOME. This wrote
+        # FB_URL and FB_TOKEN under BASELINE's names, so the Controller's
+        # desired-state client was pointed at Flashback's port — and its
+        # Flashback client, whose own names were never written at all, fell back
+        # to those same Baseline names and reached the same place. One service
+        # addressed twice, the other not at all.
+        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_URL "$FB_URL"
+        _upsert_kv "$_aenv" SYSIBLE_FLASHBACK_AGENT_TOKEN "$FB_TOKEN"
+        _upsert_kv "$_aenv" SYSIBLE_BASELINE_URL "$BL_URL"
+        _upsert_kv "$_aenv" SYSIBLE_BASELINE_AGENT_TOKEN "$BL_TOKEN"
       fi
       if [ "$p" = "connect" ] && [ -n "$HOST_ADDR" ]; then
         _upsert_kv "$_aenv" SYSIBLE_CONNECT_CONTROLLER_URL "https://$HOST_ADDR:9000"
