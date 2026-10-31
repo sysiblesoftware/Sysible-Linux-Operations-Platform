@@ -447,14 +447,20 @@ _bridge_gateway() {
     -f '{{ range .IPAM.Config }}{{ .Gateway }}{{ end }}' 2>/dev/null \
     | awk '{print $1}'
 }
-FB_BIND="${SYSIBLE_BASELINE_AGENT_BIND:-${SYSIBLE_FLASHBACK_AGENT_BIND:-}}"
+# FLASHBACK's own name, persisted under FLASHBACK's own name. The rebrand left
+# this block reading and writing SYSIBLE_BASELINE_AGENT_BIND, so the key
+# docker-compose.yml passes to the FLASHBACK container was never written and
+# that container fell back to the file's hard-coded 172.17.0.1 — which is only
+# right on a host whose docker bridge happens to be the default one. The
+# function right above exists precisely because it often is not, and the
+# comment above THAT describes this exact failure happening once already.
+FB_BIND="${SYSIBLE_FLASHBACK_AGENT_BIND:-${SYSIBLE_BASELINE_AGENT_BIND:-}}"
 if [ -z "$FB_BIND" ]; then
   FB_BIND="$(_bridge_gateway)"
   [ -n "$FB_BIND" ] || FB_BIND="172.17.0.1"
 fi
-export SYSIBLE_BASELINE_AGENT_BIND="$FB_BIND"
-export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"   # pre-rebrand name
-_upsert_kv "$ENV_FILE" SYSIBLE_BASELINE_AGENT_BIND "$FB_BIND" 2>/dev/null || true
+export SYSIBLE_FLASHBACK_AGENT_BIND="$FB_BIND"
+_upsert_kv "$ENV_FILE" SYSIBLE_FLASHBACK_AGENT_BIND "$FB_BIND" 2>/dev/null || true
 
 # ---- Baseline controller token (one per install; persisted in this repo's .env)
 # Baseline's desired-state and result endpoints are authenticated by a bearer
@@ -492,6 +498,10 @@ fi
 _upsert_env SYSIBLE_BASELINE_AGENT_TOKEN "$BL_TOKEN"
 export SYSIBLE_BASELINE_AGENT_TOKEN="$BL_TOKEN"
 BL_URL="${SYSIBLE_BASELINE_URL:-http://host.docker.internal:${SYSIBLE_BASELINE_AGENT_PORT:-8771}}"
+# Baseline's own, computed independently. It reads only ITS key now: reading
+# the Baseline name after the Flashback block had written the bind address
+# there meant the two were always the same value by accident rather than
+# because they are on the same host.
 BL_BIND="${SYSIBLE_BASELINE_AGENT_BIND:-}"
 if [ -z "$BL_BIND" ]; then
   BL_BIND="$(_bridge_gateway)"

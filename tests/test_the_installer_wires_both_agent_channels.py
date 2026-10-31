@@ -56,7 +56,10 @@ set -eu
 ENV_FILE="$TMP/.env"
 say(){ :; }
 die(){ echo "DIE: $*" >&2; exit 1; }
-_bridge_gateway(){ echo "172.17.0.1"; }
+# A host whose docker bridge is NOT the default. The hard-coded 172.17.0.1
+# fallback is only right when it is, which is the whole reason the installer
+# asks docker rather than assuming.
+_bridge_gateway(){ echo "${FAKE_BRIDGE:-10.88.0.1}"; }
 '''
 
 
@@ -65,12 +68,22 @@ def _run(tmp, env_before="", exported=None):
     tmp = pathlib.Path(tmp)
     (tmp / ".env").write_text(env_before, encoding="utf-8")
     helpers = _block("_upsert_kv() {", "# ---- rename pre-rebrand keys")
-    fb = _block("_fb_token_from_env() {", "# ...and the address Baseline must LISTEN on")
+    # Through the BIND block too: it is part of the same decision, and slicing
+    # it off meant the bind assertions ran against a script that never set it.
+    fb = _block("_fb_token_from_env() {", "# ---- Baseline controller token")
     bl = _block("_bl_token_from_env() {", "# Where THIS checkout lives.")
+    # The slice now carries install.sh's own _bridge_gateway, which shells out
+    # to docker and finds nothing here — so it would shadow the stub and every
+    # bind assertion would measure the 172.17.0.1 fallback instead.
+    import re as _re
+    fb = _re.sub(r"_bridge_gateway\(\) \{.*?\n\}\n", "", fb, flags=_re.S)
+    bl = _re.sub(r"_bridge_gateway\(\) \{.*?\n\}\n", "", bl, flags=_re.S)
     script = (HARNESS + helpers + "\n" + fb + "\n" + bl + "\n"
               + 'echo "FB_TOKEN=$FB_TOKEN"\necho "BL_TOKEN=$BL_TOKEN"\n'
-              + 'echo "FB_URL=$FB_URL"\necho "BL_URL=$BL_URL"\n')
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMP": str(tmp)}
+              + 'echo "FB_URL=$FB_URL"\necho "BL_URL=$BL_URL"\n'
+              + 'echo "FB_BIND=$FB_BIND"\necho "BL_BIND=$BL_BIND"\n')
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMP": str(tmp),
+           "FAKE_BRIDGE": "10.88.0.1"}
     env.update(exported or {})
     r = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
                        env=env, timeout=60)
@@ -174,3 +187,55 @@ def test_the_controller_reads_exactly_those_four_names():
         "the Controller's Baseline client no longer reads SYSIBLE_BASELINE_*"
     assert 'SYSIBLE_FLASHBACK_{suffix}' in fb, \
         "the Controller's Flashback client no longer reads SYSIBLE_FLASHBACK_*"
+
+
+# ---- the address each container binds its agent port to --------------------
+def test_each_service_binds_under_the_name_compose_reads(tmp_path):
+    """docker-compose.yml passes SYSIBLE_FLASHBACK_AGENT_BIND to the flashback
+    container and SYSIBLE_BASELINE_AGENT_BIND to the baseline one, each with a
+    hard-coded 172.17.0.1 default. A bind address written under the wrong name
+    means that default — correct only on a host whose docker bridge happens to
+    be the usual one, and silently wrong everywhere else: the port binds to an
+    address that is not there, and the Controller cannot reach the service."""
+    got, env = _run(tmp_path)
+    assert got["FB_BIND"] == "10.88.0.1", got
+    assert got["BL_BIND"] == "10.88.0.1", got
+    assert env.get("SYSIBLE_FLASHBACK_AGENT_BIND") == got["FB_BIND"], (
+        "Flashback's bind address is not under the name compose reads, so that "
+        "container falls back to the file's hard-coded 172.17.0.1")
+    assert env.get("SYSIBLE_BASELINE_AGENT_BIND") == got["BL_BIND"], env
+
+
+def test_an_operators_explicit_bind_is_respected(tmp_path):
+    got, env = _run(tmp_path, env_before=(
+        "SYSIBLE_FLASHBACK_AGENT_BIND=192.168.5.1\n"
+        "SYSIBLE_BASELINE_AGENT_BIND=192.168.5.2\n"),
+        exported={"SYSIBLE_FLASHBACK_AGENT_BIND": "192.168.5.1",
+                  "SYSIBLE_BASELINE_AGENT_BIND": "192.168.5.2"})
+    assert (got["FB_BIND"], got["BL_BIND"]) == ("192.168.5.1", "192.168.5.2"), got
+
+
+# ---- the class, not just the instances -------------------------------------
+def test_no_variable_is_written_under_the_other_products_name():
+    """Three bugs in this file had one shape: Flashback's block reading and
+    writing a SYSIBLE_BASELINE_* key, because the rebrand renamed the variables
+    in a block that was Flashback's all along. Each left the key compose
+    actually passes to the flashback container unwritten.
+
+    So: inside the Flashback section, nothing may be persisted under a BASELINE
+    name, and vice versa.
+    """
+    text = INSTALL.read_text(encoding="utf-8")
+    fb = text[text.index("_fb_token_from_env() {"):
+              text.index("# ---- Baseline controller token")]
+    bl = text[text.index("_bl_token_from_env() {"):
+              text.index("# Where THIS checkout lives.")]
+    import re
+    fb_writes = re.findall(r'_upsert(?:_env|_kv)[^\n]*?\b(SYSIBLE_[A-Z_]+)', fb)
+    bl_writes = re.findall(r'_upsert(?:_env|_kv)[^\n]*?\b(SYSIBLE_[A-Z_]+)', bl)
+    assert fb_writes, "the Flashback block persists nothing at all now"
+    assert bl_writes, "the Baseline block persists nothing at all now"
+    bad_fb = [v for v in fb_writes if "BASELINE" in v]
+    bad_bl = [v for v in bl_writes if "FLASHBACK" in v]
+    assert not bad_fb, f"the Flashback block writes Baseline's keys: {bad_fb}"
+    assert not bad_bl, f"the Baseline block writes Flashback's keys: {bad_bl}"
