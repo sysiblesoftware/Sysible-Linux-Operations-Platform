@@ -1840,10 +1840,28 @@ _APP_ADMIN = {
 # A real admin console is hundreds of elements; a failure is a handful and a
 # line of text. That is the test — not the status code, which the frame does not
 # expose.
+# WHY IT WATCHES RATHER THAN JUDGES ONCE. Both embedded consoles are single-page
+# apps. Their first paint is a placeholder — SLEP renders "Loading…", the
+# Controller a bare spinner — and the real tree appears only once /me resolves.
+# The iframe's `load` event fires when the HTML and the bundle have loaded, which
+# is BEFORE that. Judging on `load` therefore reported a perfectly healthy SLEP
+# as "did not load its administration. It returned: Loading…", hid the frame,
+# and never looked again — the SPA does not reload, so it could not self-correct.
+#
+# The measure below is right; the timing was wrong. So the document is watched
+# (MutationObserver, with an interval as the backstop) and failure is declared
+# only if it still looks empty at the deadline. A genuinely dead app costs the
+# operator those few seconds; a live one is never slandered.
 _APPFRAME_JS = r"""
 (function(){
   var f=document.getElementById('appframe'), box=document.getElementById('framefail');
   if(!f||!box)return;
+  // 4s: the bundle is already loaded when `load` fires, so all that is left is
+  // the console's own /me round trip on the same host. Long enough that no
+  // healthy app is slandered, short enough that a dead one is reported while
+  // the operator is still looking — and inside the 5s that
+  // tests/test_admin_navigation.py waits for the failure box.
+  var DEADLINE_MS=4000, POLL_MS=250, watcher=null;
   function describe(d){
     var t=((d.body&&d.body.textContent)||'').trim();
     var n=d.body?d.body.querySelectorAll('*').length:0;
@@ -1853,18 +1871,42 @@ _APPFRAME_JS = r"""
     if(!t) return 'It returned an empty page.';
     return 'It returned: ' + (t.length>200 ? t.slice(0,200)+'\u2026' : t);
   }
+  function stop(){
+    if(!watcher)return;
+    if(watcher.timer)clearInterval(watcher.timer);
+    if(watcher.obs)watcher.obs.disconnect();
+    watcher=null;
+  }
   f.addEventListener('load', function(){
-    var why=null;
-    try{
-      var d=f.contentDocument;
+    // A navigation inside the frame fires this again; the previous watcher must
+    // not keep polling a document it no longer describes.
+    stop();
+    var started=Date.now(), w={timer:null, obs:null};
+    watcher=w;
+    function look(){
+      if(watcher!==w)return;
+      var d;
+      try{ d=f.contentDocument; }catch(e){ stop(); return; }
       // No document at all means cross-origin, which this is not supposed to be
       // \u2014 leave the frame alone rather than guess.
-      if(!d) return;
-      why=describe(d);
-    }catch(e){ return; }
-    var failed=!!why;
-    f.hidden=failed; box.hidden=!failed;
-    if(failed) document.getElementById('framewhy').textContent=why;
+      if(!d){ stop(); return; }
+      var why=describe(d);
+      if(!why){ stop(); f.hidden=false; box.hidden=true; return; }
+      if(Date.now()-started>=DEADLINE_MS){
+        stop();
+        f.hidden=true; box.hidden=false;
+        document.getElementById('framewhy').textContent=why;
+      }
+    }
+    try{
+      var d0=f.contentDocument;
+      if(d0&&d0.body&&window.MutationObserver){
+        w.obs=new MutationObserver(look);
+        w.obs.observe(d0.body,{childList:true,subtree:true,characterData:true});
+      }
+    }catch(e){}
+    w.timer=setInterval(look, POLL_MS);
+    look();
   });
 })();
 """
