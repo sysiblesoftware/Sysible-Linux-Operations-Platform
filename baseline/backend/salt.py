@@ -31,11 +31,60 @@ surprises left in it: a stable list of per-state outcomes, with `changed` and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 
 # Salt's own state-id convention: "<sls>_|-<id>_|-<name>_|-<function>".
 _ID_SEP = "_|-"
+
+# ---------------------------------------------------------------------------
+# A declared state is DATA, and must stay data all the way onto the host.
+# ---------------------------------------------------------------------------
+# The SLS travels in a heredoc with a QUOTED delimiter, which stops every kind
+# of expansion inside the body — `$`, backticks, backslashes, globs — and that
+# is why a heredoc is the right transport for YAML full of file contents.
+#
+# What a quoted delimiter does NOT stop is a body line that IS the delimiter.
+# The shell ends the heredoc there and reads the rest of the body as commands.
+# With a fixed delimiter that was remote code execution on every host a state
+# is assigned to, with three aggravations:
+#
+#   * the injected lines run BEFORE salt-call, so test=True — the console's
+#     "preview", the default path for a state nobody has applied yet — ran them
+#     too. Previewing a state a colleague sent you was code execution;
+#   * the Controller dispatches baseline-apply with want_root=True;
+#   * Salt never sees them, so the run record, the event rules and the
+#     Flashback capture all describe a clean preview.
+#
+# Two defences, because this one is worth two. The delimiter is derived from
+# the body, so an author would need the hash of text that contains that hash in
+# order to write the line that closes it. And the body is still checked against
+# the delimiter, which is the assertion that keeps the derivation load-bearing:
+# point _heredoc_delimiter back at a fixed string and the check is what refuses.
+_DELIM_PREFIX = "SYSIBLE_BASELINE_SLS"
+
+
+def _heredoc_delimiter(body: str) -> str:
+    """The heredoc delimiter for this exact body. Deterministic — the command
+    for a given state is stable, so it is reviewable and diffable — but not a
+    value the body's author can predict."""
+    return f"{_DELIM_PREFIX}_{hashlib.sha256(body.encode('utf-8', 'replace')).hexdigest()[:16]}"
+
+
+def _reject_delimiter_line(body: str, delim: str) -> None:
+    """Refuse a body that would close its own heredoc.
+
+    Exact match, as the shell does it: `<<'X'` ends only on a line that is
+    precisely X, so an indented or padded occurrence is ordinary data and is
+    left alone. (`<<-` would strip leading tabs; this is not that form.)
+    """
+    for n, line in enumerate(body.split("\n"), 1):
+        if line == delim:
+            raise ValueError(
+                f"refusing to apply this state: line {n} would close the heredoc "
+                "that carries it to the host, and everything after it would run "
+                "as a shell command")
 
 
 def apply_command(sls_text: str, *, test: bool = False, state_name: str = "baseline") -> str:
@@ -54,15 +103,23 @@ def apply_command(sls_text: str, *, test: bool = False, state_name: str = "basel
         raise ValueError("refusing to apply an empty state: nothing to declare")
     name = "".join(c for c in state_name if c.isalnum() or c in "-_") or "baseline"
     # A heredoc keeps the YAML out of argv entirely — states are multi-line and
-    # routinely contain quotes, backslashes and $ in file contents.
+    # routinely contain quotes, backslashes and $ in file contents. See the
+    # delimiter helpers above for why it is derived rather than fixed.
+    #
+    # rstrip() FIRST, then derive and check: the body that goes into the command
+    # is the body that must be checked, and rstrip can turn a padded last line
+    # into a bare one.
+    body = sls_text.rstrip()
+    delim = _heredoc_delimiter(body)
+    _reject_delimiter_line(body, delim)
     return (
         "set -e; "
         f"_r=$(mktemp -d /tmp/sysible-baseline.XXXXXX); "
         f"trap 'rm -rf \"$_r\"' EXIT; "
         f"mkdir -p \"$_r/states\"; "
-        f"cat > \"$_r/states/{name}.sls\" <<'SYSIBLE_BASELINE_SLS'\n"
-        f"{sls_text.rstrip()}\n"
-        "SYSIBLE_BASELINE_SLS\n"
+        f"cat > \"$_r/states/{name}.sls\" <<'{delim}'\n"
+        f"{body}\n"
+        f"{delim}\n"
         f"salt-call --local --retcode-passthrough --out=json "
         f"--file-root=\"$_r/states\" state.apply {shlex.quote(name)}"
         + (" test=True" if test else "")
