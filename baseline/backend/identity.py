@@ -13,9 +13,32 @@ with the caller's identity plus a shared-secret proof:
     X-Sysible-Auth: <shared secret> proves the request came through the gateway
 
 TRUST BOUNDARY: in gateway mode Baseline is reachable ONLY through the gateway,
-which stamps X-Sysible-Auth with the shared secret on every request it forwards. A
-browser hitting Baseline directly can't know that secret, so it can never spoof an
-identity — the constant-time secret match IS the boundary.
+which stamps X-Sysible-Auth on every request it forwards. A browser hitting
+Baseline directly can't know that secret, so it can never spoof an identity —
+the constant-time secret match IS the boundary.
+
+WHICH SECRET, AND WHY IT IS NOT THE PLATFORM-WIDE ONE. "A browser hitting
+Baseline directly" was never the whole threat. docker-compose.yml publishes this
+container's :8080 — the browser console AND the agent API, one app — on the
+docker bridge, so that the Controller (a container in a different compose
+project) can reach the agent endpoints. Anything else on that bridge can reach
+the console routes at the same address. And the platform-wide
+SYSIBLE_SSO_SHARED_SECRET is held by every service on the stack: the IdP, the
+Visualizer, Flashback, the Controller, SLEP. So a flaw in ANY of them was one hop
+from a forged Baseline SUPERUSER — read the secret out of your own environment,
+POST to the bridge port with X-Sysible-User and X-Sysible-Role, and declare a
+state. Baseline states run as root on every host they are assigned to.
+
+SYSIBLE_BASELINE_GATEWAY_SECRET is held only by the gateway (which stamps it)
+and the Visualizer (which reads Baseline's feeds directly, by design, carrying
+the viewer's own identity). That is the same split, and the same reasoning,
+that SYSIBLE_UPDATER_SECRET already makes for the updater — the component that
+holds the host's Docker socket.
+
+It FALLS BACK to the platform-wide secret when unset, so an install that has not
+re-run install.sh keeps working rather than locking its operators out. The
+fallback restores the hop, so it says so on every start instead of degrading
+quietly.
 
 Agents (the capture/restore side) are not browsers and never carry an SSO session;
 they authenticate to the ingest/restore endpoints with a bearer agent token.
@@ -34,7 +57,20 @@ from . import env
 
 # ---- gateway SSO trust -----------------------------------------------------
 _TRUST_GATEWAY = env.getenv("TRUST_GATEWAY_AUTH", "0") == "1"
-_SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
+# Baseline's OWN gateway secret, falling back to the platform-wide one. See the
+# module docstring for why the two are not the same thing.
+_SSO_SECRET = os.getenv("SYSIBLE_BASELINE_GATEWAY_SECRET", "")
+_SHARED_FALLBACK = not _SSO_SECRET
+if _SHARED_FALLBACK:
+    _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
+if _TRUST_GATEWAY and _SSO_SECRET and _SHARED_FALLBACK:
+    print("[sysible-baseline] SYSIBLE_BASELINE_GATEWAY_SECRET is not set; falling back "
+          "to the PLATFORM-WIDE SYSIBLE_SSO_SHARED_SECRET. Every service on this "
+          "network holds that value, and this container's console port is published "
+          "on the docker bridge — so any one of them can assert a Baseline superuser "
+          "identity and declare a state that runs as root on the fleet. Re-run "
+          "install.sh (or set SYSIBLE_BASELINE_GATEWAY_SECRET in the SLOP .env and "
+          "recreate gateway + baseline + visualizer) to separate them.", flush=True)
 
 # ---- agent bearer token (capture + restore polling) ------------------------
 _AGENT_TOKEN = env.getenv("AGENT_TOKEN", "")

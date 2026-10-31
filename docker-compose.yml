@@ -88,6 +88,8 @@ services:
       # SYSIBLE_SSO_SHARED_SECRET, or the apps fail closed and show their own login.
       # install.sh generates one into .env; set it yourself for a manual bring-up.
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # See the baseline service for why this is not the platform-wide secret.
+      SYSIBLE_BASELINE_GATEWAY_SECRET: ${SYSIBLE_BASELINE_GATEWAY_SECRET:-${SYSIBLE_SSO_SHARED_SECRET:-}}
       # Where the apps actually listen (host:port). Defaults assume they publish on
       # this host; override if they run elsewhere or on a shared docker network.
       SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
@@ -204,6 +206,15 @@ services:
     environment:
       SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH: "1"
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # Baseline's OWN gateway secret, falling back to the platform-wide one so an
+      # install that has not re-run install.sh keeps working unchanged. Held by the
+      # gateway (which stamps it into X-Sysible-Auth for /baseline only), Baseline
+      # (which checks it) and the Visualizer (which reads Baseline's feeds directly)
+      # — deliberately NOT by every service on the stack. This container publishes
+      # its :8080 on the docker bridge so the Controller can reach the agent API, and
+      # that port serves the browser console too; a Baseline state runs as root on
+      # every host it is assigned to. See baseline/backend/identity.py.
+      SYSIBLE_BASELINE_GATEWAY_SECRET: ${SYSIBLE_BASELINE_GATEWAY_SECRET:-${SYSIBLE_SSO_SHARED_SECRET:-}}
       # The Controller presents this to read desired state and post results.
       # Empty = Baseline refuses both, which is the right default for a service
       # that describes a whole fleet's configuration.
@@ -241,6 +252,8 @@ services:
     environment:
       SYSIBLE_VISUALIZER_TRUST_GATEWAY_AUTH: "1"
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # See the baseline service for why this is not the platform-wide secret.
+      SYSIBLE_BASELINE_GATEWAY_SECRET: ${SYSIBLE_BASELINE_GATEWAY_SECRET:-${SYSIBLE_SSO_SHARED_SECRET:-}}
       # Where to read each app's activity/audit API. Same values the gateway uses.
       SLOP_CONTROLLER_UPSTREAM: ${SLOP_CONTROLLER_UPSTREAM:-host.docker.internal:8800}
       SLOP_SLEP_UPSTREAM: ${SLOP_SLEP_UPSTREAM:-host.docker.internal:8810}

@@ -48,9 +48,18 @@
 }
 
 # ---- SSO for a fronted app, mounted under a PATH prefix --------------------
-# Imported by the site once per app:  import appsite <prefix> <upstream-url>
+# Imported by the site once per app:
+#   import appsite <prefix> <upstream-url> <gateway-secret>
 #   {args[0]} = the URL path prefix (e.g. /controller)
 #   {args[1]} = the app's upstream (host:port)
+#   {args[2]} = the secret stamped into X-Sysible-Auth for THIS app
+#
+# The secret is per-app because it does not have to be the same everywhere, and
+# for Baseline it must not be: its container publishes the console port on the
+# docker bridge so the Controller can reach its agent API, and the platform-wide
+# secret is held by every service on the stack — so a flaw in any one of them
+# was one hop from a forged Baseline superuser, which can declare a state that
+# runs as root on the fleet. See baseline/backend/identity.py.
 # Steps run in written order: match the prefix -> strip forged identity ->
 # forward_auth (sets real identity, redirect to /login on miss) -> stamp the
 # shared secret -> strip the prefix -> proxy to the app (which serves at root).
@@ -98,7 +107,8 @@
 			}
 
 			# 3) Prove to the app that this request really came through the gateway.
-			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
+			#    Per-app secret — see the snippet header.
+			request_header X-Sysible-Auth {args[2]}
 
 			# 4) Drop the prefix so the app sees its own root paths (/, /api, /assets,
 			#    websockets). The app's front end was built with this prefix as its
@@ -188,7 +198,7 @@
 					redir * /login?next={uri} 302
 				}
 			}
-			request_header X-Sysible-Auth {$SYSIBLE_SSO_SHARED_SECRET}
+			request_header X-Sysible-Auth {args[2]}
 			uri strip_prefix {args[0]}
 			reverse_proxy {args[1]} {
 				# See (appsite): the prefix this route just stripped, so an app that
@@ -384,12 +394,12 @@ sysible.slop {
 	}
 
 	# The three apps, each SSO-gated and prefix-stripped (see the appsite snippet).
-	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800}
-	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810}
-	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700}
+	import appsite /controller https://{$SLOP_CONTROLLER_UPSTREAM:host.docker.internal:8800} {$SYSIBLE_SSO_SHARED_SECRET}
+	import appsite /slep https://{$SLOP_SLEP_UPSTREAM:host.docker.internal:8810} {$SYSIBLE_SSO_SHARED_SECRET}
+	import appsite /connect https://{$SLOP_CONNECT_UPSTREAM:host.docker.internal:8700} {$SYSIBLE_SSO_SHARED_SECRET}
 	# Flashback (backup & restore) — SLOP-native service, plain HTTP upstream on
 	# the internal network (see /healthz/flashback).
-	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080}
+	import appsite_http /flashback http://{$SLOP_FLASHBACK_UPSTREAM:flashback:8080} {$SYSIBLE_SSO_SHARED_SECRET}
 
 	# NOTE FOR ANYONE LOOKING FOR THE /flashback -> /baseline REDIRECT: it was
 	# here, and it is deliberately GONE rather than reversed.
@@ -409,10 +419,10 @@ sysible.slop {
 	# A DIFFERENT PRODUCT from Flashback above: Baseline declares what a host must
 	# look like, Flashback records what it does look like. Nothing bridges the two
 	# prefixes — see tests/test_flashback_and_baseline_are_separate_apps.py.
-	import appsite_http /baseline http://{$SLOP_BASELINE_UPSTREAM:baseline:8080}
+	import appsite_http /baseline http://{$SLOP_BASELINE_UPSTREAM:baseline:8080} {$SYSIBLE_BASELINE_GATEWAY_SECRET}
 
 	# Visualizer (activity & logs across every app) — SLOP-native, plain HTTP.
-	import appsite_http /visualizer http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080}
+	import appsite_http /visualizer http://{$SLOP_VISUALIZER_UPSTREAM:visualizer:8080} {$SYSIBLE_SSO_SHARED_SECRET}
 
 	# The portal itself (root) — require sign-in, then serve the static launcher.
 	handle {

@@ -52,7 +52,7 @@ def test_forwards_the_callers_own_identity_not_client_headers(mod, monkeypatch):
     app_mod, sources = mod
     seen = {}
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         seen["headers"] = sources._headers(identity)
         return ({"activity": []} if want_json else ""), None
 
@@ -73,7 +73,7 @@ def test_forwards_the_callers_own_identity_not_client_headers(mod, monkeypatch):
 def test_controller_events_are_normalised(mod):
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if url.endswith("/api/activity"):
             return {"activity": [{"id": 7, "timestamp": 1700000000.0, "username": "bob",
                                   "host": "web1", "description": "restart nginx",
@@ -96,7 +96,7 @@ def test_controller_events_are_normalised(mod):
 def test_one_dead_app_does_not_break_the_console(mod):
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         return None, "unreachable (ConnectError)"
 
     import backend.sources as s
@@ -110,7 +110,7 @@ def test_one_dead_app_does_not_break_the_console(mod):
 def test_connect_missing_audit_reads_as_a_note(mod):
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         return None, "endpoint not found (app may predate this feature)"
 
     import backend.sources as s
@@ -220,7 +220,7 @@ def test_signed_in_browser_gets_the_console(client):
 # an auditor's fleet), that the expensive posture sweep is opt-in, and that a dead
 # endpoint degrades the map instead of erroring the whole view.
 def _fleet_upstreams(seen=None):
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if seen is not None:
             seen.setdefault("urls", []).append(url)
             seen["headers"] = __import__("backend.sources", fromlist=["x"])._headers(identity)
@@ -276,7 +276,7 @@ def test_topology_posture_is_opt_in(mod, monkeypatch):
 def test_topology_survives_a_dead_overlay(mod, monkeypatch):
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if url.endswith("/api/hosts"):
             return {"hosts": [{"id": "h1", "label": "web-1", "environment": "Prod"}]}, None
         return None, "unreachable (ConnectError)"
@@ -315,7 +315,7 @@ def test_topology_requires_a_signed_in_caller(mod):
 def test_controller_source_is_taken_from_the_upstream(mod):
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if url.endswith("/api/activity"):
             return {"activity": [
                 {"id": 1, "timestamp": 1.0, "username": "bob", "host": "web1",
@@ -339,7 +339,7 @@ def test_an_upstream_source_we_do_not_know_falls_back_to_the_actor(mod):
     filter vocabulary — the chips would silently drop those rows."""
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if url.endswith("/api/activity"):
             return {"activity": [
                 {"id": 1, "timestamp": 1.0, "username": "bob", "description": "x",
@@ -363,7 +363,7 @@ def test_apps_without_a_source_are_classified_by_actor(mod):
     service identity (or an unattributed row) is the app's own automation."""
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         return {"entries": [
             {"id": 1, "ts": 1.0, "actor": "alice", "action": "opened a terminal"},
             {"id": 2, "ts": 2.0, "actor": "system", "action": "pruned old snapshots"},
@@ -382,7 +382,7 @@ def test_every_event_carries_a_known_source(mod):
     the filter understands — otherwise a chip would hide rows with no way back."""
     app_mod, sources = mod
 
-    def fake_get(url, identity, params=None, want_json=True):
+    def fake_get(url, identity, params=None, want_json=True, secret=None):
         if url.endswith("/api/runs"):
             return {"runs": [{"id": 1, "created": 1.0, "created_by": "carol",
                               "status": "ok", "kind": "playbook"}]}, None

@@ -380,6 +380,43 @@ if [ -z "$UPD_SECRET" ]; then
 fi
 export SYSIBLE_UPDATER_SECRET="$UPD_SECRET"
 
+# ---- Baseline's own gateway secret (one per install; persisted in this .env) --
+# Baseline checks THIS instead of the platform-wide SYSIBLE_SSO_SHARED_SECRET
+# when deciding whether to believe an asserted X-Sysible-User / X-Sysible-Role.
+# Its container publishes :8080 on the docker bridge so the Controller (a
+# container in a different compose project) can reach the agent API — and that
+# same port serves the browser console. With the platform-wide secret, which
+# EVERY service on this network holds, a flaw in any one of them was one hop
+# from a forged Baseline superuser: read the secret out of your own environment,
+# POST to the bridge port, declare a state. A Baseline state runs as root on
+# every host it is assigned to.
+#
+# Three holders now: the gateway (which stamps it for /baseline only), Baseline
+# itself, and the Visualizer (which reads Baseline's run feed directly). Same
+# split, and same reasoning, as SYSIBLE_UPDATER_SECRET above.
+#
+# docker-compose.yml falls back to the shared secret when this is unset, so an
+# install that has not re-run this script keeps working — Baseline warns about it
+# on every start.
+_bl_gw_secret_from_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^SYSIBLE_BASELINE_GATEWAY_SECRET=\(..*\)$/\1/p' "$ENV_FILE" | tail -n1
+}
+BL_GW_SECRET="${SYSIBLE_BASELINE_GATEWAY_SECRET:-$(_bl_gw_secret_from_env || true)}"
+if [ -z "$BL_GW_SECRET" ]; then
+  BL_GW_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  # Same reasoning as the SSO and updater secrets: /bin/sh has no pipefail, so a
+  # partial failure in the /dev/urandom fallback pipe is masked, and a short or
+  # empty value here would be a forged superuser on a tool that runs as root.
+  case "$BL_GW_SECRET" in
+    *[!0-9a-f]* | "") die "failed to generate a valid Baseline gateway secret (need 64 hex chars)." ;;
+  esac
+  [ "${#BL_GW_SECRET}" -eq 64 ] || die "generated Baseline gateway secret is not 64 hex chars (got ${#BL_GW_SECRET})."
+  _upsert_env SYSIBLE_BASELINE_GATEWAY_SECRET "$BL_GW_SECRET"
+  say "Generated a Baseline gateway secret into $ENV_FILE"
+fi
+export SYSIBLE_BASELINE_GATEWAY_SECRET="$BL_GW_SECRET"
+
 # ---- Baseline agent token (one per install; persisted in this repo's .env) ----
 # Baseline's snapshot-ingest and restore endpoints are authenticated by a bearer
 # token, and they FAIL CLOSED when it is unset — so without this, config backups

@@ -65,23 +65,37 @@ def _url(upstream: str, default_scheme: str) -> str:
     return f"{default_scheme}://{u}"
 
 
-def _headers(identity) -> dict:
+# Baseline checks its OWN gateway secret rather than the platform-wide one: its
+# container publishes the console port on the docker bridge so the Controller can
+# reach the agent API, and a Baseline state runs as root on the fleet, so a secret
+# every service holds was one hop from a forged superuser there (see
+# baseline/backend/identity.py). The Visualizer is one of the three holders by
+# design, because it reads Baseline's feeds directly. Falls back to the shared
+# secret, matching Baseline's own fallback, so an install that has not re-run
+# install.sh is unchanged.
+_BASELINE_SECRET = os.getenv("SYSIBLE_BASELINE_GATEWAY_SECRET", "") or _SSO_SECRET
+
+
+def _headers(identity, secret: str | None = None) -> dict:
     """The caller's OWN identity, re-stamped for the upstream. Values come from the
-    validated Identity, never from client-supplied headers."""
+    validated Identity, never from client-supplied headers. `secret` overrides the
+    platform-wide proof for an app that checks its own."""
     h = {"Accept": "application/json"}
-    if _SSO_SECRET:
-        h["X-Sysible-Auth"] = _SSO_SECRET
+    proof = secret if secret is not None else _SSO_SECRET
+    if proof:
+        h["X-Sysible-Auth"] = proof
         h["X-Sysible-User"] = identity.user
         h["X-Sysible-Role"] = identity.role
     return h
 
 
-def _get(url: str, identity, params: dict | None = None, want_json: bool = True):
+def _get(url: str, identity, params: dict | None = None, want_json: bool = True,
+         secret: str | None = None):
     """Fetch one upstream endpoint. Returns (data, error). `error` is a short
     operator-facing string; never raises, so one dead app can't blank the console."""
     try:
         with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
-            r = c.get(url, headers=_headers(identity), params=params or {})
+            r = c.get(url, headers=_headers(identity, secret), params=params or {})
     except Exception as e:                                  # network/DNS/TLS/timeout
         return None, f"unreachable ({type(e).__name__})"
     if r.status_code in (401, 403):
@@ -298,7 +312,10 @@ def _baseline(identity, limit: int) -> dict:
     declared" is deliberately kept rather than filtered — a fleet that needed
     no changes is the thing an operator most wants to be able to see.
     """
-    data, err = _get(_url(_BASELINE, "http") + "/api/runs", identity, {"limit": limit})
+    # Baseline's own gateway secret, not the platform-wide one — see
+    # _BASELINE_SECRET above.
+    data, err = _get(_url(_BASELINE, "http") + "/api/runs", identity, {"limit": limit},
+                     secret=_BASELINE_SECRET)
     if err:
         return {"events": [], "errors": [f"runs: {err}"], "notes": []}
     events = []
