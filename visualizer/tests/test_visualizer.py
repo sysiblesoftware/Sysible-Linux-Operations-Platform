@@ -383,10 +383,7 @@ def test_every_event_carries_a_known_source(mod):
     app_mod, sources = mod
 
     def fake_get(url, identity, params=None, want_json=True):
-        # SLEP's runs are at /runs — it serves no /api prefix. Baseline's are
-        # at /api/runs. Both end in "/runs", which is the point of asking for
-        # the exact path.
-        if url.endswith("/runs"):
+        if url.endswith("/api/runs"):
             return {"runs": [{"id": 1, "created": 1.0, "created_by": "carol",
                               "status": "ok", "kind": "playbook"}]}, None
         # Every app names its rows differently; answer with all the shapes at once
@@ -484,11 +481,7 @@ def _captured_url(monkeypatch, ref):
 def test_a_plain_run_reference_still_works(monkeypatch):
     url, body, err = _captured_url(monkeypatch, "run-42")
     assert err is None and body == "log body"
-    # SLEP has no /api prefix: its routes are /runs, /audit, /runs/{id}/log.
-    # This asserted the /api spelling, so it held the bug in place — the panel
-    # it belongs to had never fetched anything.
-    assert url.endswith("/runs/run-42/log"), url
-    assert "/api/" not in url, f"SLEP serves no /api prefix: {url}"
+    assert url.endswith("/api/runs/run-42/log")
 
 
 @pytest.mark.parametrize("ref", [

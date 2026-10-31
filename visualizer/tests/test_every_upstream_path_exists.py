@@ -1,24 +1,27 @@
-"""Every path this console calls is a route the service on the other end has.
+"""Every path this console calls is one the service on the other end serves.
 
-The Visualizer reads five services directly on their own ports. Nothing checks
-that the paths it builds are paths those services serve, and the failure is
-quiet: an unknown path answers 404, the panel shows "runs: HTTP 404" or just a
-note, and the reasonable reading is "that app has nothing to show".
+The Visualizer reads five services directly on their own ports. Nothing checked
+that the paths it builds exist there, and the failure mode is quiet: an unknown
+path answers 404 or, worse, HTML, the panel shows a short note, and the
+reasonable reading is "that app has nothing to show today".
 
-SLEP's whole panel had never worked. Its API has NO /api prefix — the routes
-are /runs, /audit and /runs/{id}/log on its own port — and this file asked for
-/api/runs and /api/audit. The gateway strips /slep for a browser; a service
-talking to the upstream directly gets no such help, and nobody noticed because
-an empty activity panel looks like a quiet day.
+THE SLEP HOP IS NOT WHAT IT LOOKS LIKE, and this test exists mostly to record
+it. :8810 is SLEP's web CONSOLE, not its API. The console serves exactly three
+routes:
 
-This test reads the ROUTES OUT OF THE OTHER REPOS. It is skipped where a repo
-is not checked out beside this one, which means it is not a guarantee on every
-machine — but on a machine with the platform checked out it is the only thing
-that would have caught this.
+    /api/health          — answered locally
+    /api/{path:path}     — proxied to the backend on :9100 WITH THE /api PREFIX
+                           STRIPPED, because the backend has no /api
+    /{path:path}         — SPA fallback: serves index.html
+
+So `/api/runs` here reaches the backend's `/runs` and is correct, and `/runs`
+here does NOT reach the backend's `/runs` — it hits the SPA fallback and comes
+back as a page of HTML. Reading the backend's routes alone says the opposite,
+convincingly, and the "fix" that follows from it silently replaces a working
+call with one that returns markup to a JSON parser.
 
 Run: pytest visualizer/tests/test_every_upstream_path_exists.py
 """
-import os
 import pathlib
 import re
 import sys
@@ -29,44 +32,35 @@ HERE = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 SLOP = HERE.parent
 SIBLINGS = SLOP.parent
+SLEP = SIBLINGS / "sysible-linux-engineering-platform"
 
-from backend import sources                                  # noqa: E402
-
-# Where each upstream's routes are declared.
-SERVICES = {
-    "_CONTROLLER": [SIBLINGS / "Sysible-Controller" / "webgui" / "server.py"],
-    "_SLEP": list((SIBLINGS / "sysible-linux-engineering-platform" / "backend")
-                  .glob("*.py")) if (SIBLINGS / "sysible-linux-engineering-platform"
-                                     / "backend").is_dir() else [],
-    "_FLASHBACK": [SLOP / "flashback" / "backend" / "app.py"],
-    "_BASELINE": [SLOP / "baseline" / "backend" / "app.py"],
-    # Connect is not part of this checkout.
-    "_CONNECT": [],
-}
-
-ROUTE = re.compile(r'@(?:app|router)\.(?:get|post|put|delete|patch)\(\s*"([^"]+)"')
+ROUTE = re.compile(r'@(?:app|router)\.(?:get|post|put|delete|patch|api_route)\(\s*"([^"]+)"')
 CALL_DIRECT = re.compile(r'_url\((_[A-Z]+),\s*"https?"\)\s*\+\s*f?"([^"]+)"')
 CALL_BASE = re.compile(r'_get\(f"\{base\}([^"]+)"')
 BASE_SET = re.compile(r'base = _url\((_[A-Z]+)')
 
+# Which file declares the routes each upstream answers on the port we dial, and
+# whether that port strips an /api prefix before handling.
+UPSTREAMS = {
+    "_CONTROLLER": (SIBLINGS / "Sysible-Controller" / "webgui" / "server.py", False),
+    "_SLEP": (SLEP / "backend" / "app.py", True),
+    "_FLASHBACK": (SLOP / "flashback" / "backend" / "app.py", False),
+    "_BASELINE": (SLOP / "baseline" / "backend" / "app.py", False),
+    "_CONNECT": (None, False),          # not part of this checkout
+}
+
 
 def _norm(p):
-    p = re.sub(r"\{[^}]*\}", "*", p)
-    return "/" + p.strip("/").split("?")[0]
+    return "/" + re.sub(r"\{[^}]*\}", "*", p).strip("/").split("?")[0]
 
 
-def _declared(service):
-    out = set()
-    for f in SERVICES.get(service, []):
-        if not f.is_file():
-            continue
-        for m in ROUTE.findall(f.read_text(encoding="utf-8", errors="ignore")):
-            out.add(_norm(m))
-    return out
+def _declared(path):
+    if path is None or not path.is_file():
+        return set()
+    return {_norm(m) for m in ROUTE.findall(path.read_text(encoding="utf-8", errors="ignore"))}
 
 
 def _calls():
-    """(service, path) for every upstream request this module makes."""
     text = (HERE / "backend" / "sources.py").read_text(encoding="utf-8")
     found, cur = [], None
     for line in text.splitlines():
@@ -93,25 +87,38 @@ def test_this_console_actually_calls_several_upstreams():
 
 
 @pytest.mark.parametrize("service,path", _calls())
-def test_the_path_is_a_route_that_service_serves(service, path):
-    if not SERVICES.get(service):
+def test_the_path_reaches_a_real_route(service, path):
+    source, strips_api = UPSTREAMS.get(service, (None, False))
+    if source is None or not source.is_file():
         pytest.skip(f"{service} is not checked out beside this repo")
-    declared = _declared(service)
-    assert declared, f"found no routes at all for {service}"
     want = _norm(path)
-    # A path with an interpolated segment normalises to *; match loosely.
+    if strips_api:
+        # The console on this port forwards /api/<rest> to the backend as
+        # /<rest>. A path that does NOT start with /api never reaches the
+        # backend at all — it is answered by the SPA fallback with HTML.
+        assert want.startswith("/api/"), (
+            f"{service} is reached through a console that only proxies /api/*; "
+            f"{want} would be answered by its SPA fallback with a page of HTML, "
+            f"which this console would then try to parse as JSON")
+        want = "/" + want[len("/api/"):]
+    declared = _declared(source)
+    assert declared, f"found no routes at all in {source}"
     ok = any(want == d or re.fullmatch(d.replace("*", "[^/]+"), want)
              or re.fullmatch(want.replace("*", "[^/]+"), d) for d in declared)
     assert ok, (
-        f"{service} has no route {want} — this console calls it anyway, and a "
-        f"404 here shows up as an empty panel rather than an error. "
-        f"Nearest: {sorted(d for d in declared if d.split('/')[1:2] == want.split('/')[1:2])[:6]}")
+        f"{service} serves no route {want} ({source.name}). A 404 here shows up "
+        f"as an empty panel, not an error. Nearest: "
+        f"{sorted(d for d in declared if d.split('/')[1:2] == want.split('/')[1:2])[:6]}")
 
 
-def test_slep_is_addressed_without_an_api_prefix():
-    """The specific one. SLEP serves /runs and /audit at the root of its port;
-    /api/runs matched nothing and the panel read as an idle SLEP."""
-    for service, path in _calls():
-        if service == "_SLEP":
-            assert not path.startswith("/api/"), (
-                f"SLEP has no /api prefix, but this calls {path}")
+def test_the_slep_console_proxy_still_strips_the_api_prefix():
+    """The assumption the SLEP rows above rest on. If that proxy is ever changed
+    or removed, every SLEP call here starts returning the SPA's HTML and this is
+    where it should be noticed."""
+    if not (SLEP / "webgui" / "server.py").is_file():
+        pytest.skip("SLEP is not checked out beside this repo")
+    src = (SLEP / "webgui" / "server.py").read_text(encoding="utf-8")
+    assert '@app.api_route("/api/{path:path}"' in src, \
+        "SLEP's console no longer proxies /api/* to its backend"
+    assert re.search(r'url\s*=\s*f"\{BACKEND\}/\{path\}"', src), \
+        "SLEP's console no longer strips the /api prefix when it proxies"
