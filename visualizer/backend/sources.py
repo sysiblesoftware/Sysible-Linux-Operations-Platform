@@ -223,11 +223,29 @@ def _slep(identity, limit: int) -> dict:
     events, errors, notes = [], [], []
 
     # Pipeline runs are SLEP's real activity: readable by any signed-in role.
-    data, err = _get(f"{base}/api/runs", identity)
+    #
+    # PASS THE LIMIT. This asked for no limit and then sliced the reply to
+    # `limit`, which can be 500 — and SLEP's /runs took no limit and capped at
+    # 100, so a busy SLEP's feed arrived truncated with nothing in `notes` to
+    # say so, and looked complete. SLEP now accepts and echoes a bounded limit;
+    # an older SLEP ignores the query parameter and still answers 100, which is
+    # what `notes` below reports.
+    data, err = _get(f"{base}/api/runs", identity, {"limit": limit})
     if err:
         errors.append(f"runs: {err}")
     else:
-        for r in (data or {}).get("runs", [])[:limit]:
+        rows = (data or {}).get("runs", [])
+        served = (data or {}).get("limit")
+        if served is None and len(rows) >= 100 and limit > 100:
+            # No `limit` in the reply at all: a SLEP from before it accepted one,
+            # which caps at 100. Say so rather than presenting a truncated feed
+            # as the whole story.
+            notes.append("this SLEP returns at most 100 runs per request "
+                         "(upgrade it to raise the limit)")
+        elif served is not None and len(rows) >= served and limit > served:
+            notes.append(f"SLEP served its maximum of {served} runs; "
+                         "the feed may be truncated")
+        for r in rows[:limit]:
             status = r.get("status") or "?"
             events.append(_ev(
                 r.get("finished") or r.get("started") or r.get("created"),
