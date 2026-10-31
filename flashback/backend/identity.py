@@ -108,16 +108,13 @@ def agent_auth_ok(request) -> bool:
     if sent.lower().startswith("bearer "):
         sent = sent[7:].strip()
     else:
-        # The non-Authorization fallback header, under both spellings. The
-        # Controller is the only client, and Controller and Flashback are
-        # SEPARATE deployments on separate upgrade schedules: a Controller
-        # still sending x-sysible-flashback-agent must keep authenticating
-        # against a rebranded Flashback, or config backup stops fleet-wide at
-        # the moment one half is updated and the other is not.
-        for name in ("x-sysible-flashback-agent", "x-sysible-flashback-agent"):
-            sent = (request.headers.get(name) or "").strip()
-            if sent:
-                break
+        # The non-Authorization fallback header. ONE name: Flashback has been
+        # called Flashback for this header's whole life, so there is no second
+        # spelling to accept. (It was written as a two-element loop listing the
+        # same name twice, under a comment about honouring "both spellings" —
+        # which read as a compatibility shim that was not there. Baseline has
+        # the shim, because Baseline is the one that was renamed.)
+        sent = (request.headers.get("x-sysible-flashback-agent") or "").strip()
     return bool(sent) and hmac.compare_digest(sent, _AGENT_TOKEN)
 
 

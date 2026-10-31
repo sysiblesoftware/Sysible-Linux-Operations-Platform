@@ -103,10 +103,14 @@ def agent_auth_ok(request) -> bool:
         # The non-Authorization fallback header, under both spellings. The
         # Controller is the only client, and Controller and Baseline are
         # SEPARATE deployments on separate upgrade schedules: a Controller
-        # still sending x-sysible-baseline-agent must keep authenticating
-        # against a rebranded Baseline, or config backup stops fleet-wide at
+        # still sending the pre-rebrand x-sysible-flashback-agent must keep
+        # authenticating here, or the desired-state channel stops fleet-wide at
         # the moment one half is updated and the other is not.
-        for name in ("x-sysible-baseline-agent", "x-sysible-baseline-agent"):
+        #
+        # Both names, once each. This listed x-sysible-baseline-agent TWICE, so
+        # the loop checked one header and then checked it again and the shim the
+        # comment describes did not exist.
+        for name in ("x-sysible-baseline-agent", "x-sysible-flashback-agent"):
             sent = (request.headers.get(name) or "").strip()
             if sent:
                 break
