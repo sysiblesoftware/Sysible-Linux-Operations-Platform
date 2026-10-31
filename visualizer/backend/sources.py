@@ -56,13 +56,43 @@ MAX_LIMIT = int(os.getenv("SYSIBLE_VISUALIZER_MAX_LIMIT", "500"))
 
 
 def _url(upstream: str, default_scheme: str) -> str:
-    """Build a base URL from an upstream env value. The value may already carry a
-    scheme (e.g. "http://host:8810" when an app runs with TLS off); otherwise the
-    app's normal scheme is applied. Mirrors how the gateway addresses each app."""
+    """Build a base URL from a SLOP_*_UPSTREAM value.
+
+    The contract is HOST:PORT, with no scheme — because the gateway is the other
+    reader of these variables and it cannot accept one. gateway/Caddyfile writes
+    the scheme in front of the value at the import site (`https://{$SLOP_SLEP_
+    UPSTREAM:...}`), so `SLOP_SLEP_UPSTREAM=http://host:8810` becomes
+    `https://http://host:8810` and Caddy refuses to adapt the config at all:
+    the gateway will not start, with an error that does not mention the scheme.
+
+    This used to accept a scheme inside the value and document it as the way to
+    reach an app running with TLS off, which made the same variable mean two
+    different things to the platform's two readers. A scheme is stripped here
+    rather than honoured, so an operator who set one gets a working Visualizer
+    and a message naming what the gateway is about to reject — instead of the
+    Visualizer being the only component that agreed with them.
+    """
     u = (upstream or "").strip().rstrip("/")
-    if u.startswith(("http://", "https://")):
-        return u
+    for scheme in ("http://", "https://"):
+        if u.lower().startswith(scheme):
+            u = u[len(scheme):]
+            break
     return f"{default_scheme}://{u}"
+
+
+def _warn_about_schemes() -> None:
+    """Say so once, at startup, for each upstream that carries a scheme."""
+    for name in ("SLOP_CONTROLLER_UPSTREAM", "SLOP_SLEP_UPSTREAM",
+                 "SLOP_CONNECT_UPSTREAM", "SLOP_FLASHBACK_UPSTREAM",
+                 "SLOP_BASELINE_UPSTREAM", "SLOP_VISUALIZER_UPSTREAM"):
+        v = (os.getenv(name) or "").strip().lower()
+        if v.startswith(("http://", "https://")):
+            print(f"[sysible-visualizer] {name} carries a scheme ({v.split('://')[0]}://). "
+                  "These variables are HOST:PORT — the gateway writes the scheme itself "
+                  "and will refuse to start with one here. Ignoring it.", flush=True)
+
+
+_warn_about_schemes()
 
 
 # Baseline checks its OWN gateway secret rather than the platform-wide one: its
