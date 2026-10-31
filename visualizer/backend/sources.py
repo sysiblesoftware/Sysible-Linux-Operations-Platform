@@ -207,12 +207,18 @@ def _controller(identity, limit: int) -> dict:
     return {"events": events, "errors": errors, "notes": notes}
 
 
+# SLEP's API has NO /api PREFIX. Its routes are /runs, /audit, /runs/{id}/log
+# on its own port (backend/app.py). The /api/... spelling here matched nothing,
+# so every SLEP panel in this console has only ever shown "runs: HTTP 404" and
+# a note saying the audit trail could not be read — on a SLEP that was working.
+# The gateway strips /slep for a browser; this talks to the upstream directly
+# and gets no such help.
 def _slep(identity, limit: int) -> dict:
     base = _url(_SLEP, "https")
     events, errors, notes = [], [], []
 
     # Pipeline runs are SLEP's real activity: readable by any signed-in role.
-    data, err = _get(f"{base}/api/runs", identity)
+    data, err = _get(f"{base}/runs", identity)
     if err:
         errors.append(f"runs: {err}")
     else:
@@ -224,7 +230,7 @@ def _slep(identity, limit: int) -> dict:
                 f"target={r.get('target') or '-'} exit={r.get('exit_code')}", r.get("id")))
 
     # The admin audit chain — superuser-only upstream, so a viewer just gets a note.
-    data, err = _get(f"{base}/api/audit", identity, {"limit": limit})
+    data, err = _get(f"{base}/audit", identity, {"limit": limit})
     if err:
         notes.append(f"audit: {err}")
     else:
@@ -345,7 +351,7 @@ def fetch_log(app: str, identity, ref: str) -> tuple[str | None, str | None]:
         ref = (ref or "").strip()
         if not _REF_RE.match(ref):
             return None, "not a valid run reference"
-        return _get(_url(_SLEP, "https") + f"/api/runs/{_quote(ref, safe='')}/log",
+        return _get(_url(_SLEP, "https") + f"/runs/{_quote(ref, safe='')}/log",
                     identity, want_json=False)
     if app == "controller":
         return _get(_url(_CONTROLLER, "https") + "/api/controller-log", identity,
