@@ -37,7 +37,14 @@ _AGENT_TOKEN = env.getenv("AGENT_TOKEN", "")
 
 # ---- standalone/dev fallback identity --------------------------------------
 _LOCAL_USER = env.getenv("LOCAL_USER", "local")
-_LOCAL_ROLE = env.getenv("LOCAL_ROLE", "superuser")
+# Least privilege for a mode that is UNAUTHENTICATED by definition. This
+# defaulted to 'superuser', so a service started without gateway trust — a
+# laptop run, a misconfigured .env, a container brought up by hand — answered
+# every caller as a full administrator. Read-only costs a dev one environment
+# variable and costs an accident nothing. Production is unaffected:
+# docker-compose.yml sets TRUST_GATEWAY_AUTH=1 for all three services, so this
+# value is never consulted there.
+_LOCAL_ROLE = env.getenv("LOCAL_ROLE", "auditor")
 
 ROLES = ("superuser", "operator", "auditor")
 # Only these may take state-changing actions (queue a restore). 'auditor' is
@@ -175,4 +182,5 @@ def startup_notice() -> str:
     if gateway_configured():
         return "Flashback: SSO gateway trust ON — identity taken from the SLOP gateway."
     return ("Flashback: SSO gateway trust OFF — running in UNAUTHENTICATED local mode "
-            f"as '{_LOCAL_USER}' ({_LOCAL_ROLE}). Do not expose this on a network.")
+            f"as '{_LOCAL_USER}' ({_LOCAL_ROLE}) — read-only unless SYSIBLE_FLASHBACK_LOCAL_ROLE=operator"
+            " or =superuser. Do not expose this on a network.")
