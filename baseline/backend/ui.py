@@ -34,10 +34,15 @@ _CSS = """
 
 html,body{margin:0;height:100%}
 
+/* A column, so the three-column grid takes WHAT IS LEFT. It used to claim
+   calc(100vh - 51px) — the header's height, written down — so anything else
+   above it (the message bar, and now the apply panel) pushed the bottom of
+   every column off the screen. */
 body{background:var(--topo) center / cover no-repeat fixed,
 radial-gradient(70% 55% at 15% -10%,rgba(67,160,71,.12),transparent 60%) fixed,
 radial-gradient(70% 60% at 100% 110%,rgba(85,128,238,.09),transparent 55%) fixed,
-var(--bg);color:var(--text);font-family:var(--font);font-size:14px}
+var(--bg);color:var(--text);font-family:var(--font);font-size:14px;
+display:flex;flex-direction:column;overflow:hidden}
 
 a{color:var(--accent2);text-decoration:none}
 
@@ -73,7 +78,7 @@ background:var(--panel);position:sticky;top:0;z-index:5}
    state. */
 .wrap{display:grid;
   grid-template-columns:var(--c1,290px) 6px var(--c2,300px) 6px minmax(0,1fr);
-  gap:0;height:calc(100vh - 51px)}
+  gap:0;flex:1 1 auto;min-height:0}
 .col{overflow:auto;border-right:1px solid var(--line);padding-bottom:2em;min-width:0}
 .col:last-child{border-right:0}
 /* Draggable, like Flashback's: a fleet of long hostnames and a fleet of short
@@ -254,6 +259,50 @@ button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 .msg.ok{background:rgba(76,175,90,.12);color:var(--ok)}
 
+/* ---- the apply panel ----------------------------------------------------
+   An apply is the one thing in this console that reaches out and changes
+   sixteen machines, and it was the one thing with nothing to watch: a toast
+   that said "requested" and hid itself after four seconds, then a page that
+   looked exactly as it had. You could not tell whether it had started, which
+   host it was on, which ones had come back, or what any of them said.
+
+   It is full width and above the columns because it is about the fleet, not
+   about whichever host or state happens to be selected — and because the
+   columns are independently scrollable, so anything inside one of them can be
+   scrolled away from. It stays until it is dismissed or the next apply
+   replaces it; this is a record, not a notification. */
+.applypanel{border-bottom:1px solid var(--line);background:var(--panel);
+padding:.55em 1em .65em;font-size:12.5px;flex:0 0 auto}
+.applypanel .ah{display:flex;align-items:baseline;gap:.7em;min-width:0}
+.applypanel .ah b{font-size:13px}
+.applypanel .ah .sp{margin-left:auto}
+.applypanel .ah .x{border:0;background:transparent;color:var(--muted);
+cursor:pointer;font-size:15px;line-height:1;padding:0 .2em}
+.applypanel .ah .x:hover{color:var(--text)}
+.applybar{height:4px;border-radius:3px;background:var(--line);overflow:hidden;
+margin:.45em 0 .5em}
+.applybar i{display:block;height:100%;background:var(--accent);
+transition:width .25s ease}
+.applybar.bad i{background:var(--err)}
+/* The per-host lines, across the width rather than down it: sixteen hosts one
+   per row is a panel taller than the console. */
+.applyhosts{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));
+gap:.1em .9em;max-height:8.5em;overflow:auto}
+.applyhosts .h{display:flex;gap:.5em;align-items:baseline;min-width:0;
+padding:.1em 0}
+.applyhosts .h .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.applyhosts .h .r{margin-left:auto;font-size:11.5px;white-space:nowrap}
+.applyhosts .h.waiting{color:var(--faint)}
+.applyhosts .h.running .r{color:var(--accent2)}
+.applyhosts .h.ok .r{color:var(--ok)}
+.applyhosts .h.err .r{color:var(--err)}
+.applyhosts .h .why{display:block;color:var(--faint);font-size:11px}
+
+/* The roll-up under a state's name: how many hosts are in each condition. */
+.tally{margin:.1em 0 .7em;font-size:12.5px;color:var(--muted);
+display:flex;flex-wrap:wrap;gap:.15em .5em}
+.tally span{white-space:nowrap}
+
 """ + build_info.CSS
 
 FAVICON_SVG = """\
@@ -327,6 +376,8 @@ def console_page(who) -> str:
     can_write = who.role in ("operator", "superuser")
     body = (
         "<div class=msg id=msg hidden></div>"
+        # Written entirely by renderApply(); hidden until something is applied.
+        "<div class=applypanel id=applypanel hidden></div>"
         "<div class=wrap>"
 
         # 1. BROWSE. The fleet, off to the side — or the declared states, which
@@ -547,21 +598,51 @@ function hostStatus(host, declared){
 // satisfy, so a dot there has to mean "this state, on this host" — showing the
 // state's worst host anywhere puts a red dot beside a state that is perfectly
 // fine here, which is worse than no dot.
+// How THIS state is doing on THIS host, in one phrase — plus when that was
+// last true, because "failing" with no date does not say whether it broke five
+// minutes ago or last Tuesday.
 function hostStateStatus(host, name){
   const runs = (STATE.runs || [])
     .filter((r) => r.host_id === host.id && r.state_name === name && !r.preview);
-  if(!runs.length) return {cls: 'faint', label: 'never applied',
+  if(!runs.length) return {cls: 'faint', label: 'never applied', when: null,
                            note: 'this state has not been applied to this host'};
   const r = runs[0];
-  if(r.failed) return {cls: 'err', label: 'failing', note: r.error || 'the last run could not finish'};
-  if(r.changed) return {cls: 'amber', label: 'drifted',
+  const when = r.started || r.finished || null;
+  const cur = ((STATE.states || []).find((x) => x.name === name) || {}).version;
+  if(r.failed) return {cls: 'err', label: 'failing', when, ran: r.state_version,
+                       note: r.error || 'the last run could not finish'};
+  // A host that satisfied v1 of a state that is now v3 is NOT "as declared".
+  // It is running configuration two edits old, and this console was reporting
+  // it green — which is the most misleading thing a desired-state tool can say,
+  // and the reason "I can't tell what has been applied" is a fair complaint:
+  // the only version on screen was the state's current one.
+  if(cur != null && r.state_version != null && r.state_version < cur){
+    return {cls: 'amber', label: 'out of date', when, ran: r.state_version,
+            note: `last applied v${r.state_version}; this state is now v${cur}`};
+  }
+  if(r.changed) return {cls: 'amber', label: 'drifted', when, ran: r.state_version,
                         note: `the last run had to change ${r.changed}`};
-  return {cls: 'ok', label: 'as declared', note: 'the last run changed nothing'};
+  return {cls: 'ok', label: 'as declared', when, ran: r.state_version,
+          note: 'the last run changed nothing'};
+}
+
+// "3 minutes ago" beats a timestamp for the question actually being asked,
+// which is how stale this is rather than what the clock said.
+function ago(ts){
+  if(!ts) return '';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if(s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if(m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if(h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 // A state is as bad as the worst host it is on: the number worth knowing about
 // "web-stack" is not how many hosts have it but whether any of them is broken.
-const STATE_RANK = {failing: 0, drifted: 1, 'never applied': 2, 'as declared': 3};
+const STATE_RANK = {failing: 0, 'out of date': 1, drifted: 2, 'never applied': 3,
+                    'as declared': 4};
 function stateStatus(name){
   const on = hostsWith(name);
   if(!on.length) return {cls: 'faint', label: 'not assigned', rank: 3,
@@ -750,11 +831,15 @@ function renderMiddle(){
         data-assign="${esc(name)}">Assign…</button>` : '');
   list.innerHTML = on.length
     ? on.map((h) => {
-        const st = hostStatus(h, statesFor(h).all);
+        // THIS state on that host. hostStatus() is the host's roll-up across
+        // every state it has, so it painted a red dot beside a host on a state
+        // page where that state was fine — the failure belonged to a different
+        // state entirely. Same mistake as the "also on" list below.
+        const st = hostStateStatus(h, name);
         const viaEnv = statesFor(h).viaEnv.includes(name);
         return row({name: h.label || h.id, extra: h.address || '',
           pill: viaEnv ? `via ${h.environment}` : '', pillCls: 'inh',
-          dot: st.cls, title: st.note, sel: SEL.host === h.id,
+          dot: st.cls, title: `${st.label} \u2014 ${st.note}`, sel: SEL.host === h.id,
           data: `data-pickhost="${esc(h.id)}"`});
       }).join('')
     : `<div class=empty>Not assigned to anything yet — declaring a state does
@@ -837,12 +922,12 @@ function hostDetail(h){
         ? d.direct.map((n) => { const st = hostStateStatus(h, n);
             return `<div class="ln pick" data-pickstate="${esc(n)}">
               <span class=k>${esc(n)}</span>
-              <span class=faint>assigned to this host</span>
+              <span class="faint when">assigned to this host${st.when ? ' · ' + esc(ago(st.when)) : ''}</span>
               <span class="t ${st.cls}">${esc(st.label)}</span></div>`; }).join('')
           + d.viaEnv.map((n) => { const st = hostStateStatus(h, n);
             return `<div class="ln pick" data-pickstate="${esc(n)}">
               <span class=k>${esc(n)}</span>
-              <span class=faint>via ${esc(h.environment)}</span>
+              <span class="faint when">via ${esc(h.environment)}${st.when ? ' · ' + esc(ago(st.when)) : ''}</span>
               <span class="t ${st.cls}">${esc(st.label)}</span></div>`; }).join('')
         : `<div class=empty>Nothing. A host with no assigned state is not looked at
            by Baseline — it is not reported as compliant, it is simply not
@@ -870,9 +955,22 @@ function stateDetail(name, host){
   const st = stateStatus(name);
   const hostRuns = host ? runsFor(host.id).filter((r) => r.state_name === name) : [];
   const last = hostRuns[0];
+  // The roll-up. "on 17 hosts · failing" says there is a problem and nothing
+  // about its size: one failing host out of seventeen and seventeen out of
+  // seventeen read identically. The tally is the answer to "what has been
+  // applied", in one line, before any scrolling.
+  const tally = {};
+  on.forEach((h) => { const l = hostStateStatus(h, name).label;
+                      tally[l] = (tally[l] || 0) + 1; });
+  const CLS = {failing: 'err', 'out of date': 'amber', drifted: 'amber',
+               'never applied': 'faint', 'as declared': 'ok'};
+  const counts = Object.keys(STATE_RANK).filter((l) => tally[l])
+    .map((l) => `<span class="${CLS[l]}">${tally[l]} ${esc(l)}</span>`)
+    .join('<span class=faint>·</span>');
   let out = `<h2>${esc(name)}</h2>
     <div class=sub>v${esc(s.version)} · on ${on.length} host${on.length === 1 ? '' : 's'}
       · <span class="${st.cls}">${esc(st.label)}</span></div>
+    ${counts ? `<div class=tally>${counts}</div>` : ''}
     <div class=bar>
       ${on.length && CAN_WRITE ? `<button class=primary data-applyall="${esc(name)}"
         >Apply to all ${on.length} host${on.length === 1 ? '' : 's'}</button>` : ''}
@@ -924,9 +1022,15 @@ function stateDetail(name, host){
   out += `<div class=sec><h4>${host ? 'Also on' : 'On these hosts'}</h4><div class=box>`
     + (on.length
         ? on.filter((h) => !host || h.id !== host.id).map((h) => {
-            const hs = hostStatus(h, statesFor(h).all);
+            // THIS state on that host — not hostStatus(), which rolls up every
+            // state the host has. That roll-up put "failing" beside a host on a
+            // state that was fine there, because some OTHER state had failed on
+            // it; the comment on stateStatus() warns about exactly this and
+            // this list was still doing it.
+            const hs = hostStateStatus(h, name);
             return `<div class="ln pick" data-pickhost="${esc(h.id)}">
               <span class=k>${esc(h.label || h.id)}</span>
+              ${hs.when ? `<span class="faint when">${esc(ago(hs.when))}</span>` : ''}
               <span class="t ${hs.cls}">${esc(hs.label)}</span></div>`;
           }).join('') || '<div class=empty>No other host.</div>'
         : `<div class=empty>Not assigned to anything. Declaring a state does not
@@ -1352,61 +1456,162 @@ async function deleteState(name){
 // Every target this state is assigned to. Usually one — an environment, which
 // the Controller fans out across every host in it — but a state can also be
 // assigned to hosts directly, and then there is one per host.
-function targetsOf(stateName){
-  return (STATE.assign || []).filter((a) => a.state === stateName)
-    .map((a) => a.target);
-}
-
+// ---- applying ---------------------------------------------------------------
 // APPLY IT TO ALL OF THEM. The console only ever offered "Apply to <one host>",
 // so a state assigned to sixteen hosts meant visiting sixteen hosts — which is
 // not a workflow, it is the absence of one. Declare, assign, apply: the third
 // step has to be able to mean the same set as the second.
 //
+// ONE REQUEST PER HOST, and this is the whole bug. It used to loop the
+// ASSIGNMENT TARGETS — so a state assigned to `env:production` sent ONE request
+// for `env:production`, and the Controller's _run_baseline_cycle expands that
+// into every host in the environment and runs them all SYNCHRONOUSLY inside
+// that one request. Sixteen hosts' salt-calls, at up to 60s each by the
+// Controller's own task budget, inside a call this service gives up on after
+// 20 seconds. The console reported "the Controller is unreachable" (or nothing
+// at all, twenty seconds later, in a bar at the very top of a page whose
+// content is in three scrolling columns) while the applies carried on running
+// unobserved. "Apply to all 16 hosts doesn't do anything" is exactly what that
+// looks like from the outside.
+//
+// Per host, each request is one host's work and fits in a timeout; each one
+// reports separately; a host assigned the state BOTH directly and through its
+// environment is applied once, not twice; and "16 hosts" is now a count of what
+// was actually asked for rather than of what the button hoped.
+//
 // Worth being exact about what apply DOES, because it is not "apply this one
 // state". Baseline is a convergence tool: the Controller asks for a host's
-// WHOLE desired state and runs all of it (see _run_baseline_cycle). So this
-// brings every host the state reaches up to everything it must satisfy, and
-// the confirmation says so rather than implying a narrower promise.
+// WHOLE desired state and runs all of it. So this brings every host the state
+// reaches up to everything it must satisfy, and the confirmation says so rather
+// than implying a narrower promise.
 async function applyEverywhere(stateName, preview){
-  const targets = targetsOf(stateName);
-  if(!targets.length) return say('That state is not assigned to anything yet.', 'err');
-  const hosts = hostsWith(stateName).length;
+  const hosts = hostsWith(stateName);
+  if(!hosts.length) return say('That state is not assigned to anything yet.', 'err');
+  const n = hosts.length;
   if(!preview && !confirm(
-      `Apply on ${hosts} host${hosts === 1 ? '' : 's'}?\n\n`
-      + `This brings ${hosts === 1 ? 'it' : 'them'} up to everything they must `
+      `Apply on ${n} host${n === 1 ? '' : 's'}?\n\n`
+      + `This brings ${n === 1 ? 'it' : 'them'} up to everything they must `
       + `satisfy, which may include states other than "${stateName}".`)) return;
-  say(`${preview ? 'Previewing' : 'Applying'} on ${hosts} host${hosts === 1 ? '' : 's'}…`);
-  let ok = 0;
-  const failed = [];
-  for(const t of targets){
-    try{
-      await api('hosts/' + encodeURIComponent(t) + '/apply',
-                {method: 'POST', body: JSON.stringify({preview: !!preview})});
-      ok++;
-    }catch(e){ failed.push(`${t}: ${e.message}`); }
-  }
-  // One failed target out of three is not a failure and not a success, and
-  // reporting either would be a lie about the other two.
-  if(failed.length && ok) say(
-    `${ok} of ${targets.length} started; ${failed.join('; ')}`, 'err');
-  else if(failed.length) say(failed.join('; '), 'err');
-  else say(`${preview ? 'Preview' : 'Apply'} requested for `
-           + `${hosts} host${hosts === 1 ? '' : 's'}.`, 'ok');
-  setTimeout(load, 1500);
+  return applyMany(hosts, preview, `${preview ? 'Preview' : 'Apply'} of ${stateName}`);
 }
 
 async function applyTo(target, preview){
-  // Baseline does not talk to hosts — the Controller does. This asks the
-  // Controller to run this host's desired state over the agent channel it
+  const h = hostById(target);
+  return applyMany([h || {id: target, label: target}], preview,
+                   `${preview ? 'Preview' : 'Apply'} on ${(h && h.label) || target}`);
+}
+
+// The run in progress, or the last one. Kept until it is dismissed or replaced:
+// an apply is minutes of work on other people's machines, and a toast that
+// hides itself after four seconds is not a report of it.
+let APPLY = null;
+// How many hosts at once. Each request holds the Controller for as long as one
+// host's salt-call takes, so this is a choice between finishing and not
+// flattening it — four is roughly the Controller's own comfortable parallelism
+// for agent tasks.
+const APPLY_LANES = 4;
+
+async function applyMany(hosts, preview, title){
+  // Baseline does not talk to hosts — the Controller does. Each of these asks
+  // the Controller to run that host's desired state over the agent channel it
   // already has, with OUR identity forwarded, so the Controller applies its own
   // RBAC to the real human rather than trusting this service.
-  say(preview ? `Previewing ${target}…` : `Applying to ${target}…`);
-  try{
-    const r = await api('hosts/' + encodeURIComponent(target) + '/apply',
-                        {method: 'POST', body: JSON.stringify({preview: !!preview})});
-    say(r.detail || (preview ? 'Preview requested.' : 'Apply requested.'), 'ok');
-    setTimeout(load, 1500);
-  }catch(e){ say(e.message, 'err'); }
+  APPLY = {
+    title, preview, started: Date.now(), running: true,
+    rows: hosts.map((h) => ({id: h.id, label: h.label || h.id,
+                             state: 'waiting', note: ''})),
+  };
+  renderApply();
+  let next = 0;
+  async function lane(){
+    while(next < APPLY.rows.length){
+      const row = APPLY.rows[next++];
+      row.state = 'running'; renderApply();
+      try{
+        const r = await api('hosts/' + encodeURIComponent(row.id) + '/apply',
+                            {method: 'POST', body: JSON.stringify({preview: !!preview})});
+        row.state = 'ok';
+        row.note = r.detail || '';
+      }catch(e){
+        row.state = 'err';
+        row.note = e.message || 'failed';
+      }
+      renderApply();
+      // Each host that comes back is a run the fleet can now show, so refresh
+      // as they land rather than once at the end — on sixteen hosts the end is
+      // minutes away. Coalesced: one reload is five API calls, and sixteen
+      // hosts finishing in four lanes would otherwise fire sixteen of them.
+      scheduleLoad();
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(APPLY_LANES, APPLY.rows.length)},
+                               lane));
+  APPLY.running = false;
+  renderApply();
+  load();
+}
+
+let _loadSoon = null;
+function scheduleLoad(){
+  if(_loadSoon) return;
+  _loadSoon = setTimeout(() => { _loadSoon = null; load(); }, 2000);
+}
+
+function applyCounts(){
+  const r = (APPLY && APPLY.rows) || [];
+  return {total: r.length,
+          done: r.filter((x) => x.state === 'ok' || x.state === 'err').length,
+          failed: r.filter((x) => x.state === 'err').length,
+          running: r.filter((x) => x.state === 'running').length};
+}
+
+let _applyTick = null;
+function renderApply(){
+  const el = $('applypanel');
+  if(_applyTick){ clearInterval(_applyTick); _applyTick = null; }
+  if(!APPLY){ el.hidden = true; el.innerHTML = ''; return; }
+  // While it runs the only thing that changes between host results is the
+  // clock, and a panel whose timer is frozen at 0s reads as a panel that has
+  // stopped working.
+  if(APPLY.running) _applyTick = setInterval(renderApply, 1000);
+  const c = applyCounts();
+  const pct = c.total ? Math.round((c.done / c.total) * 100) : 0;
+  const secs = Math.max(0, Math.round((Date.now() - APPLY.started) / 1000));
+  let head;
+  if(APPLY.running){
+    head = `${c.done} of ${c.total} · ${secs}s`;
+  }else if(c.failed && c.failed < c.total){
+    head = `${c.total - c.failed} of ${c.total} done, ${c.failed} failed · ${secs}s`;
+  }else if(c.failed){
+    head = `${c.failed} failed · ${secs}s`;
+  }else{
+    head = `${c.total} done · ${secs}s`;
+  }
+  el.hidden = false;
+  el.innerHTML = `
+    <div class=ah>
+      <b>${esc(APPLY.title)}</b>
+      <span class=faint>${esc(head)}</span>
+      <span class=sp></span>
+      <button class=x title='Dismiss' data-applyclose='1'>&times;</button>
+    </div>
+    <div class="applybar${c.failed && !APPLY.running ? ' bad' : ''}">
+      <i style="width:${pct}%"></i></div>
+    <div class=applyhosts>${APPLY.rows.map(applyRow).join('')}</div>`;
+}
+
+function applyRow(r){
+  const word = {waiting: 'waiting', running: 'running…', ok: 'done', err: 'failed'}[r.state];
+  // The note is what the Controller said — "Applied on 1 host(s)", or why not.
+  // Shown for a failure always, because that is the thing you need; for a
+  // success only when it says something beyond the obvious.
+  const why = (r.state === 'err' || (r.state === 'ok' && r.note
+               && !/^Applied|^Previewed/.test(r.note))) ? r.note : '';
+  return `<div class="h ${r.state}">
+    <span class=nm title="${esc(r.label)}">${esc(r.label)}</span>
+    <span class=r>${esc(word)}</span>
+    ${why ? `<span class=why>${esc(why)}</span>` : ''}
+  </div>`;
 }
 
 // ---- wiring ----------------------------------------------------------------
@@ -1427,6 +1632,7 @@ document.addEventListener('click', async (ev) => {
     if(t.dataset.assignenv)  return openAssign('', 'env:' + t.dataset.assignenv);
     if(t.dataset.rule)      return openRule(t.dataset.rule);
     if(t.dataset.assign)    return openAssign(t.dataset.assign);
+    if(t.dataset.applyclose){ APPLY = null; return renderApply(); }
     if(t.dataset.previewall) return applyEverywhere(t.dataset.previewall, true);
     if(t.dataset.applyall)   return applyEverywhere(t.dataset.applyall, false);
     if(t.dataset.preview)   return applyTo(t.dataset.preview, true);

@@ -107,6 +107,12 @@ def server(tmp_path_factory):
             return [], [], "could not reach the Controller (ConnectError)"
         return FLEET, ["lab", "production", "staging"], None
 
+    # RESTORED on teardown. `m.controller` is one module object for the whole
+    # pytest process, so a plain assignment outlives this file and every later
+    # one sees the stub — which is exactly what happened when a second console
+    # test file landed alphabetically before test_state_builder.py and left it
+    # looking at a fleet of thirteen hosts it had never heard of.
+    _real_targets = m.controller.list_targets
     m.controller.list_targets = _targets
 
     m.store.save_state("All Servers", "motd:\n  file.managed:\n  - name: /etc/motd\n",
@@ -142,6 +148,7 @@ def server(tmp_path_factory):
         time.sleep(0.1)
     assert srv.started, "baseline did not come up"
     yield f"http://127.0.0.1:{PORT}"
+    m.controller.list_targets = _real_targets
     srv.should_exit = True
     t.join(timeout=10)
 
@@ -556,12 +563,26 @@ def test_a_state_can_be_applied_to_everything_it_is_assigned_to(pg):
     assert "all" in label.lower() and "host" in label.lower(), label
 
     btn.click()
-    pg.wait_for_timeout(900)
-    # env:production is ONE call: the Controller expands an environment into
-    # every host in it (_run_baseline_cycle), so fanning out here as well would
-    # run each host twice.
+    pg.wait_for_timeout(2500)
     assert posted, "pressing it posted nothing"
-    assert any("env%3Aproduction" in u or "env:production" in u for u in posted), posted
+
+    # ONE REQUEST PER HOST. This used to assert the opposite — that
+    # env:production went as a single call — on the reasoning that "the
+    # Controller expands an environment into every host in it, so fanning out
+    # here as well would run each host twice."
+    #
+    # Both halves of that were wrong. Fanning out here REPLACES the env call
+    # rather than adding to it, so nothing runs twice. And the single call it
+    # was defending is the bug: _run_baseline_cycle expands the environment and
+    # runs every host's salt-call SYNCHRONOUSLY inside that one request, at up
+    # to 60s each, while this service gives up on it after 20s — so the console
+    # reported a failure, or nothing, while the applies carried on unobserved.
+    # Reported as "the apply to all 16 hosts doesn't do anything".
+    assert not any("env%3Aproduction" in u or "env:production" in u for u in posted), (
+        "still sending the environment as one request", posted)
+    want = {h["id"] for h in FLEET if h["environment"] == "production"}
+    got = {u.rsplit("/hosts/", 1)[1].split("/")[0] for u in posted}
+    assert got == want, (got, want)
 
 
 def test_the_count_on_the_button_is_the_number_of_hosts_it_reaches(pg):

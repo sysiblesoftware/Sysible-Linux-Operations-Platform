@@ -29,7 +29,19 @@ except ImportError:                                  # pragma: no cover
 
 _CONTROLLER = os.getenv("SLOP_CONTROLLER_UPSTREAM", "host.docker.internal:8800")
 _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
+# TWO timeouts, because the two calls this module makes are nothing alike.
+#
+# Reading the fleet is a database query at the far end and 20s is generous. An
+# APPLY runs salt-call on the host, over the agent channel, and does not answer
+# until it has finished — the Controller allows up to 60s for a single agent
+# task, and a state that installs packages uses it. So 20s here gave up on work
+# that was still running and reported "the Controller is unreachable", which is
+# the worst answer available: it happened, and the console said it failed.
+#
+# The ceiling is per HOST now (the console sends one request each), so this is
+# "how long may one host take", not "how long may the fleet take".
 _TIMEOUT = 20.0
+_APPLY_TIMEOUT = float(os.getenv("SYSIBLE_BASELINE_APPLY_TIMEOUT_S", "180"))
 
 # What the Controller accepts as a host id, plus our env: form. Anything else is
 # refused HERE rather than interpolated into a URL.
@@ -146,13 +158,23 @@ def request_apply(identity, target: str, preview: bool = False) -> tuple[bool, s
                        "to the Controller who is asking. Re-run install.sh.")
     url = _url()
     try:
-        with httpx.Client(timeout=_TIMEOUT, verify=False) as c:
+        with httpx.Client(timeout=_APPLY_TIMEOUT, verify=False) as c:
             r = c.post(f"{url}/api/host/{quote(target, safe='')}/baseline-apply",
                        json={"preview": bool(preview)},
                        headers={"X-Sysible-User": identity.user,
                                 "X-Sysible-Role": identity.role,
                                 "X-Sysible-Auth": _SSO_SECRET})
     except Exception as e:
+        # A timeout is not unreachability, and saying so sends the operator to
+        # look at the wrong thing. The work is still running on the host when
+        # this happens — the Controller does not stop because we stopped
+        # waiting — so the message has to say that too, or the next thing they
+        # do is run it again.
+        if "Timeout" in type(e).__name__:
+            return False, (f"{target} did not finish within "
+                           f"{int(_APPLY_TIMEOUT)}s. The Controller is still "
+                           "running it — check the run list in a moment rather "
+                           "than applying again.")
         return False, f"The Controller is unreachable ({type(e).__name__})."
     if r.status_code == 404:
         return False, (f"The Controller does not know a host called {target!r}, "
