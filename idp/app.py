@@ -529,6 +529,21 @@ radial-gradient(70% 60% at 100% 110%,rgba(85,128,238,.09),transparent 55%)}
 .card{width:min(94vw,420px);background:var(--panel);border:1px solid var(--line);
 border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
 .wide{width:min(94vw,760px)}
+/* Administration is not a login form, and it was wearing the login form's card.
+   These pages carry a four-column product table, a module list per product, a
+   progress panel and an embedded app console — all capped at 760px, which is
+   under half of a 1600px window. The visible cost: module cards stacked one per
+   row down the middle of the page, status text wrapping to three lines beside a
+   column of nothing, and a whole app console squeezed into 760px on the Apps
+   tab. `wide` stays for the pages that are a paragraph and a form. */
+.wide.xl{width:min(96vw,1240px)}
+/* Two things must NOT take the new width. A text field is no more usable at
+   1240px than at 560 — and this is a max, not a width, so a field inside a
+   table cell or a grid column still fills it. Prose keeps a readable measure;
+   the structural content is what the space is for. */
+.wide.xl input:not([type]),.wide.xl input[type=text],
+.wide.xl input[type=password],.wide.xl select{max-width:560px}
+.wide.xl p.sub,.wide.xl details.help p{max-width:78ch}
 .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
 .brand .brand-text{font-size:18px;letter-spacing:.2px}
 .brand b{color:var(--accent);font-weight:700}
@@ -703,13 +718,25 @@ margin-top:.45rem;padding-top:.6rem;border-top:1px dashed var(--line)}
    compose file, so that button would rebuild the whole stack while claiming to
    touch one service. Restart/stop/start/recreate ARE per-service — `docker
    compose restart baseline` is exactly one container — so those are offered. */
+/* A grid, not a stack: six modules one per row is a column of short cards down
+   the middle of a wide page. auto-fill means the column count follows the card
+   — one on a phone, two at the old 760px, three or four at the administration
+   width — with no breakpoint to keep in step. The heading and the footnote
+   span, because they describe the whole set. */
 .prod-mods{grid-column:1/-1;margin-top:.55rem;padding-top:.55rem;
-border-top:1px dashed var(--line)}
+border-top:1px dashed var(--line);
+display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+gap:.4rem;align-content:start}
+.prod-mods[hidden]{display:none}
+.prod-mods>.mods-h,.prod-mods>.mods-f{grid-column:1/-1}
 .prod-mods>.mods-h{color:var(--faint);font-size:11.5px;letter-spacing:.04em;
 text-transform:uppercase;margin-bottom:.45rem}
 .mod{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.2rem .8rem;
 align-items:start;padding:.5rem .6rem;border-radius:9px;background:var(--panel2)}
-.mod+.mod{margin-top:.35rem}
+/* The grid gap spaces them now; a sibling margin would add to it, and only
+   between rows, so the columns would not line up. */
+.mod+.mod{margin-top:0}
+.mod{align-content:start}
 .mod-name{font-weight:600;font-size:13.5px;min-width:0;line-height:1.35}
 .mod-detail{grid-column:1;color:var(--muted);font-size:12px;line-height:1.45;min-width:0}
 .mod-state{grid-column:1;font-size:12px;line-height:1.45;margin-top:1px}
@@ -778,7 +805,7 @@ border-radius:12px;background:var(--panel);display:block}
    "it is running" is not enough to show: what phase, how long, which product of
    how many, and what has already finished. The log is still there, but behind a
    disclosure — a wall of compose output is a reference, not a progress bar. */
-.jobpanel{margin-top:1.1rem;padding:.9rem 1rem 1rem;border:1px solid var(--line);
+.jobpanel{margin:1.1rem 0 .2rem;padding:.9rem 1rem 1rem;border:1px solid var(--line);
 border-radius:12px;background:var(--panel)}
 .jobpanel.ok{border-color:color-mix(in srgb,var(--ok) 55%,var(--line))}
 .jobpanel.bad{border-color:color-mix(in srgb,var(--err) 55%,var(--line))}
@@ -1009,7 +1036,11 @@ _SETROLE_JS = (
 _PILL_POLL = ("<script>fetch('/admin/updates/status',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d||!d.apps)return;var n=d.apps.filter(function(a){return a.available;}).length;var b=document.getElementById('updn');if(b){b.textContent=n;b.hidden=(n===0);b.title=n+' product'+(n===1?'':'s')+' can be updated';}}).catch(function(){});</script>")
 
 
-def _page(title: str, body: str, wide: bool = False) -> str:
+def _page(title: str, body: str, wide: bool = False, xl: bool = False) -> str:
+    """`xl` is the ADMINISTRATION width — the tabs under /admin, which carry
+    tables, module grids and an embedded console rather than a form. It implies
+    `wide`, and every /admin tab uses it: the tab strip is one control, so a
+    card that resized as you moved along it would read as the page breaking."""
     # The pre-paint script picks up the theme the operator chose on the portal
     # (shared 'slop-theme' key), falling back to the OS preference, so the login
     # never flashes the wrong theme. The trailing script wires the corner toggle.
@@ -1023,7 +1054,7 @@ def _page(title: str, body: str, wide: bool = False) -> str:
         f"<style>{_CSS}</style></head><body>"
         f"<div class=bg></div>"
         f"<button class=theme-btn id=theme title='Toggle light / dark' aria-label='Toggle theme'>&#9728;</button>"
-        f"<div class='card{' wide' if wide else ''}'>"
+        f"<div class='card{' wide' if (wide or xl) else ''}{' xl' if xl else ''}'>"
         f"<div class=brand>{_MARK}<div class=brand-text>Sysible <b>Linux Operations Platform</b></div></div>"
         f"{body}"
         # The build this container came from. A SLOP console is server-rendered,
@@ -1467,7 +1498,7 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
         "<div class=formact><span class=hint>They are asked to change it at first sign-in.</span>"
         "<button class=btn type=submit>Create user</button></div></form>"
     )
-    return _page("Accounts · SLOP", body + _PILL_POLL + _SETROLE_JS, wide=True)
+    return _page("Accounts · SLOP", body + _PILL_POLL + _SETROLE_JS, xl=True)
 
 
 def _require_super(request: Request):
@@ -1802,7 +1833,7 @@ def _config_page(sess: sqlite3.Row) -> str:
         f"<fieldset id='cfg-{sid}'><legend>{legend}</legend>{html}</fieldset>"
         for sid, legend, html in sections)
 
-    return _page("Configuration · SLOP", body + _PILL_POLL, wide=True)
+    return _page("Configuration · SLOP", body + _PILL_POLL, xl=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1972,7 +2003,7 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
     # while you were on it — the badge appeared on two of the four admin pages
     # and nobody could see the rule.
     return _page("Apps · SLOP",
-                 body + _PILL_POLL + f"<script>{_APPFRAME_JS}</script>", wide=True)
+                 body + _PILL_POLL + f"<script>{_APPFRAME_JS}</script>", xl=True)
 
 
 @app.get("/admin/apps", response_class=HTMLResponse)
@@ -2512,7 +2543,19 @@ _UPDATES_JS = r"""
   function showJob(j, note){
     var panel=document.getElementById('jobpanel'); if(!panel||!j)return;
     lastJob=j;
+    // Bring it into view the first time it appears, and only then — this runs
+    // on every poll. The panel sits above the table, but the button that
+    // started the job may be several rows down, so without this the operator is
+    // left looking at the row they clicked while the progress is off-screen
+    // above them. 'nearest' means no scroll at all when it is already visible,
+    // which is the common case of landing on the page mid-update.
+    var wasHidden=panel.hidden;
     panel.hidden=false;
+    if(wasHidden && panel.scrollIntoView){
+      try{ panel.scrollIntoView({behavior:'smooth', block:'nearest'}); }catch(e){
+        panel.scrollIntoView();
+      }
+    }
     var ok=(j.state==='succeeded'), failed=(j.state==='failed');
     var terminal=ok||failed;
     panel.className='jobpanel'+(note?'':(ok?' ok':(failed?' bad':'')));
@@ -2910,9 +2953,12 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<button class='btn sm' id=updateall hidden>Update all</button>"
         "<span class=sub>Availability is remembered for a few minutes; this re-asks "
         "every product&rsquo;s git remote.</span></div>"
-        f"{table}"
-        # The progress panel. Everything in it is written by showJob(); it stays
-        # hidden until there is a job, so a quiet page has nothing extra on it.
+        # The progress panel, ABOVE the table. It used to sit after it — below
+        # four product rows and up to six module cards each — so the thing the
+        # operator had just started was off the bottom of the page and they
+        # could not see it was running at all. It stays hidden until there is a
+        # job, so a quiet page has nothing extra on it; everything in it is
+        # written by showJob().
         "<div id=jobpanel class=jobpanel hidden "
         "role=status aria-live=polite aria-atomic=false>"
         "<div class=job-head>"
@@ -2928,12 +2974,13 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "</div>"
         "<pre class=upd-log id=joblog hidden></pre>"
         "</div>"
+        f"{table}"
         f"<script>{_UPDATES_JS}</script>"
     )
     # Not _PILL_POLL here: this page HAS the data, and paint() sets the badge
     # from it. Polling as well would be a second request for a number already
     # on screen.
-    return _page("Software & services · SLOP", body, wide=True)
+    return _page("Software & services · SLOP", body, xl=True)
 
 
 @app.get("/admin/updates", response_class=HTMLResponse)
