@@ -16,6 +16,8 @@ import warnings
 
 import pytest
 
+import console
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -88,10 +90,16 @@ def _page(browser, server, headers=None):
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.goto(server + "/", wait_until="domcontentloaded")
     pg.wait_for_timeout(700)
+    # This whole file is about declaring states, and "+ New state" heads the
+    # States section rather than sitting on every screen. The console opens on
+    # the Overview, so every test here starts by going where its subject is.
+    console.goto(pg, "states")
+    pg.wait_for_timeout(300)
     return pg, ctx, errs
 
 
 def _build(pg, name, kinds):
+    console.goto(pg, "states")
     pg.click("#newstate")
     pg.wait_for_selector("#s-kind")
     pg.fill("#s-name", name)
@@ -316,6 +324,7 @@ def test_an_auditor_gets_a_console_that_can_actually_read(browser, server):
         body = pg.text_content("body") or ""
         assert "needs an operator account" not in body, \
             "the read-only console still cannot read"
+        console.goto(pg, "states")
         assert pg.evaluate("() => !!document.getElementById('newstate')") is False, \
             "an auditor is offered a New state button"
         assert not errs, errs

@@ -33,6 +33,8 @@ import warnings
 
 import pytest
 
+import console
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -147,11 +149,8 @@ def pg(browser, server):
     page.on("pageerror", lambda e: errs.append(str(e)))
     page.on("dialog", lambda d: d.accept())
     page.goto(server[0] + "/", wait_until="domcontentloaded")
-    page.wait_for_selector("#browselist .it", timeout=8000)
-    page.click("#by-state")
-    page.wait_for_timeout(300)
-    page.locator("#browselist .it").first.click()
-    page.wait_for_timeout(400)
+    console.ready(page, "hosts")
+    console.open_first_state(page)
     yield page
     assert not errs, errs
     ctx.close()
@@ -333,6 +332,7 @@ def test_the_panel_stays_until_it_is_dismissed(pg):
 
 def test_applying_one_host_uses_the_same_panel(pg):
     """One host and sixteen should not be two different experiences."""
+    console.open_host(pg, FLEET[0]["id"])
     pg.locator("button[data-apply]").first.click()
     pg.wait_for_function(
         "() => {const p=document.getElementById('applypanel');"
@@ -343,14 +343,15 @@ def test_applying_one_host_uses_the_same_panel(pg):
     assert len(ASKED) == 1, ASKED
 
 
-def test_the_columns_are_not_pushed_off_the_screen(pg):
-    """The grid used to claim calc(100vh - 51px), so anything above it — the
-    message bar, and now this panel — pushed the bottom of every column out of
-    the window."""
-    before = pg.evaluate("() => document.querySelector('.wrap').getBoundingClientRect().bottom")
+def test_the_page_is_not_pushed_off_the_screen(pg):
+    """The layout used to claim calc(100vh - 51px) — the header's height,
+    written down — so anything above it (the message bar, and now this panel)
+    pushed the bottom of the page out of the window. The rail and the view take
+    what is LEFT, which is why this still holds after the rewrite."""
+    before = pg.evaluate("() => document.querySelector('.shell').getBoundingClientRect().bottom")
     _apply_all(pg)
     after = pg.evaluate("""() => {
-      const r = document.querySelector('.wrap').getBoundingClientRect();
+      const r = document.querySelector('.shell').getBoundingClientRect();
       return {bottom: r.bottom, h: innerHeight};
     }""")
     assert after["bottom"] <= after["h"] + 1, (before, after)

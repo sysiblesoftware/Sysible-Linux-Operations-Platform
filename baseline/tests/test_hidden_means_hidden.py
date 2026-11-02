@@ -28,6 +28,8 @@ import warnings
 
 import pytest
 
+import console
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -129,7 +131,10 @@ def pg(server):
                             extra_http_headers=OP)
         page = ctx.new_page()
         page.goto(server + "/", wait_until="domcontentloaded")
-        page.wait_for_selector("#browselist .it", timeout=10000)
+        # The assign button this file is about lives on a host's detail, which
+        # is a section you open rather than a column that is always there.
+        console.ready(page, "hosts", timeout=10000)
+        page.locator(".grid .r[data-host]").first.click()
         page.wait_for_timeout(500)
         yield page
         b.close()

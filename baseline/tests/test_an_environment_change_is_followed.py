@@ -35,6 +35,8 @@ import warnings
 
 import pytest
 
+import console
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -231,13 +233,10 @@ def test_an_assignment_to_a_vanished_environment_is_named_on_the_screen(server):
                                                 if k != "content-type"})
         page = ctx.new_page()
         page.goto(base + "/", wait_until="domcontentloaded")
-        page.wait_for_selector("#browselist .it", timeout=10000)
-        page.click("#by-state")
-        page.wait_for_timeout(400)
-        page.click("[data-state='hardening']")
-        page.wait_for_timeout(600)
+        console.ready(page, "hosts", timeout=10000)
+        console.open_state(page, "hardening")
 
-        text = page.text_content("#col3")
+        text = console.detail(page)
         assert "covers nothing" in text, \
             f"an assignment that reaches no host is not called out: {text[:400]}"
         assert "staging" in text, "the environment that vanished is not named"

@@ -26,6 +26,8 @@ import warnings
 
 import pytest
 
+import console
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -153,7 +155,7 @@ def pg(browser, server):
     errs = []
     page.on("pageerror", lambda e: errs.append(str(e)))
     page.goto(server + "/", wait_until="domcontentloaded")
-    page.wait_for_selector("#browselist .it", timeout=8000)
+    console.ready(page, "hosts")
     page.wait_for_timeout(400)
     yield page
     assert not errs, errs
@@ -173,14 +175,8 @@ def _open_state(pg, name, host="new-01"):
     The detail pane's host list is headed "Also on" and leaves OUT whichever
     host is selected — so the test has to know which one that is, or the host
     it is asking about is the one that is missing."""
-    pg.click("#by-host")
-    pg.wait_for_timeout(200)
-    pg.locator(f"#browselist .it[data-host='{host}']").click()
-    pg.wait_for_timeout(250)
-    pg.click("#by-state")
-    pg.wait_for_timeout(250)
-    pg.locator(f"#browselist .it[data-state='{name}']").click()
-    pg.wait_for_timeout(350)
+    console.open_host(pg, host)
+    console.open_state(pg, name)
 
 
 # ---------------------------------------------------------------------------
@@ -237,16 +233,20 @@ def test_a_host_that_never_ran_is_given_no_date(pg):
     assert by["new-01"] == "", by
 
 
-def test_the_dot_beside_a_host_is_about_this_state(pg):
-    """The middle column had the same roll-up: other-01 is failing on motd and
-    fine on ssh-servers, and its dot on the ssh-servers page was red."""
+def test_the_verdict_beside_a_host_is_about_this_state(pg):
+    """A state's page lists the hosts it lands on, and what it said beside each
+    of them used to be the HOST's roll-up: other-01 is failing on motd and fine
+    on ssh-servers, and on the ssh-servers page it read failing.
+
+    This was the middle column's list, which is the state detail's own "Also
+    on" now — one list rather than that one and a duplicate beside it."""
     _open_state(pg, "ssh-servers", host="cur-01")
-    dots = pg.evaluate("""() => [...document.querySelectorAll('#col2list .it')]
-      .map(e => ({host: ((e.querySelector('.nm')||{}).textContent || '').trim(),
-                  dot: ((e.querySelector('.dot')||{}).className || '')}))""")
-    by = {d["host"]: d["dot"] for d in dots}
-    assert by, "no hosts in the middle column"
-    assert "err" not in by.get("other-01", ""), by
+    said = pg.evaluate("""() => [...document.querySelectorAll('#detail .ln[data-pickhost]')]
+      .map(e => ({host: ((e.querySelector('.k')||{}).textContent || '').trim(),
+                  said: ((e.querySelector('.t')||{}).textContent || '').trim()}))""")
+    by = {d["host"]: d["said"] for d in said}
+    assert by, "the state does not say which hosts it is on"
+    assert by.get("other-01") == "as declared", by
 
 
 def test_the_roll_up_says_how_many_are_in_each_condition(pg):
@@ -274,10 +274,7 @@ def test_every_host_says_how_long_ago(pg):
 
 
 def test_a_hosts_own_page_says_when_each_state_last_ran(pg):
-    pg.click("#by-host")
-    pg.wait_for_timeout(250)
-    pg.locator("#browselist .it[data-host='old-01']").click()
-    pg.wait_for_timeout(350)
-    txt = pg.text_content(".col:last-child")
+    console.open_host(pg, "old-01")
+    txt = console.detail(pg)
     assert "out of date" in txt, txt[:400]
     assert "3d ago" in txt, txt[:400]

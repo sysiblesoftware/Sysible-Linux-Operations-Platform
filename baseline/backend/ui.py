@@ -34,10 +34,10 @@ _CSS = """
 
 html,body{margin:0;height:100%}
 
-/* A column, so the three-column grid takes WHAT IS LEFT. It used to claim
+/* A column, so the rail and the view take WHAT IS LEFT. It used to claim
    calc(100vh - 51px) — the header's height, written down — so anything else
    above it (the message bar, and now the apply panel) pushed the bottom of
-   every column off the screen. */
+   the page off the screen. */
 body{background:var(--topo) center / cover no-repeat fixed,
 radial-gradient(70% 55% at 15% -10%,rgba(67,160,71,.12),transparent 60%) fixed,
 radial-gradient(70% 60% at 100% 110%,rgba(85,128,238,.09),transparent 55%) fixed,
@@ -62,45 +62,87 @@ background:var(--panel);position:sticky;top:0;z-index:5}
 .msg.err{background:rgba(229,83,75,.12);color:var(--err)}
 
 /* ---- Baseline's own layout, on the shared ground above ------------------ */
-/* THREE COLUMNS, not a stack of tables.
-   Reported: "I don't like the hosts being on top. They should be off to the
-   side like all the other tools" and "This workflow is confusing and linear".
-   Both true. The console was five full-width sections — hosts, states,
-   assignments, rules, runs — one under the other, and doing anything meant
-   scrolling between them and joining them up by eye. Flashback is not built
-   that way: hosts | files | versions | diff, fixed columns, full height, no
-   page scroll. This is the same shape for this domain.
-     1. browse   — the fleet, or the declared states
-     2. middle   — what the selection is made of
-     3. detail   — the thing itself
-   Rules and runs stop being sections of their own and appear where they are
-   about something: a host's runs beside the host, a state's rules beside the
-   state. */
-.wrap{display:grid;
-  grid-template-columns:var(--c1,290px) 6px var(--c2,300px) 6px minmax(0,1fr);
-  gap:0;flex:1 1 auto;min-height:0}
-.col{overflow:auto;border-right:1px solid var(--line);padding-bottom:2em;min-width:0}
-.col:last-child{border-right:0}
-/* Draggable, like Flashback's: a fleet of long hostnames and a fleet of short
-   ones want different widths, and that is not a decision this file can make. */
-.gut{background:var(--line);opacity:.45;cursor:col-resize}
-.gut:hover,.gut.drag{opacity:1;background:var(--accent2)}
-.colh{position:sticky;top:0;z-index:2;background:var(--bg);padding:.7em .9em .55em;
-border-bottom:1px solid var(--line)}
-.colh h3{margin:0;font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;
-color:var(--muted);font-weight:600;display:flex;align-items:center;gap:.5em;min-height:1.7em}
-.colh h3 .n{color:var(--faint);font-weight:500;letter-spacing:0;
-text-transform:none;font-size:11.5px;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.colh h3 .sp{margin-left:auto}
-/* The pivot. Start from a host and reach its states, or start from a state and
-   reach its hosts — the relationship runs both ways and the console used to
-   offer only one direction. */
-.seg{display:flex;margin-top:.55em;border:1px solid var(--line);
-border-radius:7px;overflow:hidden}
-.seg button{flex:1;border:0;background:transparent;color:var(--muted);
-font-family:inherit;font-size:12px;padding:.36em 0;cursor:pointer}
-.seg button.on{background:var(--panel2);color:var(--text);font-weight:600}
-.seg button:hover:not(.on){color:var(--text)}
+/* A LEFT RAIL AND ONE VIEW. This is the shape SLEP and the Sysible Controller
+   both use — SLEP's App.jsx says so in a comment on its own rail: "Left-rail
+   navigation — same shape as the Sysible Controller console". Baseline was the
+   only console in the family not built this way.
+
+   WHAT IT REPLACED, and why. Three resizable columns: browse, "what the
+   selection is made of", detail. The middle one was the mistake. It listed the
+   selected host's states and its recent runs — and the detail pane immediately
+   to its right listed the same two things again, in more detail. It was not a
+   drill-down either: picking something in it did not narrow the pane, it
+   REPLACED the pane's subject. So one fact appeared twice, the detail had a
+   third of the width it needed, and the bottom two thirds of the screen were
+   empty. Reported as "this whole layout doesn't make much sense and isn't as
+   intuitive as SLEP or the other apps", with a screenshot that showed all
+   three problems at once.
+
+   Five sections, one at a time, each the full width. The things stranded in
+   the middle column — the event rules, the run history — are sections in their
+   own right now, which is what they always were. */
+.shell{display:flex;flex:1 1 auto;min-height:0}
+.rail{width:216px;flex:none;background:var(--panel);border-right:1px solid var(--line);
+display:flex;flex-direction:column;padding:.75em .5em .6em;gap:.1em;overflow:auto}
+.rail-item{display:flex;align-items:center;gap:.6em;width:100%;text-align:left;
+background:transparent;border:0;border-left:2px solid transparent;border-radius:0 8px 8px 0;
+color:var(--muted);font-family:inherit;font-size:13px;padding:.5em .7em;cursor:pointer}
+.rail-item:hover{background:var(--panel2);color:var(--text);border-color:transparent;
+border-left-color:transparent}
+.rail-item.on{background:var(--panel2);color:var(--text);font-weight:600;
+border-left-color:var(--accent)}
+/* The count carries the WORST thing in that section, not just how many there
+   are: "16" beside Hosts and "16" in red when three of them are failing are
+   different messages, and the second is the one worth walking past. */
+.rail-item .cnt{margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)}
+.rail-item .cnt.err{color:var(--err)}
+.rail-item .cnt.amber{color:var(--amber)}
+.rail-foot{margin-top:auto;padding-top:.7em;border-top:1px solid var(--line);
+color:var(--faint);font-size:11.5px;padding-left:.7em}
+.view{flex:1 1 auto;min-width:0;overflow:auto;padding:1.1em 1.3em 3em}
+/* The header of whichever section is open: its name, what it is counting, and
+   the controls that belong to it. */
+.vh{display:flex;align-items:baseline;gap:.7em;margin:0 0 .9em;flex-wrap:wrap}
+.vh h1{margin:0;font-size:17px;font-weight:600;letter-spacing:0}
+.vh .n{color:var(--faint);font-size:12.5px;font-family:var(--mono)}
+.vh .sp{margin-left:auto}
+.vh .srch{width:15rem;margin:0}
+/* A section's rows, full width. The 290px strip these used to live in is why
+   a hostname, its address, its environment, what it must satisfy and how it
+   went could not all be on the same line. */
+.grid{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+overflow:hidden}
+.grid .hd,.grid .r{display:grid;gap:0 1em;align-items:center;padding:.5em .85em;
+border-bottom:1px solid var(--line);min-width:0}
+.grid .r:last-child{border-bottom:0}
+.grid .hd{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+color:var(--faint);font-weight:600;background:var(--panel2)}
+.grid .r{cursor:pointer}
+.grid .r:hover{background:var(--panel2)}
+.grid .r.sel{background:var(--panel2);box-shadow:inset 2px 0 0 var(--accent)}
+.grid .c{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+font-size:12.5px}
+.grid .c.m{font-family:var(--mono)}
+.grid .c.f{color:var(--faint);font-size:11.5px}
+/* Section headings INSIDE a grid — the environment a block of hosts is in. */
+.grid .gh{display:flex;align-items:baseline;gap:.5em;padding:.55em .85em;
+background:var(--panel2);border-bottom:1px solid var(--line);font-size:10.5px;
+letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+.grid .gh .s{letter-spacing:0;text-transform:none;font-size:11px;color:var(--faint)}
+.grid .gh button{margin-left:auto;flex:none}
+/* The overview's roll-up: one chip per verdict, each a way into the list. */
+.chips{display:flex;flex-wrap:wrap;gap:.5em;margin:0 0 1.3em}
+.chip{display:flex;align-items:baseline;gap:.45em;border:1px solid var(--line);
+border-radius:10px;background:var(--panel);padding:.55em .8em;cursor:pointer;
+font-family:inherit;font-size:12.5px;color:var(--muted)}
+.chip:hover{border-color:var(--accent)}
+.chip b{font-size:17px;font-family:var(--mono);font-weight:600;color:var(--text)}
+.chip.err b{color:var(--err)}.chip.amber b{color:var(--amber)}
+.chip.ok b{color:var(--ok)}.chip.faint b{color:var(--faint)}
+/* Back out of a detail into the section that opened it. */
+.crumb{background:transparent;border:0;color:var(--muted);font-family:inherit;
+font-size:12.5px;padding:0 0 .6em;cursor:pointer}
+.crumb:hover{color:var(--text);border-color:transparent}
 .srch{width:100%;margin-top:.5em;padding:.35em .6em;border-radius:7px;
 border:1px solid var(--line);background:var(--field);color:var(--text);
 font-family:inherit;font-size:12.5px}
@@ -126,13 +168,15 @@ overflow:hidden;text-overflow:ellipsis}
 .pill{font-size:10.5px;padding:.1em .5em;border-radius:20px;
 border:1px solid var(--line);color:var(--faint);white-space:nowrap}
 .pill.inh{border-color:color-mix(in srgb,var(--accent2) 45%,var(--line));color:var(--accent2)}
-/* Column three. */
-.det{padding:1em 1.2em}
+/* The detail of one thing, inside the section that opened it. */
 .det h2{margin:0 0 .15em;font-size:17px;font-family:var(--mono);font-weight:600;
 text-transform:none;letter-spacing:0;color:var(--text);display:block}
 .det .sub{color:var(--faint);font-size:12px;font-family:var(--mono)}
 .bar{display:flex;gap:.45em;margin:.9em 0 1.3em;flex-wrap:wrap}
-.sec{margin-bottom:1.4em;max-width:900px}
+/* Wider than the 900px it was: that number was chosen for a detail COLUMN
+   with two other columns beside it. The cap stays, because a line of prose
+   1500px long is its own kind of unreadable. */
+.sec{margin-bottom:1.4em;max-width:1180px}
 .sec>h4{margin:0 0 .5em;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
 color:var(--muted);font-weight:600}
 .box{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}
@@ -152,24 +196,34 @@ max-height:48vh;overflow:auto}
 .empty{color:var(--faint);font-size:12.5px;padding:.7em .9em;line-height:1.55}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
       padding:14px 16px;margin-bottom:12px}
+/* For the pages that are not the console — a refusal, and anything else that
+   is one piece of prose. They used to borrow the console's grid, which gave
+   them two empty columns and put the text in the third. */
+.plain{flex:1 1 auto;min-height:0;overflow:auto;padding:1.4em 1.3em;
+max-width:70ch}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;
    color:var(--faint);font-weight:600;padding:7px 8px;border-bottom:1px solid var(--line)}
 td{padding:7px 8px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
 tr:last-child td{border-bottom:0}
-/* The day-one panel. Lives in the detail column now, where there is room for
-   it and where it is not competing with a tally. */
+/* The day-one panel. Lives in the Overview, where it is the whole answer. */
 .start{padding:1.4em 0 0;max-width:62ch}
 .start b{font-size:15px}
 .start p{margin:.5em 0 .8em;color:var(--muted);font-size:13px;line-height:1.65}
 .start em{font-style:normal;color:var(--text)}
 .start ol{margin:0 0 1em;padding-left:1.3em;color:var(--muted);font-size:13px;line-height:1.8}
 .start ol b{font-size:13px;color:var(--text)}
-/* Narrow: the cascade collapses to one column at a time, browse first. */
-@media(max-width:1000px){
-  .wrap{grid-template-columns:1fr;height:auto}
-  .col{border-right:0;border-bottom:1px solid var(--line);max-height:none}
-  .gut{display:none}
+/* Narrow: the rail becomes a strip of icons-with-labels across the top, and
+   the view takes the rest. A 216px rail on a phone is most of the phone. */
+@media(max-width:820px){
+  .shell{flex-direction:column}
+  .rail{width:auto;flex-direction:row;overflow-x:auto;padding:.4em;
+    border-right:0;border-bottom:1px solid var(--line)}
+  .rail-item{width:auto;white-space:nowrap;border-left:0;border-radius:8px;
+    border-bottom:2px solid transparent}
+  .rail-item.on{border-left-color:transparent;border-bottom-color:var(--accent)}
+  .rail-foot{display:none}
+  .view{padding:.9em}
 }
   .hfilter input{width:9rem}
 }
@@ -392,40 +446,30 @@ def console_page(who) -> str:
         "<div class=msg id=msg hidden></div>"
         # Written entirely by renderApply(); hidden until something is applied.
         "<div class=applypanel id=applypanel hidden></div>"
-        "<div class=wrap>"
+        "<div class=shell>"
 
-        # 1. BROWSE. The fleet, off to the side — or the declared states, which
-        #    is the same column seen from the other end. The relationship runs
-        #    both ways: a host must satisfy states, a state is on hosts. The
-        #    console used to offer only the first direction, down a page.
-        "  <div class=col id=col1>"
-        "    <div class=colh>"
-        "      <h3>Browse <span class=n id=browsecount></span>"
-        "        <span class=sp></span>"
-        + ("        <button class='sm primary' id=newstate>+ New state</button>"
-           if can_write else "")
-        + "      </h3>"
-        "      <div class=seg>"
-        "        <button id=by-host class=on>By host</button>"
-        "        <button id=by-state>By state</button>"
-        "      </div>"
-        "      <input class=srch id=browsefilter type=search "
-        "             placeholder='Filter\u2026' aria-label='Filter'>"
-        "    </div>"
-        "    <div id=browselist><div class=empty>Loading\u2026</div></div>"
-        "  </div>"
-        "  <div class=gut id=gut1 role=separator aria-orientation=vertical></div>"
+        # THE RAIL. Five sections, named for the five questions an operator
+        # arrives with: is the fleet all right, what is this host supposed to
+        # be, what have I declared, what has been applied, and what happens
+        # afterwards. Each is a section rather than a column, so each gets the
+        # whole width — which is the thing the three-column version could not
+        # give any of them.
+        "  <aside class=rail>"
+        "    <button class='rail-item on' data-nav=overview>Overview</button>"
+        "    <button class=rail-item data-nav=hosts>Hosts"
+        "      <span class=cnt id=n-hosts></span></button>"
+        "    <button class=rail-item data-nav=states>States"
+        "      <span class=cnt id=n-states></span></button>"
+        "    <button class=rail-item data-nav=runs>Runs"
+        "      <span class=cnt id=n-runs></span></button>"
+        "    <button class=rail-item data-nav=rules>Rules"
+        "      <span class=cnt id=n-rules></span></button>"
+        f"    <div class=rail-foot>{w}</div>"
+        "  </aside>"
 
-        # 2. What the selection is MADE OF.
-        "  <div class=col id=col2>"
-        "    <div class=colh><h3 id=col2head></h3></div>"
-        "    <div id=col2list></div>"
-        "  </div>"
-        "  <div class=gut id=gut2 role=separator aria-orientation=vertical></div>"
-
-        # 3. The thing itself, and everything about it that used to be a
-        #    separate full-width table further down the page.
-        "  <div class='col det' id=col3></div>"
+        # …and the one view. Everything that used to be three columns and five
+        # full-width tables below them renders in here.
+        "  <main class=view id=view></main>"
         "</div>"
 
         # ---- state editor -------------------------------------------------
@@ -517,7 +561,9 @@ def console_page(who) -> str:
 def refusal_page(code: str, why: str) -> str:
     """Say WHICH of the ways this can fail happened. "Not signed in." on a page
     reached through a gateway whose whole job is signing you in is a dead end."""
-    body = ("<div class=wrap><div class=card>"
+    # `.plain`, not `.wrap`: that class was the three-column grid and it is
+    # gone. A page with no console on it wants a readable column, not a layout.
+    body = ("<div class=plain><div class=card>"
             f"<p>{escape(why)}</p>"
             "<p class=muted>Baseline has no login of its own — it takes your identity "
             "from the SLOP gateway. Open it at <span class=mono>/baseline/</span> after "
@@ -566,12 +612,7 @@ function startingOut(){
 }
 
 // ---- what the selection is -------------------------------------------------
-// MODE is which end of the relationship you are browsing from. H1 is the thing
-// picked in column one, H2 the thing picked in column two. A host and a state
-// each remember their own selection, so switching ends and switching back does
-// not lose your place.
-let MODE = 'host';
-let SEL = {host: null, state: null, run: null};
+// NAV and SEL are declared with the rail below, which is what sets them.
 
 function statesFor(host){
   const direct = STATE.assign.filter((a) => a.target === host.id).map((a) => a.state);
@@ -595,18 +636,25 @@ function hostStatus(host, declared){
   // "Nothing declared for it" is NOT compliance, and it is the state most of a
   // fleet is in on day one. Saying "as declared" there would report an entirely
   // unconfigured fleet as green.
-  if(!declared.length) return {cls: 'faint', label: 'not managed', rank: 4,
+  if(!declared.length) return {cls: 'faint', label: 'not managed',
+                               rank: STATE_RANK['not managed'],
                                note: 'no state is assigned to it or to its environment, '
                                      + 'so Baseline does not look at it'};
-  const d = STATE.drift || {drifted: [], failed: []};
-  if((d.failed || []).includes(host.id)) return {cls: 'err', label: 'failing', rank: 0,
-                                                 note: 'the last run could not finish'};
-  if((d.drifted || []).includes(host.id)) return {cls: 'amber', label: 'drifted', rank: 1,
-                                                  note: 'the last run had to change it'};
-  const ran = (STATE.runs || []).some((r) => r.host_id === host.id && !r.preview);
-  if(!ran) return {cls: 'faint', label: 'never applied', rank: 2,
-                   note: 'declared, but nothing has been applied to it yet'};
-  return {cls: 'ok', label: 'as declared', rank: 3, note: 'the last run changed nothing'};
+  // THE WORST OF ITS OWN ROWS, exactly as a state's status is the worst of its
+  // hosts. This used to read STATE.drift — a list computed on the SERVER by
+  // store.drift_summary — while every row underneath it was derived here from
+  // the runs. Two computations of one fact, with different rules: the server
+  // counted a run that ERRORED as failed, the browser did not, and a host whose
+  // apply never ran showed "failing" at the top and "as declared" on every line
+  // below it. Reported with a screenshot of exactly that.
+  //
+  // Derived from the same function the rows use, a roll-up cannot disagree with
+  // what it is summarising. It can only be wrong in the same direction, which
+  // is a bug you can find.
+  const worst = declared.map((n) => hostStateStatus(host, n))
+    .sort((a, b) => STATE_RANK[a.label] - STATE_RANK[b.label])[0];
+  return {cls: worst.cls, label: worst.label, rank: STATE_RANK[worst.label],
+          note: worst.note};
 }
 // How one state is doing ON ONE HOST. Column two lists the states a host must
 // satisfy, so a dot there has to mean "this state, on this host" — showing the
@@ -623,8 +671,27 @@ function hostStateStatus(host, name){
   const r = runs[0];
   const when = r.started || r.finished || null;
   const cur = ((STATE.states || []).find((x) => x.name === name) || {}).version;
+  // ORDER MATTERS, and I had it the wrong way round first — two existing tests
+  // caught it. `failed` means salt-call ran and that many states did not come
+  // out right; `error` is a message that may accompany that failure ("motd blew
+  // up") OR stand alone. So a failure is a failure, and `error` is its detail.
   if(r.failed) return {cls: 'err', label: 'failing', when, ran: r.state_version,
                        note: r.error || 'the last run could not finish'};
+  // `error` with NOTHING failed is the other thing entirely: the run could not
+  // be carried out at all — Controller unreachable, agent refusing, the
+  // desired-state request failing before salt-call ever started — so it comes
+  // back with nothing failed and nothing changed. Reading only those two
+  // numbers, the console called it "as declared": a desired-state tool
+  // reporting a host as compliant when it could not even reach the host. That
+  // is the worst single thing this product can say, and it said it sixteen
+  // times in one screenshot.
+  //
+  // Its own verdict rather than "failing", because they are different problems
+  // with different fixes: one is something wrong ON the host, the other is
+  // something wrong between here and it, and the host's real condition is not
+  // bad — it is unknown.
+  if(r.error) return {cls: 'err', label: 'could not run', when, ran: r.state_version,
+                      note: r.error};
   // A host that satisfied v1 of a state that is now v3 is NOT "as declared".
   // It is running configuration two edits old, and this console was reporting
   // it green — which is the most misleading thing a desired-state tool can say,
@@ -655,8 +722,13 @@ function ago(ts){
 
 // A state is as bad as the worst host it is on: the number worth knowing about
 // "web-stack" is not how many hosts have it but whether any of them is broken.
-const STATE_RANK = {failing: 0, 'out of date': 1, drifted: 2, 'never applied': 3,
-                    'as declared': 4};
+// Worst first. "could not run" sits beside "failing" because both are red and
+// both need somebody; it is second because a failure is a KNOWN problem on the
+// host, where a run that never started leaves the host's condition unknown.
+// 'not managed' is last: it is not a verdict about a host, it is the absence of
+// one, and it only ever reaches here through hostStatus.
+const STATE_RANK = {failing: 0, 'could not run': 1, 'out of date': 2, drifted: 3,
+                    'never applied': 4, 'as declared': 5, 'not managed': 6};
 function stateStatus(name){
   const on = hostsWith(name);
   if(!on.length) return {cls: 'faint', label: 'not assigned', rank: 3,
@@ -703,41 +775,169 @@ function orphanedEnvs(){
   return seen;
 }
 
-function row(opts){
-  const sel = opts.sel ? ' sel' : '';
-  return `<div class="it${sel}" ${opts.data}>`
-    + `<span class=nm>${esc(opts.name)}</span>`
-    + (opts.pill ? `<span class="pill${opts.pillCls ? ' ' + opts.pillCls : ''}">${esc(opts.pill)}</span>` : '')
-    + (opts.extra ? `<span class=ad>${esc(opts.extra)}</span>` : '')
-    + (opts.dot ? `<i class="dot ${opts.dot}" title="${esc(opts.title || '')}"></i>` : '')
-    + '</div>';
-}
 
-// ---- column one: browse ----------------------------------------------------
-function renderBrowse(){
-  const q = (($('browsefilter') || {}).value || '').trim().toLowerCase();
-  $('by-host').classList.toggle('on', MODE === 'host');
-  $('by-state').classList.toggle('on', MODE === 'state');
-  const hosts = STATE.hosts || [], states = STATE.states || [];
-  $('browsecount').textContent =
-    `${hosts.length} host${hosts.length === 1 ? '' : 's'} · ` +
-    `${states.length} state${states.length === 1 ? '' : 's'}`;
-  $('browsefilter').placeholder = MODE === 'host' ? 'Filter hosts…' : 'Filter states…';
-  const out = MODE === 'host' ? browseHosts(q) : browseStates(q);
-  $('browselist').innerHTML = out ||
-    `<div class=empty>Nothing matches “${esc(q)}”.</div>`;
-}
+// ---- the rail ---------------------------------------------------------------
+// Which section is open, and what is open inside it. MODE used to mean "am I
+// browsing hosts or states", which was a two-way switch bolted onto a column;
+// hosts and states are sections of their own now and NAV says which one you
+// are in.
+let NAV = 'overview';
+let SEL = {host: null, state: null, run: null};
 
-function browseHosts(q){
-  const hosts = STATE.hosts || [];
-  if(!hosts.length){
-    return `<div class=empty>${esc(STATE.fleetNote ||
-      'The Controller has no hosts enrolled yet.')} States can still be declared, and
-      assigned by typing a target.</div>`;
+// The worst verdict anywhere in a section, so the rail carries urgency and not
+// just arithmetic. A fleet of sixteen reads "16"; the same fleet with three
+// hosts failing reads "16" in red, and you can see that from the Overview.
+function worstOf(labels){
+  let worst = null;
+  for(const l of labels){
+    if(worst === null || STATE_RANK[l] < STATE_RANK[worst]) worst = l;
   }
+  return worst;
+}
+const CLS_OF = {failing: 'err', 'could not run': 'err', 'out of date': 'amber',
+                drifted: 'amber', 'never applied': 'faint', 'as declared': 'ok',
+                'not managed': 'faint', 'not assigned': 'faint'};
+
+function renderRail(){
+  document.querySelectorAll('.rail-item').forEach((b) => {
+    b.classList.toggle('on', b.dataset.nav === NAV);
+  });
+  const hosts = STATE.hosts || [], states = STATE.states || [];
+  const hv = hosts.map((h) => hostStatus(h, statesFor(h).all).label);
+  const sv = states.map((x) => stateStatus(x.name).label);
+  const runs = (STATE.runs || []).filter((r) => !r.preview);
+  const bad = runs.filter((r) => r.failed || r.error).length;
+  const put = (id, n, cls) => {
+    const e = $(id); if(!e) return;
+    e.textContent = n === 0 ? '' : String(n);
+    e.className = 'cnt' + (cls ? ' ' + cls : '');
+  };
+  put('n-hosts', hosts.length, CLS_OF[worstOf(hv)]);
+  put('n-states', states.length, CLS_OF[worstOf(sv)]);
+  put('n-runs', runs.length, bad ? 'err' : '');
+  put('n-rules', (STATE.rules || []).length, '');
+}
+
+// ---- the view ---------------------------------------------------------------
+// One section at a time, full width. A detail opens INSIDE its section with a
+// way back, rather than in a column of its own that duplicated the column
+// beside it.
+function renderView(){
+  const v = $('view');
+  if(!v) return;
+  // The whole view is rebuilt from STATE, including the filter box — so a poll
+  // landing mid-word would take the cursor out of it and the next keystroke
+  // would go nowhere. Twenty seconds is long enough to be typing in and short
+  // enough to happen while you are.
+  const f = document.activeElement;
+  const hadFocus = f && f.id === 'filter';
+  const caret = hadFocus ? f.selectionStart : null;
+  _renderView(v);
+  if(hadFocus){
+    const again = $('filter');
+    if(again){
+      again.focus();
+      const at = caret == null ? again.value.length : caret;
+      try{ again.setSelectionRange(at, at); }catch(e){}
+    }
+  }
+}
+
+function _renderView(v){
+  if(NAV === 'hosts' && SEL.host) { v.innerHTML = back('hosts', 'Hosts')
+      + `<div class=det id=detail>${hostDetail(hostById(SEL.host)) }</div>`; return; }
+  if(NAV === 'states' && SEL.state){ v.innerHTML = back('states', 'States')
+      + `<div class=det id=detail>${stateDetail(SEL.state, hostById(SEL.host))}</div>`;
+    fillSls(SEL.state); return; }
+  if(NAV === 'runs' && SEL.run){
+    const r = (STATE.runs || []).find((x) => x.id === SEL.run);
+    if(r){ v.innerHTML = back('runs', 'Runs') + `<div class=det id=detail>${runDetail(r)}</div>`;
+      return; }
+  }
+  v.innerHTML = {overview: viewOverview, hosts: viewHosts, states: viewStates,
+                 runs: viewRuns, rules: viewRules}[NAV]();
+}
+
+function back(nav, label){
+  return `<button class=crumb data-nav="${esc(nav)}">\u2190 ${esc(label)}</button>`;
+}
+
+function vh(title, count, right){
+  return `<div class=vh><h1>${esc(title)}</h1>
+    ${count ? `<span class=n>${esc(count)}</span>` : ''}
+    ${right ? `<span class=sp></span>${right}` : ''}</div>`;
+}
+
+const FILTER = {hosts: '', states: '', runs: ''};
+function srch(nav, placeholder){
+  return `<input class=srch id=filter type=search data-filter="${esc(nav)}"
+    placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"
+    value="${esc(FILTER[nav] || '')}">`;
+}
+
+// ---- overview ----------------------------------------------------------------
+// The question this answers is "is my fleet all right", which nothing on the
+// three-column screen answered: you had to pick a host to learn anything, and
+// then you had learned it about one host.
+function viewOverview(){
+  if(startingOut()) return startPanel();
+  const hosts = STATE.hosts || [];
+  const rows = hosts.map((h) => ({h, d: statesFor(h)}))
+    .map((x) => ({...x, st: hostStatus(x.h, x.d.all)}));
+  const counts = {};
+  rows.forEach((x) => { counts[x.st.label] = (counts[x.st.label] || 0) + 1; });
+  const chips = Object.keys(STATE_RANK).filter((l) => counts[l]).map((l) =>
+    `<button class="chip ${CLS_OF[l] || ''}" data-verdict="${esc(l)}">
+       <b>${counts[l]}</b> ${esc(l)}</button>`).join('');
+  // Attention first. A fleet is read top-down and the top is the only part
+  // anyone is guaranteed to read.
+  // Everything that is not "as declared", "never applied" or unmanaged — i.e.
+   // every host Baseline has something to say about. Drifted belongs here: it
+   // means Baseline had to CHANGE the host to keep it declared, which is worth
+   // a look even though it ended well.
+  const need = rows.filter((x) => x.st.rank <= STATE_RANK.drifted)
+    .sort((a, b) => a.st.rank - b.st.rank)
+    .slice(0, 12);
+  let out = vh('Overview', `${hosts.length} host${hosts.length === 1 ? '' : 's'} · `
+    + `${(STATE.states || []).length} state${(STATE.states || []).length === 1 ? '' : 's'}`)
+    + `<div class=chips>${chips}</div>`;
+  if(need.length){
+    // A SECTION heading, not a second view heading. It was `.vh h1` — the
+    // element that names the open section — so the Overview read as two
+    // sections on one screen, which is the exact thing this layout exists to
+    // stop doing.
+    out += `<div class=sec><h4>Needs attention</h4></div>`
+      + `<div class=grid>` + need.map(({h, st}) =>
+        `<div class=r data-host="${esc(h.id)}" style="grid-template-columns:minmax(0,14em) minmax(0,9em) minmax(0,1fr) auto">
+           <span class="c m">${esc(h.label || h.id)}</span>
+           <span class="c f m">${esc(h.address || '')}</span>
+           <span class="c f">${esc(st.note)}</span>
+           <span class="c ${st.cls}">${esc(st.label)}</span></div>`).join('')
+      + '</div>';
+  } else {
+    out += `<div class=grid><div class=empty>Every managed host is as declared.</div></div>`;
+  }
+  return out;
+}
+
+// ---- hosts -------------------------------------------------------------------
+function viewHosts(){
+  const hosts = STATE.hosts || [];
+  const head = vh('Hosts', `${hosts.length} host${hosts.length === 1 ? '' : 's'}`,
+                  srch('hosts', 'Filter hosts\u2026'));
+  if(!hosts.length){
+    return head + `<div class=grid><div class=empty>${esc(STATE.fleetNote ||
+      'The Controller has no hosts enrolled yet.')} States can still be declared,
+      and assigned by typing a target.</div></div>`;
+  }
+  const q = (FILTER.hosts || '').trim().toLowerCase();
   const byEnv = {};
   for(const h of hosts){ (byEnv[h.environment || ''] = byEnv[h.environment || ''] || []).push(h); }
-  let out = '';
+  const COLS = 'grid-template-columns:minmax(0,13em) minmax(0,10em) minmax(0,1fr) minmax(0,9em) auto';
+  let out = head + '<div class=grid>'
+    + `<div class=hd style="${COLS}"><span>Host</span><span>Address</span>
+       <span>Must satisfy</span><span>Last run</span><span>Verdict</span></div>`;
+  let any = false;
   for(const env of Object.keys(byEnv).sort()){
     const all = byEnv[env].map((h) => ({h, d: statesFor(h)}))
       .map((x) => ({...x, st: hostStatus(x.h, x.d.all)}));
@@ -747,117 +947,130 @@ function browseHosts(q){
       || x.d.all.some((n) => n.toLowerCase().includes(q));
     const vis = all.filter(hit);
     if(!vis.length) continue;
-    // Attention first, then by name.
+    any = true;
     vis.sort((a, b) => a.st.rank - b.st.rank
       || (a.h.label || a.h.id).localeCompare(b.h.label || b.h.id));
     const counts = {};
     for(const x of all){ counts[x.st.label] = (counts[x.st.label] || 0) + 1; }
     const managed = all.filter((x) => x.d.all.length).length;
     const sum = managed
-      ? ['failing', 'drifted', 'never applied', 'as declared', 'not managed']
-          .filter((k) => counts[k]).map((k) => `${counts[k]} ${k}`).join(' · ')
+      ? Object.keys(STATE_RANK).filter((k) => counts[k])
+          .map((k) => `${counts[k]} ${k}`).join(' \u00b7 ')
       : `${all.length} host${all.length === 1 ? '' : 's'}, none managed`;
-    out += `<div class=grp>${esc(env || 'No environment')}<span class=s>· ${esc(sum)}</span>`
+    out += `<div class=gh>${esc(env || 'No environment')}<span class=s>\u00b7 ${esc(sum)}</span>`
       + (env && CAN_WRITE ? `<button class='sm${managed ? '' : ' primary'}'
           data-assignenv="${esc(env)}">Assign all</button>` : '')
       + '</div>';
-    out += vis.map(({h, st}) => row({
-      name: h.label || h.id,
-      extra: h.address ? (h.address + (h.kind === 'ssh' ? ' · SSH' : '')) : '',
-      dot: st.cls, title: st.note,
-      sel: MODE === 'host' && SEL.host === h.id,
-      data: `data-host="${esc(h.id)}"`})).join('');
+    out += vis.map(({h, d, st}) => {
+      const last = runsFor(h.id)[0];
+      // A host with nothing assigned gets DASHES, not the words "not managed"
+      // in two more columns. Sixteen unconfigured hosts used to come to 840px
+      // of screen whose entire content was "nothing is set up yet", said
+      // thirty-two times; the group header above says it once, for all of
+      // them, and the row says nothing because there is nothing to say. The
+      // title still explains it on hover.
+      const bare = !d.all.length;
+      return `<div class="r${SEL.host === h.id ? ' sel' : ''}" data-host="${esc(h.id)}"
+        style="${COLS}" title="${esc(st.note)}">
+        <span class="c m">${esc(h.label || h.id)}</span>
+        <span class="c f m">${esc(h.address || '')}${h.kind === 'ssh' ? ' \u00b7 SSH' : ''}</span>
+        <span class="c f">${bare ? '\u2014' : esc(d.all.join(', '))}</span>
+        <span class="c f">${last ? esc(ago(last.started)) : '\u2014'}</span>
+        <span class="c ${bare ? 'f' : st.cls}">${bare ? '\u2014' : esc(st.label)}</span></div>`;
+    }).join('');
   }
-  return out;
+  out += '</div>';
+  return any ? out : head + `<div class=grid><div class=empty>Nothing matches
+    \u201c${esc(q)}\u201d.</div></div>`;
 }
 
-function browseStates(q){
+// ---- states ------------------------------------------------------------------
+function viewStates(){
   const states = STATE.states || [];
+  const head = vh('States', `${states.length} declared`,
+    (CAN_WRITE ? `<button class='sm primary' id=newstate>+ New state</button>` : '')
+    + srch('states', 'Filter states\u2026'));
   if(!states.length){
-    return `<div class=empty>Nothing declared yet.
-      ${CAN_WRITE ? 'Use <b>+ New state</b> in the detail pane.' : ''}</div>`;
+    return head + `<div class=grid><div class=empty>Nothing declared yet. A state is
+      the packages, files and services a host must have.</div></div>`;
   }
-  const rows = states.map((s) => ({s, st: stateStatus(s.name), on: hostsWith(s.name).length}))
-    .filter((x) => !q || x.s.name.toLowerCase().includes(q) || x.st.label.includes(q));
-  if(!rows.length) return '';
+  const q = (FILTER.states || '').trim().toLowerCase();
+  const rows = states.map((x) => ({s: x, st: stateStatus(x.name), on: hostsWith(x.name)}))
+    .filter((r) => !q || r.s.name.toLowerCase().includes(q) || r.st.label.includes(q));
+  if(!rows.length){
+    return head + `<div class=grid><div class=empty>Nothing matches
+      \u201c${esc(q)}\u201d.</div></div>`;
+  }
   rows.sort((a, b) => a.st.rank - b.st.rank || a.s.name.localeCompare(b.s.name));
-  return `<div class=grp>Declared states<span class=s>· ${rows.length} shown</span></div>`
-    + rows.map(({s, st, on}) => row({
-        name: s.name, pill: `v${s.version}`,
-        extra: on ? `on ${on}` : '',
-        dot: st.cls, title: st.note,
-        sel: MODE === 'state' && SEL.state === s.name,
-        data: `data-state="${esc(s.name)}"`})).join('');
+  const COLS = 'grid-template-columns:minmax(0,16em) minmax(0,5em) minmax(0,1fr) auto';
+  return head + '<div class=grid>'
+    + `<div class=hd style="${COLS}"><span>State</span><span>Version</span>
+       <span>On</span><span>Worst</span></div>`
+    + rows.map(({s, st, on}) => `<div class="r${SEL.state === s.name ? ' sel' : ''}"
+        data-state="${esc(s.name)}" style="${COLS}" title="${esc(st.note)}">
+        <span class="c m">${esc(s.name)}</span>
+        <span class="c f m">v${esc(s.version)}</span>
+        <span class="c f">${on.length
+          ? esc(`${on.length} host${on.length === 1 ? '' : 's'}`)
+          : 'no host \u2014 declaring is not assigning'}</span>
+        <span class="c ${st.cls}">${esc(st.label)}</span></div>`).join('')
+    + '</div>';
 }
 
-// ---- column two: what the selection is made of -----------------------------
-function renderMiddle(){
-  const head = $('col2head'), list = $('col2list');
-  if(MODE === 'host'){
-    const h = hostById(SEL.host);
-    if(!h){
-      head.innerHTML = 'Must satisfy';
-      list.innerHTML = '<div class=empty>Pick a host.</div>';
-      return;
-    }
-    const d = statesFor(h);
-    head.innerHTML = `Must satisfy <span class=n>${esc(h.label || h.id)}</span>`
-      + (CAN_WRITE ? `<span class=sp></span><button class='sm'
-          data-assignhost="${esc(h.id)}">Assign…</button>` : '');
-    const dotFor = (n) => hostStateStatus(h, n);
-    let out = d.all.length
-      ? d.direct.map((n) => { const st = dotFor(n); return row({name: n, dot: st.cls,
-            title: st.note, sel: SEL.state === n,
-            data: `data-pickstate="${esc(n)}"`}); }).join('')
-        + d.viaEnv.map((n) => { const st = dotFor(n); return row({name: n,
-            pill: `via ${h.environment}`, pillCls: 'inh', dot: st.cls, title: st.note,
-            sel: SEL.state === n, data: `data-pickstate="${esc(n)}"`}); }).join('')
-      : `<div class=empty>Nothing assigned. Baseline does not look at this host
-         until something is.</div>`;
-    // Rules and runs are ABOUT something. They were two more full-width tables
-    // at the bottom of the page, which is where you went to find out whether
-    // the thing you were looking at had any.
-    const rules = (STATE.rules || []);
-    if(rules.length){
-      out += '<div class=grp>After a state is applied<span class=s>· event rules</span></div>'
-        + rules.map((r) => row({name: r.name, extra: r.on || r.event || '',
-            data: `data-rule="${esc(r.name)}"`})).join('');
-    }
-    const runs = runsFor(h.id).slice(0, 12);
-    out += '<div class=grp>Recent runs<span class=s>· this host</span></div>'
-      + (runs.length ? runs.map((r) => row({
-          name: runTime(r), extra: runWord(r), dot: runDot(r),
-          sel: SEL.run === r.id, data: `data-run="${esc(r.id)}"`})).join('')
-        : '<div class=empty>Nothing applied to it yet.</div>');
-    list.innerHTML = out;
-    return;
+// ---- runs --------------------------------------------------------------------
+// Its own section at last. The run history used to be the bottom third of the
+// middle column, about whichever host happened to be selected, so "what has
+// been applied lately" was a question the console could not be asked.
+function viewRuns(){
+  const all = (STATE.runs || []);
+  const q = (FILTER.runs || '').trim().toLowerCase();
+  const rows = all.filter((r) => !q
+    || String(r.host_id).toLowerCase().includes(q)
+    || String(r.state_name || '').toLowerCase().includes(q)
+    || runWord(r).includes(q));
+  const head = vh('Runs', `${all.length} recorded`, srch('runs', 'Filter runs\u2026'));
+  if(!rows.length){
+    return head + `<div class=grid><div class=empty>${all.length
+      ? `Nothing matches \u201c${esc(q)}\u201d.`
+      : 'Nothing has been applied yet.'}</div></div>`;
   }
-  // By state: the hosts it lands on.
-  const name = SEL.state;
-  if(!name){
-    head.innerHTML = 'On these hosts';
-    list.innerHTML = '<div class=empty>Pick a state.</div>';
-    return;
-  }
-  const on = hostsWith(name);
-  head.innerHTML = `On these hosts <span class=n>${esc(name)}</span>`
-    + (CAN_WRITE ? `<span class=sp></span><button class='sm'
-        data-assign="${esc(name)}">Assign…</button>` : '');
-  list.innerHTML = on.length
-    ? on.map((h) => {
-        // THIS state on that host. hostStatus() is the host's roll-up across
-        // every state it has, so it painted a red dot beside a host on a state
-        // page where that state was fine — the failure belonged to a different
-        // state entirely. Same mistake as the "also on" list below.
-        const st = hostStateStatus(h, name);
-        const viaEnv = statesFor(h).viaEnv.includes(name);
-        return row({name: h.label || h.id, extra: h.address || '',
-          pill: viaEnv ? `via ${h.environment}` : '', pillCls: 'inh',
-          dot: st.cls, title: `${st.label} \u2014 ${st.note}`, sel: SEL.host === h.id,
-          data: `data-pickhost="${esc(h.id)}"`});
+  const COLS = 'grid-template-columns:minmax(0,13em) minmax(0,12em) minmax(0,1fr) auto';
+  return head + '<div class=grid>'
+    + `<div class=hd style="${COLS}"><span>When</span><span>Host</span>
+       <span>State</span><span>Outcome</span></div>`
+    + rows.slice(0, 200).map((r) => {
+        const h = hostById(r.host_id);
+        return `<div class="r${SEL.run === r.id ? ' sel' : ''}" data-run="${esc(r.id)}"
+          style="${COLS}">
+          <span class="c f m">${esc(runTime(r))}</span>
+          <span class="c m">${esc(h ? (h.label || h.id) : r.host_id)}</span>
+          <span class="c f">${esc(r.state_name || '')}</span>
+          <span class="c ${runDot(r)}">${esc(runWord(r))}</span></div>`;
       }).join('')
-    : `<div class=empty>Not assigned to anything yet — declaring a state does
-       not apply it.</div>`;
+    + '</div>';
+}
+
+// ---- rules -------------------------------------------------------------------
+function viewRules(){
+  const rules = STATE.rules || [];
+  const head = vh('Rules', `${rules.length} rule${rules.length === 1 ? '' : 's'}`,
+    CAN_WRITE ? `<button class='sm primary' id=newrule>+ New rule</button>` : '');
+  if(!rules.length){
+    return head + `<div class=grid><div class=empty>No rules. A rule runs
+      something after a state is applied \u2014 capture the host's config,
+      reapply a state, or run a command.</div></div>`;
+  }
+  const COLS = 'grid-template-columns:minmax(0,14em) minmax(0,12em) minmax(0,1fr) auto';
+  return head + '<div class=grid>'
+    + `<div class=hd style="${COLS}"><span>Rule</span><span>When</span>
+       <span>Does</span><span></span></div>`
+    + rules.map((r) => `<div class=r data-rule="${esc(r.name)}" style="${COLS}">
+        <span class="c m">${esc(r.name)}</span>
+        <span class="c f">${esc(r.on || r.event || '')}</span>
+        <span class="c f">${esc(r.action || '')}${r.argument ? ' \u00b7 ' + esc(r.argument) : ''}</span>
+        <span class="c f">${CAN_WRITE ? `<button class=sm data-delrule="${esc(r.name)}"
+          >Delete</button>` : ''}</span></div>`).join('')
+    + '</div>';
 }
 
 function runTime(r){
@@ -868,34 +1081,20 @@ function runTime(r){
 function runWord(r){
   if(r.preview) return 'preview';
   if(r.failed) return `${r.failed} failed`;
+  // AFTER `failed`, which an error may merely be the message for. On its own it
+  // means the run never happened — and that was being described as "nothing
+  // changed", which is true and the exact opposite of useful.
+  if(r.error) return 'could not run';
   if(r.changed) return `${r.changed} changed`;
   return 'nothing changed';
 }
 function runDot(r){
   if(r.preview) return 'faint';
-  if(r.failed) return 'err';
+  if(r.failed || r.error) return 'err';
   if(r.changed) return 'amber';
   return 'ok';
 }
 // ---- column three: the thing itself ----------------------------------------
-function renderDetail(){
-  const c = $('col3');
-  if(startingOut()){ c.innerHTML = startPanel(); return; }
-  // A state is selected: show the state, and how it went on the selected host.
-  if(SEL.state && (STATE.states || []).some((s) => s.name === SEL.state)){
-    c.innerHTML = stateDetail(SEL.state, MODE === 'host' ? hostById(SEL.host)
-                                                         : hostById(SEL.host));
-    return;
-  }
-  if(SEL.run){
-    const r = (STATE.runs || []).find((x) => x.id === SEL.run);
-    if(r){ c.innerHTML = runDetail(r); return; }
-  }
-  const h = hostById(SEL.host);
-  if(h){ c.innerHTML = hostDetail(h); return; }
-  c.innerHTML = `<div class=empty>Pick a host or a state on the left.</div>`;
-}
-
 function startPanel(){
   const hosts = (STATE.hosts || []).length;
   return `<div class=start>
@@ -976,10 +1175,11 @@ function stateDetail(name, host){
   const tally = {};
   on.forEach((h) => { const l = hostStateStatus(h, name).label;
                       tally[l] = (tally[l] || 0) + 1; });
-  const CLS = {failing: 'err', 'out of date': 'amber', drifted: 'amber',
-               'never applied': 'faint', 'as declared': 'ok'};
+  // CLS_OF, not a second copy of it. There were two of these maps for a
+  // while and "could not run" had to be added to both; the one that was
+  // missed renders a red verdict in no colour at all.
   const counts = Object.keys(STATE_RANK).filter((l) => tally[l])
-    .map((l) => `<span class="${CLS[l]}">${tally[l]} ${esc(l)}</span>`)
+    .map((l) => `<span class="${CLS_OF[l] || ''}">${tally[l]} ${esc(l)}</span>`)
     .join('<span class=faint>·</span>');
   let out = `<h2>${esc(name)}</h2>
     <div class=sub>v${esc(s.version)} · on ${on.length} host${on.length === 1 ? '' : 's'}
@@ -1091,10 +1291,7 @@ async function fillSls(name){
   if(now) now.textContent = SLS_CACHE[name];
 }
 
-function renderAll(){
-  renderBrowse(); renderMiddle(); renderDetail();
-  if(SEL.state) fillSls(SEL.state);
-}
+function renderAll(){ renderRail(); renderView(); }
 
 // ---- actions ---------------------------------------------------------------
 
@@ -1704,7 +1901,7 @@ $('dlg-state').addEventListener('close', async (ev) => {
     // Land on what was just written. Saving a state and being returned to the
     // host you happened to be looking at is the console losing your place at
     // the one moment it knows exactly where you are.
-    MODE = 'state'; SEL.state = r.name; SEL.run = null;
+    NAV = 'states'; SEL.state = r.name; SEL.run = null;
     delete SLS_CACHE[r.name];      // it is a new version; the old body is stale
     say(`Saved ${r.name} v${r.version}.`, 'ok'); load();
   }catch(e){ say(e.message, 'err'); }
@@ -1733,7 +1930,7 @@ $('dlg-assign').addEventListener('close', async () => {
     say(`Assigned ${$('a-state').value} to ${target}.`, 'ok');
     // Show the state that was just assigned, so "did that land where I meant"
     // is answered by the screen rather than by looking for it.
-    MODE = 'state'; SEL.state = $('a-state').value; SEL.run = null;
+    NAV = 'states'; SEL.state = $('a-state').value; SEL.run = null;
     load();
   }catch(e){ say(e.message, 'err'); }
 });
@@ -1750,93 +1947,86 @@ async function load(){
              drift: runs.drift, assign: a.assignments, meta: r,
              hosts: t.hosts || [], envs: t.environments || [], fleetNote: t.note};
     // A selection that no longer exists — a host the Controller stopped
-    // reporting, a state somebody deleted — must not leave the columns beside
-    // it describing something that is gone.
+    // reporting, a state somebody deleted — must not leave a detail pane
+    // describing something that is gone.
     if(SEL.host && !hostById(SEL.host)) SEL.host = null;
     if(SEL.state && !(STATE.states || []).some((x) => x.name === SEL.state)) SEL.state = null;
     if(SEL.run && !(STATE.runs || []).some((x) => x.id === SEL.run)) SEL.run = null;
-    // Open on something rather than on three empty columns.
-    if(!SEL.host && MODE === 'host' && (STATE.hosts || []).length){
-      const ranked = STATE.hosts.map((h) => ({h, st: hostStatus(h, statesFor(h).all)}))
-        .sort((x, y) => x.st.rank - y.st.rank
-          || (x.h.label || x.h.id).localeCompare(y.h.label || y.h.id));
-      SEL.host = ranked[0].h.id;
-    }
-    if(!SEL.state && MODE === 'state' && (STATE.states || []).length){
-      SEL.state = STATE.states[0].name;
-    }
     renderAll();
   }catch(e){ say(e.message, 'err'); }
 }
 
 // ---- picking ----------------------------------------------------------------
+// `go(nav)` is the only way the section changes, and it is what the rail, the
+// crumbs and the overview's chips all call. One entry point, so a section can
+// never be open with another section's selection showing.
+function go(nav, sel){
+  NAV = nav;
+  if(sel !== undefined){ Object.assign(SEL, sel); }
+  renderAll();
+  const v = $('view'); if(v) v.scrollTop = 0;
+}
+
 function pick(what, value){
-  if(what === 'host'){ SEL.host = value; SEL.run = null;
+  if(what === 'host'){
+    SEL.host = value; SEL.run = null;
     // Keep a state selected only while the new host actually has it; otherwise
-    // the detail pane would describe a state this host does not have to satisfy.
+    // the detail would describe a state this host does not have to satisfy.
     const h = hostById(value);
     if(SEL.state && (!h || !statesFor(h).all.includes(SEL.state))) SEL.state = null;
+    return go('hosts');
   }
-  if(what === 'state'){ SEL.state = value; SEL.run = null; }
-  if(what === 'run'){ SEL.run = value; SEL.state = null; }
-  renderAll();
+  if(what === 'state'){ SEL.state = value; SEL.run = null; return go('states'); }
+  if(what === 'run'){ SEL.run = value; SEL.state = null; return go('runs'); }
 }
 
 document.addEventListener('click', (ev) => {
-  const it = ev.target.closest('.it, .ln.pick');
+  // The rail, the crumbs and the overview chips are buttons, so they are read
+  // BEFORE the row handler bails out on a button click.
+  const nav = ev.target.closest('[data-nav]');
+  if(nav){
+    // Leaving a section closes whatever was open inside it. Coming back to
+    // "Hosts" and landing in one host's detail because that is where you were
+    // last time is the console deciding where you are going.
+    const to = nav.dataset.nav;
+    if(to === 'hosts') SEL.host = null;
+    if(to === 'states') SEL.state = null;
+    if(to === 'runs') SEL.run = null;
+    return go(to);
+  }
+  const chip = ev.target.closest('[data-verdict]');
+  if(chip){ FILTER.hosts = chip.dataset.verdict; SEL.host = null; return go('hosts'); }
+
+  const it = ev.target.closest('.r, .ln.pick');
   if(!it || ev.target.closest('button')) return;
   const d = it.dataset;
   if(d.host) return pick('host', d.host);
   if(d.state) return pick('state', d.state);
   if(d.pickstate) return pick('state', d.pickstate);
   if(d.run) return pick('run', d.run);
+  // A rule row opens the rule. openRule() has always taken a name and filled
+  // the dialog from it; nothing ever called it with one, because the rules were
+  // rows in a column whose click handler had no case for them. They were
+  // editable in principle and unreachable in practice.
+  if(d.rule && CAN_WRITE) return openRule(d.rule);
   if(d.pickhost){
     // Following a host from a state keeps you on that state: the question
     // "how is web-stack doing on ubuntu-web-1" is one thing, not two.
-    SEL.host = d.pickhost; SEL.run = null; renderAll();
+    SEL.host = d.pickhost; SEL.run = null; return go('states');
   }
-});
-
-// Switching ends. Each end keeps its own selection, so going back and forth
-// does not lose your place.
-$('by-host').addEventListener('click', () => {
-  MODE = 'host'; $('browsefilter').value = ''; renderAll();
-});
-$('by-state').addEventListener('click', () => {
-  MODE = 'state'; $('browsefilter').value = '';
-  if(!SEL.state && (STATE.states || []).length) SEL.state = STATE.states[0].name;
-  renderAll();
 });
 
 // Filtering redraws from STATE, not from the server: it is a view of data the
 // page already has, and a request per keystroke would be a request per
-// keystroke to the Controller.
-$('browsefilter').addEventListener('input', renderBrowse);
-
-// Draggable column edges, as Flashback has: a fleet of long hostnames and one
-// of short names do not want the same widths, and this file cannot know which.
-for(const [gut, varName, min, max] of [['gut1', '--c1', 190, 560],
-                                       ['gut2', '--c2', 190, 620]]){
-  const el = $(gut); if(!el) continue;
-  el.addEventListener('mousedown', (down) => {
-    down.preventDefault();
-    el.classList.add('drag');
-    const startX = down.clientX;
-    const start = parseInt(getComputedStyle(document.documentElement)
-      .getPropertyValue(varName) || (varName === '--c1' ? '290' : '300'), 10);
-    const move = (m) => {
-      const w = Math.min(max, Math.max(min, start + (m.clientX - startX)));
-      document.documentElement.style.setProperty(varName, w + 'px');
-    };
-    const up = () => {
-      el.classList.remove('drag');
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
-    };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
-  });
-}
+// keystroke to the Controller. The value is kept in FILTER because the view is
+// rebuilt from scratch on every render and the input would otherwise empty
+// itself under the cursor on the twenty-second poll.
+document.addEventListener('input', (ev) => {
+  const f = ev.target.closest('[data-filter]');
+  if(!f) return;
+  FILTER[f.dataset.filter] = f.value;
+  renderView();          // which puts the cursor back where it was
+});
 
 load();
 // Poll only while the tab is visible: one request per app every 20s in every
