@@ -286,17 +286,31 @@ transition:width .25s ease}
 .applybar.bad i{background:var(--err)}
 /* The per-host lines, across the width rather than down it: sixteen hosts one
    per row is a panel taller than the console. */
-.applyhosts{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));
+.applyhosts{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
 gap:.1em .9em;max-height:8.5em;overflow:auto}
-.applyhosts .h{display:flex;gap:.5em;align-items:baseline;min-width:0;
-padding:.1em 0}
+/* GRID, not flex. The reason used to sit in this row as a third flex item, and
+   a long one — "Desired-state configuration is not configured on this
+   controller (SYSIBLE_BASELINE_URL and …)" — took the whole line and squeezed
+   the hostname to two characters and an ellipsis. Sixteen hosts failing for one
+   reason rendered as sixteen walls of identical text with no readable names in
+   them. The reasons are grouped below the list now; this row is a name and an
+   outcome, which is all it ever needed to be. */
+.applyhosts .h{display:grid;grid-template-columns:minmax(0,1fr) auto;
+gap:0 .5em;align-items:baseline;padding:.1em 0}
 .applyhosts .h .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.applyhosts .h .r{margin-left:auto;font-size:11.5px;white-space:nowrap}
+.applyhosts .h .r{font-size:11.5px;white-space:nowrap}
 .applyhosts .h.waiting{color:var(--faint)}
 .applyhosts .h.running .r{color:var(--accent2)}
 .applyhosts .h.ok .r{color:var(--ok)}
 .applyhosts .h.err .r{color:var(--err)}
-.applyhosts .h .why{display:block;color:var(--faint);font-size:11px}
+/* One entry per distinct reason, with the hosts it happened to. Sixteen hosts
+   that failed the same way is ONE thing to read and one thing to fix. */
+.applywhy{margin-top:.5em;border-top:1px solid var(--line);padding-top:.45em;
+display:grid;gap:.35em;max-height:9em;overflow:auto}
+.applywhy .w{font-size:12px;line-height:1.45}
+.applywhy .w .msg{color:var(--err)}
+.applywhy .w .on{display:block;color:var(--faint);font-size:11.5px;
+overflow:hidden;text-overflow:ellipsis}
 
 /* The roll-up under a state's name: how many hosts are in each condition. */
 .tally{margin:.1em 0 .7em;font-size:12.5px;color:var(--muted);
@@ -1597,21 +1611,42 @@ function renderApply(){
     </div>
     <div class="applybar${c.failed && !APPLY.running ? ' bad' : ''}">
       <i style="width:${pct}%"></i></div>
-    <div class=applyhosts>${APPLY.rows.map(applyRow).join('')}</div>`;
+    <div class=applyhosts>${APPLY.rows.map(applyRow).join('')}</div>
+    ${applyWhy()}`;
 }
 
 function applyRow(r){
   const word = {waiting: 'waiting', running: 'running…', ok: 'done', err: 'failed'}[r.state];
-  // The note is what the Controller said — "Applied on 1 host(s)", or why not.
-  // Shown for a failure always, because that is the thing you need; for a
-  // success only when it says something beyond the obvious.
-  const why = (r.state === 'err' || (r.state === 'ok' && r.note
-               && !/^Applied|^Previewed/.test(r.note))) ? r.note : '';
   return `<div class="h ${r.state}">
     <span class=nm title="${esc(r.label)}">${esc(r.label)}</span>
     <span class=r>${esc(word)}</span>
-    ${why ? `<span class=why>${esc(why)}</span>` : ''}
   </div>`;
+}
+
+// The reasons, grouped. A fleet-wide cause — the Controller not being wired to
+// this service, a shared secret that does not match — fails every host with the
+// SAME sentence, and repeating it once per host buries the one thing there is
+// to do under sixteen copies of it.
+function applyWhy(){
+  const by = new Map();
+  (APPLY.rows || []).forEach((r) => {
+    // A failure always has something to say. A success only when the Controller
+    // said something beyond the obvious.
+    const msg = (r.state === 'err' || (r.state === 'ok' && r.note
+                 && !/^Applied|^Previewed/.test(r.note))) ? (r.note || '') : '';
+    if(!msg) return;
+    if(!by.has(msg)) by.set(msg, []);
+    by.get(msg).push(r.label);
+  });
+  if(!by.size) return '';
+  return '<div class=applywhy>' + [...by.entries()].map(([msg, hosts]) => {
+    const n = hosts.length;
+    const on = n === APPLY.rows.length ? `all ${n} host${n === 1 ? '' : 's'}`
+             : n > 6 ? `${hosts.slice(0, 6).join(', ')} and ${n - 6} more`
+             : hosts.join(', ');
+    return `<div class=w><span class=msg>${esc(msg)}</span>
+      <span class=on>${esc(on)}</span></div>`;
+  }).join('') + '</div>';
 }
 
 // ---- wiring ----------------------------------------------------------------

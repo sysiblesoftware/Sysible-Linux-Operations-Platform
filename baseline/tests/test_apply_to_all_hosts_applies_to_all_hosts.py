@@ -63,6 +63,9 @@ pytestmark = pytest.mark.skipif(not _playwright(), reason="playwright not instal
 
 ASKED = []
 FAIL_ON = set()
+# One slot. Set it to make every failing host fail with the SAME sentence —
+# which is what a fleet-wide cause does, and the case the panel got wrong.
+FAIL_MSG = []
 
 
 @pytest.fixture(scope="module")
@@ -91,7 +94,7 @@ def server(tmp_path_factory):
     def _apply(identity, target, preview=False):
         ASKED.append((target, bool(preview)))
         if target in FAIL_ON:
-            return False, f"{target} refused the task."
+            return False, FAIL_MSG[0] if FAIL_MSG else f"{target} refused the task."
         return True, "Applied on 1 host(s)."
 
     m.controller.request_apply = _apply
@@ -136,6 +139,7 @@ def browser():
 def pg(browser, server):
     ASKED.clear()
     FAIL_ON.clear()
+    FAIL_MSG.clear()
     ctx = browser.new_context(viewport={"width": 1400, "height": 1000},
                               extra_http_headers=OP)
     page = ctx.new_page()
@@ -160,11 +164,22 @@ def _panel(pg):
       return {
         title: (p.querySelector('.ah b')||{}).textContent || '',
         head:  (p.querySelector('.ah .faint')||{}).textContent || '',
-        rows: [...p.querySelectorAll('.applyhosts .h')].map(h => ({
-          name: (h.querySelector('.nm')||{}).textContent || '',
-          result: (h.querySelector('.r')||{}).textContent || '',
-          why: (h.querySelector('.why')||{}).textContent || '',
-          cls: h.className,
+        rows: [...p.querySelectorAll('.applyhosts .h')].map(h => {
+          const nm = h.querySelector('.nm');
+          return {
+            name: nm ? nm.textContent : '',
+            result: (h.querySelector('.r')||{}).textContent || '',
+            cls: h.className,
+            // Is the name itself cut off? scrollWidth is what the text needs,
+            // clientWidth is what the box gives it.
+            clipped: nm ? nm.scrollWidth > nm.clientWidth + 1 : false,
+            shown: nm ? Math.round(nm.clientWidth) : 0,
+          };
+        }),
+        // One entry per distinct reason: the message, and the hosts it hit.
+        whys: [...p.querySelectorAll('.applywhy .w')].map(w => ({
+          msg: (w.querySelector('.msg')||{}).textContent || '',
+          on: (w.querySelector('.on')||{}).textContent || '',
         })),
       };
     }""")
@@ -234,10 +249,71 @@ def test_one_host_failing_is_reported_against_that_host(pg):
     p = _panel(pg)
     bad = [r for r in p["rows"] if r["name"] == "web-05"]
     assert bad and bad[0]["result"] == "failed", p["rows"]
-    assert "refused the task" in bad[0]["why"], bad[0]
+    # The reason is below the list now rather than inside web-05's row, and it
+    # has to still say which host it was about.
+    assert len(p["whys"]) == 1, p["whys"]
+    assert "refused the task" in p["whys"][0]["msg"], p["whys"]
+    assert p["whys"][0]["on"].strip() == "web-05", p["whys"]
     # …and the other twelve still went.
     assert len(ASKED) == len(FLEET), ASKED
     assert sum(1 for r in p["rows"] if r["result"] == "done") == len(FLEET) - 1
+
+
+# ---------------------------------------------------------------------------
+# what the operator saw: sixteen copies of one sentence, and no hostnames
+# ---------------------------------------------------------------------------
+# Reported with a screenshot: every host failing with "SYSIBLE_BASELINE_URL and
+# SYSIBLE_BASELINE_AGENT_TOKEN unset", sixteen times over, and the hostnames
+# squeezed down to two characters and an ellipsis.
+UNSET = ("This controller is not wired to Sysible Baseline (SYSIBLE_BASELINE_URL "
+         "and SYSIBLE_BASELINE_AGENT_TOKEN unset), so nothing can be applied. "
+         "These are written into the controller's .env by the SLOP installer, "
+         "and updating the platform does not re-run it.")
+
+
+def test_one_reason_shared_by_the_whole_fleet_is_stated_once(pg):
+    FAIL_MSG.append(UNSET)
+    FAIL_ON.update(h["id"] for h in FLEET)
+    _apply_all(pg)
+    p = _panel(pg)
+    assert len(p["rows"]) == len(FLEET), p["rows"]
+    assert all(r["result"] == "failed" for r in p["rows"]), p["rows"]
+    # ONE entry, not thirteen.
+    assert len(p["whys"]) == 1, [w["msg"][:40] for w in p["whys"]]
+    assert "SYSIBLE_BASELINE_URL" in p["whys"][0]["msg"]
+    # …and it says it was all of them rather than listing every name.
+    assert p["whys"][0]["on"].strip() == f"all {len(FLEET)} hosts", p["whys"][0]
+    # The sentence appears once in the panel's text, not once per host.
+    txt = pg.inner_text("#applypanel")
+    assert txt.count("SYSIBLE_BASELINE_URL") == 1, txt.count("SYSIBLE_BASELINE_URL")
+
+
+def test_the_hostnames_stay_readable_when_every_host_fails(pg):
+    """THE REGRESSION. The reason used to be a third flex item in the host's own
+    row; a sentence that long took the width and the name — which ellipsises —
+    shrank below its own content. Thirteen rows of "we…" is a panel that names
+    nothing."""
+    FAIL_MSG.append(UNSET)
+    FAIL_ON.update(h["id"] for h in FLEET)
+    _apply_all(pg)
+    p = _panel(pg)
+    clipped = [r for r in p["rows"] if r["clipped"]]
+    assert not clipped, clipped
+    # And every name is really in the panel's text, not an ellipsis of one.
+    txt = pg.inner_text("#applypanel")
+    missing = [h["id"] for h in FLEET if h["id"] not in txt]
+    assert not missing, missing
+
+
+def test_two_different_reasons_stay_two_entries(pg):
+    """Grouping must not merge distinct causes — two things wrong is two things
+    to fix, and the hosts have to be attributed to the right one."""
+    FAIL_ON.update({"web-02", "web-03"})
+    _apply_all(pg)
+    p = _panel(pg)
+    assert len(p["whys"]) == 2, p["whys"]
+    hosts = {w["on"].strip() for w in p["whys"]}
+    assert hosts == {"web-02", "web-03"}, p["whys"]
 
 
 def test_the_head_counts_the_failures(pg):
