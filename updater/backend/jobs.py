@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import apps, detached, git
+from . import apps, detached, git, wiring
 
 # Bound the log: a --build pours out a lot, and this lives in memory.
 MAX_LOG_LINES = int(os.environ.get("SYSIBLE_UPDATER_MAX_LOG_LINES", "600"))
@@ -35,6 +35,15 @@ _job_lock = threading.Lock()
 # Which products' jobs would kill the process running them. SLOP's compose
 # project owns this container, so anything that recreates it is in this set.
 SELF_AFFECTING = {"slop"}
+
+# Products whose update is also the moment to check that the Controller's
+# cross-app settings are still true. See wiring.py for why they go stale: they
+# are written by install.sh alone, and an update does not re-run it.
+#
+# `slop` because it is the source of those values; `controller` because it is
+# the consumer, and an operator whose Applies are all failing is at least as
+# likely to press Update on the Controller as on SLOP.
+WIRES_THE_CONTROLLER = {"slop", "controller"}
 
 
 def current() -> dict | None:
@@ -168,6 +177,58 @@ def _run(argv: list[str], cwd: Path) -> int:
         return 124
 
 
+def _wire_up(key: str, root: Path | None = None) -> None:
+    """Carry SLOP's cross-app settings into the Controller's .env. BEFORE the work.
+
+    Before, for three reasons. The values come from SLOP's .env, which a git pull
+    cannot change (it is not tracked), so the repair is correct whether or not
+    the update that follows succeeds. A `controller` update then picks the new
+    values up in the rebuild it was going to do anyway, instead of needing a
+    second recreate. And a `slop` update hands itself to a detached helper that
+    only has SLOP's own checkout mounted (detached.spawn passes `-v {cwd}:{cwd}`)
+    — it cannot see the Controller's .env at all, so after is not an option.
+
+    Never fatal. This is a repair of something that was already broken; a failure
+    here must not stop an update the operator asked for.
+    """
+    try:
+        changes, notes = wiring.repair(root)
+    except Exception as e:                                   # pragma: no cover
+        _log(f"! could not check the Controller's cross-app settings: {e}")
+        return
+    for note in notes:
+        _log(note)
+    # A `controller` update is about to recreate it anyway; recreating it twice
+    # would be two outages for one change.
+    if changes and key != "controller":
+        ok, message = wiring.recreate_controller()
+        _log(("+ " if ok else "! ") + message)
+
+
+def _wire_up_detached(key: str, root: Path | None) -> str:
+    """_wire_up for the path that has no job log. Returns a sentence, or "".
+
+    `start` hands a SLOP update straight to the detached helper without ever
+    creating an in-process job, so `_log` there would either vanish or — worse —
+    append to the PREVIOUS job's log and be read as part of it. The repair still
+    has to happen on this path (it is the main one: Update next to SLOP on the
+    Updates page), so what it did rides back on the message instead.
+    """
+    try:
+        changes, notes = wiring.repair(root)
+    except Exception:                                        # pragma: no cover
+        return ""
+    if not changes:
+        # Say nothing when there was nothing to do, which is the normal case.
+        # Notes without changes are the "no token in SLOP's .env" warning; that
+        # is Apply's problem to report, not this message's.
+        return ""
+    ok, message = wiring.recreate_controller()
+    what = ", ".join(sorted(changes))
+    return (f"Also repaired the Controller's wiring to this platform ({what}) — "
+            + (message + "." if ok else f"but could NOT recreate it: {message}"))
+
+
 def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
     """Pull one checkout forward and rebuild its containers. (ok, message).
 
@@ -175,6 +236,8 @@ def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
     steps — a queue that drifted from the single update would be a second code
     path nobody tests.
     """
+    if key in WIRES_THE_CONTROLLER:
+        _wire_up(key, root)
     _log(mark("pull"))
     rc = _run(["git", "-C", str(root), "-c", f"safe.directory={root}",
                "pull", "--ff-only"], root)
@@ -228,6 +291,9 @@ def _queue_worker(items: list, actor: str) -> None:
                 # SLOP recreates this very container, so nothing can follow it and
                 # nothing here can report the outcome — the detached helper owns
                 # the job from this point (see detached.py and current()).
+                # The wiring repair happens HERE, while this process still exists
+                # and can still see the Controller's checkout.
+                _wire_up(key, root)
                 started, message = detached.spawn(detached.SCRIPT_UPDATE, compose)
                 done.append({"key": key, "ok": bool(started), "message": message})
                 _set(done=list(done))
@@ -268,6 +334,10 @@ def start(key: str, root: Path, compose: Path, actor: str) -> tuple[bool, str]:
         return False, (f"An update of {running.get('app', 'another product')} is already "
                        "running — wait for it to finish.")
     if key in SELF_AFFECTING:
+        # Before the hand-off: see _wire_up. There is no in-process job to log
+        # into on this path, so the repair's own notes go to the service log and
+        # the fact that it happened rides back on the message the console shows.
+        wired = _wire_up_detached(key, apps.checkout_dir(key))
         started, message = detached.spawn(detached.SCRIPT_UPDATE, compose)
         _lock.release()                  # the helper is the lock from here on
         if not started:
@@ -275,7 +345,7 @@ def start(key: str, root: Path, compose: Path, actor: str) -> tuple[bool, str]:
         with _job_lock:
             _job = None                  # current() reads the helper instead
         return True, ("Updating slop… this service restarts as part of it, so the "
-                      "page will drop briefly.")
+                      "page will drop briefly." + (" " + wired if wired else ""))
     with _job_lock:
         _job = {"app": key, "actor": actor, "state": "running",
                 "started": time.time(), "finished": None, "message": "", "log": [],

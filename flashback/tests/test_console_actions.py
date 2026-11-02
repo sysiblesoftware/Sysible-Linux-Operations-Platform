@@ -72,6 +72,35 @@ def _versions(cl):
     return r.json()
 
 
+def test_the_default_local_identity_is_offered_no_restore(tmp_path, monkeypatch):
+    """Unauthenticated local mode is READ-ONLY, and the console has to agree.
+
+    The API refuses a restore from an auditor (above). That is the half that
+    protects the data; this is the half that stops the console offering a button
+    whose only possible outcome is a 403. `data-can-write` is what every write
+    affordance in ui.py keys off, so it is the one thing to assert.
+    """
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH", "0")
+    monkeypatch.setenv("SYSIBLE_FLASHBACK_DATA", str(tmp_path))
+    monkeypatch.delenv("SYSIBLE_FLASHBACK_LOCAL_ROLE", raising=False)
+    monkeypatch.delenv("SLOP_CONTROLLER_UPSTREAM", raising=False)
+    for mod in ("backend.identity", "backend.store", "backend.app"):
+        if mod in sys.modules:
+            importlib.reload(sys.modules[mod])
+    import backend.app as m
+    m = importlib.reload(m)
+    m.store.init_db()
+    with TestClient(m.app, base_url="http://slop.lan") as c:
+        page = c.get("/").text
+    assert "data-can-write='0'" in page, \
+        "unauthenticated local mode rendered a WRITING console"
+    # The button itself is behind that flag, so this is the second lock, not the
+    # first: a refactor that renders it unconditionally has to trip something.
+    assert "if(CAN_WRITE){" in page
+
+
 # ---- the path is really there ---------------------------------------------
 def test_a_backed_up_host_leads_all_the_way_to_a_restore(cl):
     """The exact journey the console's columns make: host → file → version → act."""
@@ -156,6 +185,13 @@ def test_clicking_a_host_row_opens_its_files_and_offers_restore(tmp_path):
 
     os.environ.update(
         SYSIBLE_FLASHBACK_TRUST_GATEWAY_AUTH="0",      # standalone local identity
+        # EXPLICITLY, because the default changed under this test. Unauthenticated
+        # local mode used to be a superuser; it is an AUDITOR now (see
+        # test_the_default_local_identity_is_offered_no_restore below, and the
+        # commit that made all three services read-only without SSO), so a test
+        # about what a superuser is offered has to say that it IS one — otherwise
+        # it asserts the absence of a button that is correctly absent.
+        SYSIBLE_FLASHBACK_LOCAL_ROLE="superuser",
         SYSIBLE_FLASHBACK_DATA=str(tmp_path),
     )
     os.environ.pop("SLOP_CONTROLLER_UPSTREAM", None)
@@ -190,6 +226,12 @@ def test_clicking_a_host_row_opens_its_files_and_offers_restore(tmp_path):
                             "run `playwright install chromium` or set SYSIBLE_TEST_CHROMIUM")
             page = browser.new_page()
             page.goto("http://127.0.0.1:8799/", wait_until="networkidle")
+
+            # The premise, stated: this browser really is holding a
+            # write-capable identity. Without it the restore assertion below
+            # could fail for a reason with nothing to do with the journey.
+            assert page.get_attribute("body", "data-can-write") == "1", \
+                "the test server did not give this session a writing identity"
 
             row = page.locator("#hosts .hostwrap .item").first
             assert row.count(), "no host row rendered"
