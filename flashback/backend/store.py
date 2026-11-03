@@ -532,15 +532,21 @@ def diff_across_hosts(path: str, host_a: str, host_b: str) -> str | None:
 
 
 def open_restore_point(host_id: str, label: str, roots: str = "",
-                       note: str = "") -> int:
-    """Start one. It is 'open' — NOT restorable — until seal_restore_point."""
+                       note: str = "", host_label: str = "") -> int:
+    """Start one. It is 'open' — NOT restorable — until seal_restore_point.
+
+    `label` names the POINT ("before the upgrade"); `host_label` names the HOST.
+    They are two different strings and conflating them renamed the machine: a
+    host Flashback had not seen before was registered under the point's label
+    and then appeared in the hosts column, for ever, as "before the upgrade".
+    """
     host_id = (host_id or "").strip()
     if not host_id:
         raise ValueError("host_id is required")
     now = int(time.time())
     with _LOCK, _db() as c:
         c.execute("INSERT OR IGNORE INTO hosts(host_id, label, last_ts) VALUES(?,?,?)",
-                  (host_id, label or host_id, now))
+                  (host_id, (host_label or host_id).strip(), now))
         cur = c.execute(
             "INSERT INTO restore_points(host_id,label,roots,note,state,created_at) "
             "VALUES(?,?,?,?,'open',?)",
@@ -694,6 +700,63 @@ def list_restore_points(host_id: str = "", sealed_only: bool = False) -> list:
                            (d["id"],)).fetchone()
             d["files"], d["bytes"] = int(st["n"]), int(st["s"])
     return rows
+
+
+def restore_point_roots(point_id: int) -> list:
+    """What this point holds, per captured root: [{root, files, dirs, links,
+    bytes}, …]. Computed in SQL over the whole manifest, because the console
+    only ever fetches the first page of it and a summary built from that page
+    would understate every root after the first.
+    """
+    p = restore_point(point_id)
+    if not p:
+        return []
+    roots = [r for r in str(p.get("roots") or "").split(":") if r.strip()]
+    with _LOCK, _db() as c:
+        rows = list(c.execute(
+            "SELECT path,kind,size FROM restore_point_entries WHERE point_id=?",
+            (int(point_id),)))
+    # Longest root first, so /usr/local wins over / for /usr/local/bin/x.
+    order = sorted(roots, key=len, reverse=True)
+    out = {r: {"root": r, "files": 0, "dirs": 0, "links": 0, "bytes": 0}
+           for r in roots}
+    other = {"root": "elsewhere", "files": 0, "dirs": 0, "links": 0, "bytes": 0}
+    for r in rows:
+        path = r["path"] or ""
+        hit = None
+        for root in order:
+            if path == root or path.startswith(root.rstrip("/") + "/"):
+                hit = out[root]
+                break
+        d = hit if hit is not None else other
+        k = (r["kind"] or "f")[:1]
+        if k == "d":
+            d["dirs"] += 1
+        elif k == "l":
+            d["links"] += 1
+        else:
+            d["files"] += 1
+            d["bytes"] += int(r["size"] or 0)
+    res = [d for d in (out[r] for r in roots)
+           if d["files"] or d["dirs"] or d["links"]]
+    if other["files"] or other["dirs"] or other["links"]:
+        res.append(other)
+    return res
+
+
+def restore_point_counts(host_id: str = "") -> dict:
+    """{host_id: how many restore points it has}. One query for the whole fleet:
+    the console needs it per row, and a point-per-host round trip over a fleet
+    of three hundred is how a host list stops loading."""
+    q = ("SELECT host_id, COUNT(*) n FROM restore_points "
+         "WHERE state='sealed'")
+    args = []
+    if host_id:
+        q += " AND host_id=?"
+        args.append(host_id)
+    q += " GROUP BY host_id"
+    with _LOCK, _db() as c:
+        return {r["host_id"]: int(r["n"]) for r in c.execute(q, args)}
 
 
 def restore_point(point_id: int):

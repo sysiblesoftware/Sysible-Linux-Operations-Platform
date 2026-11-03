@@ -196,3 +196,37 @@ def request_capture(identity, host_id: str) -> tuple[bool, str]:
     if r.status_code >= 400:
         return False, f"the Controller returned HTTP {r.status_code}"
     return True, "Requested — the host captures on its next check-in (within a minute)."
+
+
+def request_restore_point(identity, host_id: str) -> tuple[bool, str]:
+    """"Capture a restore point": ask the Controller to have this host capture
+    its whole machine.
+
+    Same shape and same guards as request_capture above — the host id is the
+    only caller-controlled part of the URL and lands in the PATH of a request
+    carrying the platform shared secret, so it is matched against the id format
+    the Controller mints before the request is built."""
+    if not configured():
+        return False, unavailable_reason() or "no Controller is configured"
+    host_id = (host_id or "").strip()
+    if not _HOST_ID_RE.match(host_id):
+        return False, INVALID_HOST_ID
+    headers = {
+        "Accept": "application/json",
+        "X-Sysible-Auth": _SSO_SECRET,
+        "X-Sysible-User": identity.user,
+        "X-Sysible-Role": identity.role,
+    }
+    try:
+        with httpx.Client(timeout=_TIMEOUT, verify=False, follow_redirects=False) as c:
+            r = c.post(f"{_url()}/api/host/{quote(host_id, safe='')}/restore-point-now",
+                       headers=headers)
+    except Exception as e:
+        return False, f"could not reach the Controller ({type(e).__name__})"
+    if r.status_code in (401, 403):
+        return False, f"the Controller did not permit this for role '{identity.role}'"
+    if r.status_code >= 400:
+        return False, f"the Controller returned HTTP {r.status_code}"
+    return True, ("Capturing — the host starts on its next check-in. A first "
+                  "whole-machine capture takes a few minutes; later ones upload "
+                  "only what changed.")

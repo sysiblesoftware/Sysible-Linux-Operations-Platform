@@ -215,15 +215,21 @@ def api_hosts(request: Request) -> dict:
     correctly but has not captured yet look identical to one that is broken."""
     who = _require_identity(request)
     hosts = store.list_hosts()
+    # "Backed up" means THIS HOST HAS CONFIG HISTORY, not merely that the store
+    # has heard of it. Restore points register a host in the same table, so a
+    # box whose only capture is a whole-machine point used to be reported as
+    # backed up and then open onto an empty file column. Count the versions.
+    points = store.restore_point_counts()
     for h in hosts:
-        h["backed_up"] = True
+        h["backed_up"] = bool(h.get("versions"))
+        h["points"] = int(points.get(h["host_id"], 0))
     known = {h["host_id"] for h in hosts}
     fleet, note, cbcfg = controller.list_hosts(who)
     for h in fleet:
         if h["host_id"] in known:
             continue
         hosts.append({"host_id": h["host_id"], "label": h["label"], "last_ts": None,
-                      "files": 0, "versions": 0, "backed_up": False,
+                      "files": 0, "versions": 0, "backed_up": False, "points": 0,
                       "environment": h.get("environment") or "",
                       "address": h.get("address") or ""})
     # Environment for hosts that DO have history too, so the grouping is complete.
@@ -245,7 +251,10 @@ def api_hosts(request: Request) -> dict:
         # since it last restarted).
         h["capture_capable"] = bool(h.get("backed_up")) or bool(capable.get(h["host_id"]))
         h["online"] = onlines.get(h["host_id"])
-    hosts.sort(key=lambda h: (not h["backed_up"], (h.get("label") or "").lower()))
+    for h in hosts:
+        h.setdefault("points", 0)
+    hosts.sort(key=lambda h: (not (h["backed_up"] or h.get("points")),
+                              (h.get("label") or "").lower()))
     # When the CONTROLLER itself has no Flashback wiring, no host can ever
     # capture and the per-host signal is meaningless — every agent reads as a
     # stale build. Say that once, at the top, and suppress the per-host verdict
@@ -541,7 +550,13 @@ def agent_rp_open(request: Request, body: dict = Body(...)) -> dict:
         pid = store.open_restore_point(str(b.get("host_id") or ""),
                                        str(b.get("label") or ""),
                                        roots=str(b.get("roots") or ""),
-                                       note=str(b.get("note") or ""))
+                                       note=str(b.get("note") or ""),
+                                       # The HOST's name, not the point's. The
+                                       # Controller knows the hostname and sends
+                                       # it; without it the host is registered
+                                       # under its id, never under "before the
+                                       # upgrade".
+                                       host_label=str(b.get("host_label") or ""))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"point_id": pid}
@@ -590,6 +605,23 @@ def agent_rp_seal(request: Request, body: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/api/hosts/{host_id}/restore-point")
+def api_capture_restore_point(host_id: str, request: Request) -> dict:
+    """Capture a whole machine, now. OPERATOR+.
+
+    Unlike a config snapshot this reads every file under the captured roots, so
+    it is the one capture that can put a host's secrets into the store on an
+    operator's behalf. Hosts cannot be reached inbound, so the Controller parks
+    the request and hands it over on the host's next check-in.
+    """
+    who = _require_writer(request)
+    ok, message = controller.request_restore_point(who, host_id)
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    store.log_audit(who.user, "request-restore-point", host_id)
+    return {"requested": True, "message": message}
+
+
 @app.get("/api/restore-points")
 def api_restore_points(request: Request, host_id: str = Query(default=""),
                        restorable: bool = Query(default=False)) -> dict:
@@ -608,6 +640,10 @@ def api_restore_point(point_id: int, request: Request) -> dict:
     ents = store.restore_point_entries(point_id)
     p["files"] = len(ents)
     p["bytes"] = sum(int(e["size"] or 0) for e in ents)
+    # What it holds per captured root. The console shows only the first page of
+    # the manifest, so a breakdown computed there would understate every root
+    # after the first.
+    p["by_root"] = store.restore_point_roots(point_id)
     return p
 
 

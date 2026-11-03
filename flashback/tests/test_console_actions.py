@@ -155,7 +155,13 @@ def test_the_console_names_what_an_operator_can_do_with_a_backup(cl):
 def test_a_host_row_is_visibly_a_drill_down(cl):
     page = cl.get("/", headers=OPERATOR).text
     assert "class='drill'" in page or "'drill'" in page, "the chevron affordance is gone"
-    assert "Browse '+what+" in page, "the row lost the title naming what it opens"
+    # The title has to name what the row opens, and that is now BOTH drill-downs:
+    # the host's restore points and its config history. Matched on the title
+    # expression rather than one verb, so re-wording it does not fail this while
+    # deleting it still does.
+    assert "b.title=" in page, "the row lost the title naming what it opens"
+    assert "restore points" in page and "config file" in page, \
+        "the row title no longer says what opening a host gives you"
     assert ".hostwrap .item:hover{background" in page, \
         "the hover must mark the CLICKABLE region, not the whole row"
 

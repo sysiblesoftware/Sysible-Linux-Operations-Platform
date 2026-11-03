@@ -200,6 +200,86 @@ _CSS += """
 .faint{color:var(--faint)}
 """
 
+# Restore points — a whole machine, not a file. Its own block because it is its
+# own idea: the file history answers "what did this config look like last
+# Tuesday", a restore point answers "put this box back to last Tuesday".
+_CSS += """
+.points{margin:0 0 .9rem}
+.points h3{margin-bottom:.2rem}
+.rpcard{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+  overflow:hidden}
+.rpcard .rphead{display:flex;align-items:center;gap:.5em;padding:.5em .65em;
+  border-bottom:1px solid var(--line);background:var(--panel2)}
+.rpcard .rphead .t{flex:1 1 auto;font-weight:600;font-size:12.5px}
+.rpcard .rpbody{padding:.15em 0}
+.rpwhy{padding:.6em .7em;color:var(--faint);font-size:11.5px;line-height:1.5}
+/* One restore point. Deliberately NOT .item: a config version restores one file
+   and this restores the machine, so the two must not be one click apart in a
+   list that looks the same. */
+button.rp{display:block;width:100%;text-align:left;background:none;border:0;
+  border-top:1px solid var(--line);padding:.5em .7em;cursor:pointer;color:var(--text);
+  font:inherit}
+.rpcard .rpbody>button.rp:first-child{border-top:0}
+button.rp:hover{background:var(--panel2)}
+button.rp.sel{background:var(--panel2);box-shadow:inset 2px 0 0 var(--accent2)}
+button.rp .lbl{font-weight:600;font-size:12.5px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+button.rp .meta{color:var(--muted);font-size:11.5px;margin-top:.1em}
+/* A capture still running is not a machine you can go back to, and it must not
+   look like one. */
+button.rp.open .lbl{color:var(--faint)}
+.rpstate{font-size:11px;border-radius:20px;padding:.05em .5em;border:1px solid var(--line);
+  color:var(--muted);margin-left:.4em;white-space:nowrap}
+.rpstate.open{color:var(--amber);border-color:#5b4a2f}
+/* A restore in flight. The host reboots at the end of this, so it gets a banner
+   rather than a line in a list. */
+.rpjob{margin:.1rem 0 .6rem;padding:.55em .7em;border:1px solid var(--line);
+  border-radius:10px;background:var(--panel);font-size:12px;line-height:1.5}
+.rpjob b{color:var(--text)}
+.rpjob.run{border-color:var(--amber);background:rgba(224,168,59,.10);color:var(--amber)}
+.rpjob.done{border-color:var(--ok);background:rgba(76,175,90,.10);color:var(--ok)}
+.rpjob.fail{border-color:var(--err);background:rgba(229,83,75,.10);color:var(--err)}
+/* The detail pane. */
+.rpdetail{padding:.2em .2em 1em}
+.rpdetail h2{margin:.1em 0 .15em;font-size:17px}
+.rpdetail .when{color:var(--muted);font-size:12.5px;margin-bottom:.8em}
+.rpstats{display:flex;flex-wrap:wrap;gap:.5em;margin:0 0 .9em}
+.rpstat{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+  padding:.45em .7em;min-width:7.5em}
+.rpstat .n{font-size:15px;font-weight:600}
+.rpstat .k{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+/* The consequence, spelled out next to the button that causes it. This is the
+   most destructive thing the console can do and the only one that reboots a
+   machine, so it does not get a bare "Restore" and a confirm() nobody reads. */
+.rpwarn{border:1px solid var(--err);border-radius:10px;padding:.7em .85em;
+  background:rgba(229,83,75,.08);color:var(--text);font-size:12.5px;line-height:1.6;
+  margin:0 0 .8em}
+.rpwarn b{color:var(--err)}
+.rpwarn ul{margin:.45em 0 0;padding-left:1.25em}
+.rpwarn li{margin:.15em 0}
+button.btn.danger{background:var(--err);border-color:var(--err);color:#fff}
+.rpreboot{display:flex;align-items:center;gap:.4em;color:var(--muted);font-size:12px}
+.rpreboot input{accent-color:var(--accent);width:15px;height:15px;margin:0}
+.manifest{border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  background:var(--panel)}
+.manifest .mh{display:flex;align-items:center;gap:.5em;padding:.45em .7em;
+  border-bottom:1px solid var(--line);background:var(--panel2);font-size:12px}
+.manifest .mh .t{flex:1 1 auto;font-weight:600}
+.mtable{max-height:calc(100vh - 430px);overflow:auto}
+.mtable table{width:100%;border-collapse:collapse;font-size:12px}
+.mtable th{position:sticky;top:0;background:var(--panel2);text-align:left;
+  padding:.35em .6em;border-bottom:1px solid var(--line);color:var(--faint);
+  font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.mtable td{padding:.3em .6em;border-bottom:1px solid var(--line);color:var(--muted);
+  white-space:nowrap}
+.mtable td.p{font-family:var(--mono);color:var(--text);white-space:normal;
+  word-break:break-all}
+.mtable tr:last-child td{border-bottom:0}
+.rootrow{padding:.45em .6em;border-bottom:1px solid var(--line)}
+.rootrow .mono{font-family:var(--mono);font-size:12px;word-break:break-all}
+.rootrow:last-child{border-bottom:0}
+"""
+
 _JS = r"""
 const $=s=>document.querySelector(s);
 const CAN_WRITE = document.body.dataset.canWrite === '1';
@@ -209,7 +289,7 @@ const CAN_WRITE = document.body.dataset.canWrite === '1';
 // the gateway -> /flashback/api/..., with no build-time base to configure.
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const U = p => BASE + String(p).replace(/^\//,'');
-let state={host:null,path:null,a:null,b:null,
+let state={host:null,path:null,a:null,b:null,point:null,
            data:null,sel:new Set(),collapsed:null,filter:''};
 function fmtTs(t){if(!t)return '—';const d=new Date(t*1000);return d.toLocaleString();}
 function el(tag,cls,txt){const e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e;}
@@ -344,8 +424,8 @@ function renderHosts(){
   // and no stated way to read anything back, which is exactly how an operator
   // with 1183 files captured concludes there is nothing they can do with them.
   col.appendChild(el('div','hint',
-    'Click a host to browse its config files — then a file, then a version to '
-    + 'diff, download or restore it.'));
+    'Click a host to open its restore points — a whole machine you can put it '
+    + 'back to — and every version of every config file it has captured.'));
   // Why the fleet might be missing, when it is. Without this the empty state
   // could not distinguish "not wired up" from "nothing captured yet".
   // Skipped when the blocking banner below is about to say the same thing —
@@ -462,17 +542,26 @@ function hostRow(h,d,col,canPick){
   chev.setAttribute('aria-hidden','true');
   b.appendChild(chev);
   const what=(h.label||h.host_id);
-  b.title='Browse '+what+"'s config files — diff versions, download or restore one";
-  b.setAttribute('aria-label','Browse '+what+"'s config files");
+  b.title='Open '+what+" — its restore points, and every version of its config files";
+  b.setAttribute('aria-label','Open '+what+"'s restore points and config files");
 
   // The status line. Three genuinely different states that used to render as one
   // sentence ("enrolled — no backup captured yet"), which is why "Back up now"
   // looked broken: an agent that CANNOT capture and one that simply hasn't yet
   // said exactly the same thing, and neither hinted at what to do.
   const st=el('div','hstat');
+  // What this host HAS, counting both kinds. A restore point is a capture too,
+  // and a box whose only backup is a whole-machine point read as "no backup
+  // captured yet" — which is the one sentence that makes an operator go looking
+  // for a broken agent.
+  const pts = h.points ? (h.points+(h.points===1?' restore point':' restore points')) : '';
   if(h.backed_up){
     st.className='hstat ok';
-    st.textContent=h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts);
+    st.textContent=h.files+' files · '+h.versions+' versions · '+fmtTs(h.last_ts)
+      + (pts ? ' · '+pts : '');
+  }else if(h.points){
+    st.className='hstat ok';
+    st.textContent=pts+' · no config file history yet';
   }else if(h.capture_capable===false){
     st.className='hstat blocked';
     st.textContent="agent doesn't do config backup — update this host's agent";
@@ -498,15 +587,18 @@ function hostRow(h,d,col,canPick){
   }
   b.appendChild(st);
 
-  if(!h.backed_up) b.classList.add('pending');
+  if(!h.backed_up && !h.points) b.classList.add('pending');
   b.onclick=function(){
-    state.host=h.host_id;state.path=null;state.a=null;state.b=null;
+    rpStopWatch();
+    state.host=h.host_id;state.path=null;state.a=null;state.b=null;state.point=null;
     [...col.querySelectorAll('.item')].forEach(function(c){c.classList.remove('sel');});
     b.classList.add('sel');
     loadFiles();
     $('#versions').innerHTML='<div class="placeholder">Pick a file to see every version of it.</div>';
-    $('#diff').innerHTML='<div class="placeholder">Pick a file, then a version to download or '
-      +'restore it \u2014 and a second version to diff the two.</div>';
+    $('#diff').innerHTML='<div class="placeholder">Pick a <b>restore point</b> to see '
+      +'what it holds and put this whole machine back to it \u2014 or a config file, then '
+      +'a version, to download or restore that one file (and a second version to diff '
+      +'the two).</div>';
   };
   wrap.appendChild(b);
   // Back up now. An agent is outbound-only, so nothing can reach in — this is a
@@ -538,6 +630,337 @@ function hostRow(h,d,col,canPick){
   }
   return wrap;
 }
+// ---------------------------------------------------------------------------
+// Restore points — a whole machine
+// ---------------------------------------------------------------------------
+// The file history answers "what did sshd_config look like last Tuesday". This
+// answers "put this box back to last Tuesday" — every captured file, its mode,
+// its owner, restored under the host's own agent and applied offline on the next
+// boot. Different question, different consequence, so it gets its own card above
+// the file list rather than a fourth kind of row inside it.
+let rpTimer=null;
+
+function rpStopWatch(){ if(rpTimer){clearTimeout(rpTimer);rpTimer=null;} }
+
+async function loadPoints(box){
+  box.innerHTML='';
+  box.appendChild(el('h3',null,'Whole machine'));
+  if(!state.host)return;
+  let d, jobs;
+  try{
+    d=await jget(U('/api/restore-points?host_id='+encodeURIComponent(state.host)));
+    jobs=await jget(U('/api/restore-jobs?host_id='+encodeURIComponent(state.host)));
+  }catch(e){
+    box.appendChild(el('div','empty','Could not read this host’s restore points: '
+      +String(e&&e.message||e)));
+    return;
+  }
+  // The host is mid-restore. That outranks the list: it is about to reboot.
+  const job=(jobs&&jobs.jobs||[])[0];
+  if(job && (job.status==='pending'||job.status==='running')){
+    box.appendChild(rpJobBanner(job));
+    rpStopWatch();
+    rpTimer=setTimeout(function(){ if(state.host) loadPoints(box); }, 5000);
+  }else{
+    rpStopWatch();
+    if(job) box.appendChild(rpJobBanner(job));
+  }
+
+  const card=el('div','rpcard');
+  const head=el('div','rphead');
+  const points=(d&&d.points)||[];
+  head.appendChild(el('span','t', points.length
+    ? points.length+(points.length===1?' restore point':' restore points') : 'No restore points'));
+  if(CAN_WRITE){
+    const cb=el('button','btn sm','Capture one now');
+    cb.title='Capture every file under this host’s restore-point roots';
+    // A host cannot be reached inbound: the request goes through the
+    // Controller. With no Controller wired this can only ever fail, so it is
+    // DISABLED and says why rather than hidden — a missing button reads as a
+    // missing feature, and a 502 on click reads as a broken one.
+    if(state.data && state.data.can_request===false){
+      cb.disabled=true;
+      cb.title='This Flashback has no Controller wiring, so no host can be '
+        +'asked to capture. Re-run the SLOP installer, or set '
+        +'SLOP_CONTROLLER_UPSTREAM on this service.';
+    }
+    cb.onclick=function(){ capturePoint(cb, box); };
+    head.appendChild(cb);
+  }
+  card.appendChild(head);
+
+  if(!points.length){
+    card.appendChild(el('div','rpwhy',
+      'A restore point is the whole machine — every file under /etc, /usr/local, '
+      +'/opt and /srv with its mode and owner. Capture one before a risky change and '
+      +'this host can be put back to exactly that state and rebooted into it, the way '
+      +'you would roll a cloud VM back to an image. Only files the store has never '
+      +'seen are uploaded, so the second capture of an unchanged host costs almost '
+      +'nothing.'
+      + (CAN_WRITE ? '' : ' Capturing one needs operator access.')));
+  }else{
+    const body=el('div','rpbody');
+    points.forEach(function(p){ body.appendChild(rpRow(p)); });
+    card.appendChild(body);
+  }
+  box.appendChild(card);
+}
+
+function rpJobBanner(job){
+  const cls = job.status==='done' ? 'done'
+            : job.status==='failed' ? 'fail'
+            : 'run';
+  const b=el('div','rpjob '+cls);
+  const what=job.label ? '“'+job.label+'”' : 'restore point '+job.point_id;
+  if(job.status==='pending'){
+    b.appendChild(el('b','','Queued: '));
+    b.appendChild(document.createTextNode(
+      'this host will be put back to '+what+' on its next check-in. It stages the '
+      +'files first, then applies them on a reboot — nothing is written while the '
+      +'system is running.'));
+  }else if(job.status==='running'){
+    b.appendChild(el('b','','Restoring: '));
+    b.appendChild(document.createTextNode(
+      'staging '+what+' on the host. It reboots once every file is on disk'
+      +(job.reboot?'':' — reboot was not requested, so it applies on the next '
+        +'reboot you choose')+'.'));
+  }else if(job.status==='done'){
+    b.appendChild(el('b','','Restored: '));
+    b.appendChild(document.createTextNode(
+      'this host came back up as '+what+' '+fmtTs(job.finished_at)+'.'));
+  }else{
+    b.appendChild(el('b','','Restore failed: '));
+    b.appendChild(document.createTextNode(
+      (job.note||'the host reported a failure')+' ('+fmtTs(job.finished_at)+'). The '
+      +'machine was NOT changed unless the note says otherwise.'));
+  }
+  return b;
+}
+
+function rpRow(p){
+  const b=el('button','rp');
+  const open = p.state!=='sealed';
+  if(open) b.classList.add('open');
+  if(state.point===p.id) b.classList.add('sel');
+  const lbl=el('div','lbl');
+  lbl.appendChild(document.createTextNode(p.label||('Restore point '+p.id)));
+  if(open){
+    const st=el('span','rpstate open','capturing…');
+    lbl.appendChild(st);
+  }
+  b.appendChild(lbl);
+  b.appendChild(el('div','meta',
+    fmtTs(p.created_at)+' · '+(p.files||0)+' files · '+fmtSize(p.bytes||0)));
+  b.title = open
+    ? 'This capture has not finished, so there is nothing to go back to yet'
+    : 'See what this restore point holds, and put this machine back to it';
+  b.onclick=function(){
+    state.point=p.id;
+    const list=b.parentNode;
+    if(list)[...list.children].forEach(function(c){c.classList&&c.classList.remove('sel');});
+    b.classList.add('sel');
+    showPoint(p.id);
+  };
+  return b;
+}
+
+async function capturePoint(btn, box){
+  btn.disabled=true;
+  try{
+    const r=await fetch(U('/api/hosts/'+encodeURIComponent(state.host)+'/restore-point'),
+                        {method:'POST'});
+    const j=await r.json().catch(function(){return {};});
+    if(!r.ok){ setMsg(j.detail||'Could not ask for a restore point.','err'); btn.disabled=false; return; }
+    setMsg(j.message||'Capturing.','ok');
+    // A whole-machine capture takes minutes, so re-read rather than leaving the
+    // card claiming "No restore points" until the operator reloads the page.
+    setTimeout(function(){ if(state.host) loadPoints(box); }, 20000);
+  }catch(e){ setMsg(String(e&&e.message||e),'err'); }
+  btn.disabled=false;
+}
+
+async function showPoint(id){
+  const d=$('#diff'); d.innerHTML='';
+  const wrap=el('div','rpdetail');
+  wrap.appendChild(el('div','sub faint','Loading…'));
+  d.appendChild(wrap);
+  let p;
+  try{ p=await jget(U('/api/restore-points/'+encodeURIComponent(id))); }
+  catch(e){ wrap.innerHTML=''; wrap.appendChild(el('div','empty',
+    'Could not read this restore point: '+String(e&&e.message||e))); return; }
+  wrap.innerHTML='';
+  rpRoots(p);
+  wrap.appendChild(el('h2',null, p.label||('Restore point '+p.id)));
+  wrap.appendChild(el('div','when',
+    'Captured '+fmtTs(p.created_at)+' from '+(p.host_id||'')
+    + (p.state==='sealed' ? '' : ' — still capturing')));
+
+  const stats=el('div','rpstats');
+  function stat(n,k){ const s=el('div','rpstat'); s.appendChild(el('div','n',n));
+                      s.appendChild(el('div','k',k)); return s; }
+  stats.appendChild(stat(String(p.files||0),'files'));
+  stats.appendChild(stat(fmtSize(p.bytes||0),'captured'));
+  stats.appendChild(stat((p.roots||'—').split(':').join(' '),'roots'));
+  wrap.appendChild(stats);
+  if(p.note) wrap.appendChild(el('div','rpwhy', p.note));
+
+  if(p.state!=='sealed'){
+    wrap.appendChild(el('div','note','This capture has not finished. A half-captured '
+      +'machine is not a state you can return to, so it cannot be restored yet.'));
+  }else if(CAN_WRITE){
+    const warn=el('div','rpwarn');
+    const b=el('b',null,'Putting this machine back rewrites its filesystem.');
+    warn.appendChild(b);
+    const ul=document.createElement('ul');
+    [ 'Every file in this restore point is written back to '+(p.host_id||'the host')
+        +' with the mode and owner it had when it was captured.',
+      'The files are staged first and applied on a reboot, by systemd’s offline '
+        +'update target — nothing is written while the system is running.',
+      'Anything added under the captured roots since this point was taken is '
+        +'removed. Data outside those roots is untouched.',
+      'The host reboots to apply it, so it goes offline for as long as a boot takes.'
+    ].forEach(function(t){ const li=document.createElement('li'); li.textContent=t; ul.appendChild(li); });
+    warn.appendChild(ul);
+    wrap.appendChild(warn);
+
+    const bar=el('div','toolbar');
+    const rb=el('button','btn danger','Put '+(p.host_id||'this host')+' back to this point');
+    const lab=el('label','rpreboot');
+    const ck=document.createElement('input'); ck.type='checkbox'; ck.checked=true;
+    lab.appendChild(ck);
+    lab.appendChild(document.createTextNode('reboot to apply it'));
+    rb.onclick=function(){ restoreToPoint(p, ck.checked, rb); };
+    bar.appendChild(rb); bar.appendChild(lab);
+    const del=el('button','btn','Delete this restore point');
+    del.onclick=function(){ deletePoint(p, del); };
+    bar.appendChild(del);
+    wrap.appendChild(bar);
+  }else{
+    wrap.appendChild(el('div','note','Restoring a machine needs operator access.'));
+  }
+
+  // What it actually holds. A restore point with no manifest on screen is an
+  // opaque button that reboots a server, which is not something anyone should
+  // be asked to press on trust.
+  const man=el('div','manifest');
+  const mh=el('div','mh');
+  mh.appendChild(el('span','t','What this holds'));
+  const mcount=el('span','sub faint','');
+  mh.appendChild(mcount);
+  man.appendChild(mh);
+  const tbl=el('div','mtable');
+  tbl.appendChild(el('div','empty','Loading the manifest…'));
+  man.appendChild(tbl);
+  wrap.appendChild(man);
+  let ents=[];
+  try{
+    const m=await jget(U('/api/restore-points/'+encodeURIComponent(id)
+      +'/manifest?limit=2000'));
+    ents=(m&&m.entries)||[];
+  }catch(e){
+    tbl.innerHTML='';
+    tbl.appendChild(el('div','empty','Could not read the manifest.'));
+    return;
+  }
+  mcount.textContent = (p.files||ents.length)>ents.length
+    ? 'first '+ents.length+' of '+p.files : String(ents.length);
+  tbl.innerHTML='';
+  const table=document.createElement('table');
+  const thead=document.createElement('tr');
+  ['Path','Kind','Mode','Owner','Size'].forEach(function(h){
+    const th=document.createElement('th'); th.textContent=h; thead.appendChild(th);
+  });
+  table.appendChild(thead);
+  // The manifest's `kind` is ONE LETTER on the wire — f, l, d — because it is
+  // written once per path for a whole filesystem. It is not a word an operator
+  // should ever be shown, and matching it against 'file' or 'link' (as this did)
+  // silently blanked every size and every symlink target in the table.
+  const KIND={f:'file', l:'symlink', d:'directory'};
+  ents.forEach(function(e){
+    const tr=document.createElement('tr');
+    const td=function(cls,txt){const c=document.createElement('td');
+      if(cls)c.className=cls;c.textContent=txt;tr.appendChild(c);};
+    const k=String(e.kind||'f').slice(0,1);
+    td('p', e.path + (k==='l'&&e.target ? ' → '+e.target : ''));
+    td('', KIND[k]||k);
+    // A symlink has no mode or owner of its own — the restore recreates the link,
+    // it does not chmod it — so printing 0000 and 0:0 states something false about
+    // the machine the operator is about to put back.
+    td('', k==='l' ? '—' : (e.mode==null?'':(e.mode & 0o7777).toString(8).padStart(4,'0')));
+    td('', k==='l' ? '—' : (e.uid==null?'':e.uid)+':'+(e.gid==null?'':e.gid));
+    td('', k==='f' ? fmtSize(e.size||0) : '—');
+    table.appendChild(tr);
+  });
+  tbl.appendChild(table);
+}
+
+// The versions column, while a restore point is open. It used to keep saying
+// "Pick a file to see every version of it" at an operator who had just picked a
+// whole machine — a column contradicting the one next to it.
+function rpRoots(p){
+  const col=document.querySelector('#versions');
+  col.innerHTML='';
+  col.appendChild(el('h3',null,'What it captured'));
+  const by=(p.by_root)||[];
+  if(!by.length){
+    col.appendChild(el('div','empty','This restore point holds nothing.'));
+    return;
+  }
+  col.appendChild(el('div','hint','Every path under these roots, as it was when '
+    +'the point was taken. Nothing outside them is touched by a restore.'));
+  by.forEach(function(r){
+    const d=el('div','rootrow');
+    d.appendChild(el('div','mono', r.root));
+    const bits=[];
+    if(r.files) bits.push(r.files+(r.files===1?' file':' files'));
+    if(r.dirs)  bits.push(r.dirs+(r.dirs===1?' directory':' directories'));
+    if(r.links) bits.push(r.links+(r.links===1?' symlink':' symlinks'));
+    d.appendChild(el('div','sub', bits.join(' \u00b7 ')));
+    if(r.bytes) d.appendChild(el('div','sub faint', fmtSize(r.bytes)));
+    col.appendChild(d);
+  });
+}
+
+async function restoreToPoint(p, reboot, btn){
+  const name=p.label||('restore point '+p.id);
+  if(!confirm('Put '+p.host_id+' back to “'+name+'”?\n\n'
+    +'Its filesystem is rewritten from this capture and anything added under the '
+    +'captured roots since is removed'
+    +(reboot?', then it reboots to apply it.':'. It applies on the next reboot.')
+    +'\n\nThis cannot be undone from here.')) return;
+  btn.disabled=true;
+  try{
+    const r=await fetch(U('/api/restore-points/'+encodeURIComponent(p.id)+'/restore'),
+      {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({reboot:!!reboot})});
+    const j=await r.json().catch(function(){return {};});
+    if(!r.ok){ setMsg(j.detail||'Could not queue the restore.','err'); btn.disabled=false; return; }
+    setMsg(j.detail||'Queued.','ok');
+    loadFiles();                      // repaint the card so the banner appears
+  }catch(e){ setMsg(String(e&&e.message||e),'err'); }
+  btn.disabled=false;
+}
+
+async function deletePoint(p, btn){
+  const name=p.label||('restore point '+p.id);
+  if(!confirm('Delete “'+name+'”?\n\nThis host can no longer be put back to '
+    +'it. File content shared with another restore point or with the config history '
+    +'is kept.')) return;
+  btn.disabled=true;
+  try{
+    const r=await fetch(U('/api/restore-points/'+encodeURIComponent(p.id)),
+                        {method:'DELETE'});
+    const j=await r.json().catch(function(){return {};});
+    if(!r.ok){ setMsg(j.detail||'Could not delete it.','err'); btn.disabled=false; return; }
+    setMsg('Deleted “'+name+'”.','ok');
+    state.point=null;
+    $('#diff').innerHTML='<div class="placeholder">Pick a restore point or a config '
+      +'file on the left.</div>';
+    loadFiles();
+  }catch(e){ setMsg(String(e&&e.message||e),'err'); }
+  btn.disabled=false;
+}
+
 // Every file this host has captured, kept so the filter runs over the list rather
 // than re-fetching a thousand rows on every keystroke.
 let allFiles=[];
@@ -545,6 +968,12 @@ let allFiles=[];
 async function loadFiles(){
   const col=$('#files');col.innerHTML='';
   allFiles=[];
+  // Whole-machine restore points first, then the per-file history. Appended
+  // before anything that can return early, so a host with no config history
+  // still gets the card — that is precisely the host someone wants to capture.
+  const pbox=el('div','points');
+  col.appendChild(pbox);
+  loadPoints(pbox);
   col.appendChild(el('h3',null,'Files'));
   if(!state.host)return;
   let files;
@@ -588,7 +1017,8 @@ async function loadFiles(){
       const p=el('div','mono');p.textContent=f.path;b.appendChild(p);
       b.appendChild(el('div','sub', f.versions+' versions \u00b7 last '+fmtTs(f.last_ts)));
       if(f.path===state.path)b.classList.add('sel');
-      b.onclick=()=>{state.path=f.path;state.a=null;state.b=null;
+      b.onclick=()=>{state.path=f.path;state.a=null;state.b=null;state.point=null;
+        [...document.querySelectorAll('button.rp.sel')].forEach(function(c){c.classList.remove('sel');});
         [...list.children].forEach(c=>c.classList&&c.classList.remove('sel'));b.classList.add('sel');
         loadVersions();$('#diff').innerHTML='';};
       list.appendChild(b);
@@ -936,7 +1366,7 @@ def page(user: str, role: str, can_write: bool) -> str:
         "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
         f"<style>{_CSS}</style></head>"
         f"<body data-can-write='{'1' if can_write else '0'}'>"
-        "<header class=head><div class=brand>Sysible <b>Flashback</b> — config history and restore</div>"
+        "<header class=head><div class=brand>Sysible <b>Flashback</b> — restore points and config history</div>"
         f"<span class=who>{who}</span>{build_info.chip()}</header>"
         "<div class=msg id=msg hidden></div>"
         "<div class=wrap id=wrap>"
@@ -944,8 +1374,8 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<div class=gutter data-resize=1 role=separator aria-orientation=vertical"
         " aria-label='Resize the hosts column' tabindex=0></div>"
         "<div class=col id=files>"
-        "<div class=placeholder>Click a host on the left to see the config files "
-        "it has captured.</div>"
+        "<div class=placeholder>Click a host on the left to see its restore "
+        "points and the config files it has captured.</div>"
         "</div>"
         "<div class=gutter data-resize=2 role=separator aria-orientation=vertical"
         " aria-label='Resize the files column' tabindex=0></div>"
@@ -953,10 +1383,15 @@ def page(user: str, role: str, can_write: bool) -> str:
         "<div class=gutter data-resize=3 role=separator aria-orientation=vertical"
         " aria-label='Resize the versions column' tabindex=0></div>"
         "<div class=col id=diff>"
-        "<div class=placeholder>Every version of every tracked config file, per host.<br><br>"
-        "Click a host, then a file, then a version \u2014 from there you can "
-        "<b>download</b> that version, <b>restore</b> it to the host, or pick a "
-        "second version to <b>diff</b> the two.<br><br>"
+        "<div class=placeholder>Two ways back, per host.<br><br>"
+        "A <b>restore point</b> is the whole machine \u2014 every file under its "
+        "captured roots with its mode and owner. Put a host back to one and it "
+        "reboots into that state, the way you would roll a cloud VM back to an "
+        "image.<br><br>"
+        "A <b>config file</b> keeps every version of itself. Click a host, then a "
+        "file, then a version \u2014 from there you can <b>download</b> that version, "
+        "<b>restore</b> it to the host, or pick a second version to <b>diff</b> the "
+        "two.<br><br>"
         "Or use <b>Compare files across hosts</b> to find where one box's config "
         "drifted from the rest of the fleet.</div>"
         "</div>"
@@ -992,7 +1427,7 @@ def denied_page(reason: str, code: str, status: int = 401) -> str:
         ".gate code{font-family:var(--mono);font-size:12.5px;color:var(--accent2)}"
         ".gate a{color:var(--accent)}"
         "</style></head><body>"
-        "<header class=head><div class=brand>Sysible <b>Flashback</b> — config history and restore</div></header>"
+        "<header class=head><div class=brand>Sysible <b>Flashback</b> — restore points and config history</div></header>"
         "<div class=gate>"
         f"<h1>{escape(head)}</h1>"
         f"<div class=why>{escape(reason)}</div>"
