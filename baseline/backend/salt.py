@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 
 # Salt's own state-id convention: "<sls>_|-<id>_|-<name>_|-<function>".
@@ -126,6 +127,52 @@ def apply_command(sls_text: str, *, test: bool = False, state_name: str = "basel
     )
 
 
+# Salt is a PREREQUISITE on every managed host — Baseline writes a state file
+# there and runs `salt-call --local` on it — and a host without it answers with
+# one line on stderr and exit 127. Which line depends on the shell: bash says
+# "command not found", dash and busybox say "not found", and a dead symlink or
+# an env-wrapped call says "No such file or directory". They all mean the same
+# thing, and the operator used to be told about JSON.
+#
+# Anchored on salt-call so a STATE whose own comment contains the phrase — a
+# cmd.run that failed, say — is still read as a state result.
+_NO_SALT = re.compile(
+    r"salt-call['\"]?\s*:\s*(?:command not found|not found|No such file or directory)",
+    re.I)
+
+
+def missing_salt(text: str) -> bool:
+    """Does this return mean "Salt is not on this host"?
+
+    Public because the console asks the same question about a host it has not
+    tried yet: the answer is the difference between an Apply that is about to
+    work and one that is about to fail on every host at once.
+    """
+    return bool(_NO_SALT.search(text or ""))
+
+
+# One sentence, in one place, because it is said by the parser, by the pre-flight
+# check and in the console's own words.
+NO_SALT_REASON = (
+    "Salt is not installed on this host, so there is nothing to apply the state "
+    "with. Baseline runs `salt-call --local` on each host it manages. Install it "
+    "from the host's page, or install it yourself and apply again.")
+
+
+# INSTALLING SALT LIVES IN THE CONTROLLER, not here.
+#
+# Baseline asks the Controller to install Salt on a host by name; it does not
+# hand over a command to run. The Controller holds the only authenticated
+# channel to the fleet and acts as root through it, so it builds every command
+# it executes and accepts none from a caller — the rule its updater states
+# about its own allowlist. A Baseline that could post arbitrary shell there
+# would be a second root on every host.
+#
+# The builder is client/_api_automation.cmd_install_salt(), where it also gets
+# the Controller's single package-manager cascade instead of a copy of it. What
+# stays here is the half Baseline owns: recognising that a host has no Salt,
+# and saying so.
+
 def parse_return(text: str) -> dict:
     """Turn `salt-call --out=json` output into a flat, decided result.
 
@@ -142,6 +189,13 @@ def parse_return(text: str) -> dict:
     raw = (text or "").strip()
     if not raw:
         out["error"] = "salt-call produced no output"
+        return out
+
+    # BEFORE the JSON hunt. This is not a malformed return, it is a host that
+    # could not run the command at all, and saying so is the difference between
+    # "the tool is broken" and "install Salt here".
+    if missing_salt(raw):
+        out["error"] = NO_SALT_REASON
         return out
 
     start = raw.find("{")

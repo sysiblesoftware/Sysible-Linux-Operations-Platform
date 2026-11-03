@@ -42,6 +42,10 @@ _SSO_SECRET = os.getenv("SYSIBLE_SSO_SHARED_SECRET", "")
 # "how long may one host take", not "how long may the fleet take".
 _TIMEOUT = 20.0
 _APPLY_TIMEOUT = float(os.getenv("SYSIBLE_BASELINE_APPLY_TIMEOUT_S", "180"))
+# Installing a package is minutes on a cold metadata cache, not the seconds an
+# apply takes. Sharing the apply timeout meant the console gave up while the
+# install was still going and told the operator it had failed.
+_INSTALL_TIMEOUT = float(os.getenv("SYSIBLE_BASELINE_INSTALL_TIMEOUT_S", "900"))
 
 # What the Controller accepts as a host id, plus our env: form. Anything else is
 # refused HERE rather than interpolated into a URL.
@@ -143,6 +147,64 @@ def unavailable_reason() -> str | None:
     if not _CONTROLLER:                              # pragma: no cover
         return "no Controller address is configured"
     return None
+
+
+def request_install_salt(identity, host_id: str) -> tuple[bool, str]:
+    """(ok, message). Ask the Controller to put Salt on one host.
+
+    A HOST ID, AND NOTHING ELSE. Baseline does not build the install command or
+    send one: the Controller owns the only authenticated root channel to the
+    fleet and builds every command it runs. Posting shell to it from here would
+    make this service a second root on every managed host, which is precisely
+    the thing its own updater refuses to allow.
+
+    Slower than everything else Baseline asks for — a cold package cache on a
+    distribution that has to fetch metadata first is minutes, not seconds — so
+    it gets its own budget rather than the apply timeout.
+    """
+    if not _TARGET_RE.match(host_id or ""):
+        return False, "That host name is not one this controller would accept."
+    if host_id.startswith("env:"):
+        # One host at a time. "Install Salt on a whole environment" is a
+        # reasonable thing to want and a different thing to build: it needs the
+        # per-host reporting the apply panel does, not one timeout covering
+        # sixteen package managers.
+        return False, "Install Salt on one host at a time."
+    if httpx is None:
+        return False, ("Baseline cannot reach the Controller from this build "
+                       "(httpx is missing).")
+    if not _SSO_SECRET:
+        return False, ("Baseline has no SLOP shared secret, so it cannot prove "
+                       "to the Controller who is asking. Re-run install.sh.")
+    try:
+        with httpx.Client(timeout=_INSTALL_TIMEOUT, verify=False) as c:
+            r = c.post(f"{_url()}/api/host/{quote(host_id, safe='')}"
+                       "/baseline-install-salt",
+                       json={},
+                       headers={"X-Sysible-User": identity.user,
+                                "X-Sysible-Role": identity.role,
+                                "X-Sysible-Auth": _SSO_SECRET})
+    except Exception as e:
+        if "Timeout" in type(e).__name__:
+            return False, (f"The install did not finish within "
+                           f"{int(_INSTALL_TIMEOUT)}s. It is still running on "
+                           "the host — check again in a moment rather than "
+                           "starting a second one.")
+        return False, f"The Controller is unreachable ({type(e).__name__})."
+    if r.status_code == 404:
+        return False, f"The Controller does not know a host called {host_id!r}."
+    if r.status_code in (401, 403):
+        return False, "The Controller refused this request for your account."
+    if r.status_code >= 400:
+        try:
+            return False, (r.json() or {}).get("detail") or f"HTTP {r.status_code}."
+        except Exception:
+            return False, f"The Controller returned HTTP {r.status_code}."
+    try:
+        body = r.json() or {}
+    except Exception:
+        body = {}
+    return bool(body.get("ok")), (body.get("detail") or "Salt installed.")
 
 
 def request_apply(identity, target: str, preview: bool = False) -> tuple[bool, str]:

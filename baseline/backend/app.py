@@ -259,6 +259,22 @@ def api_apply(target: str, request: Request, body: dict = Body(default=None)) ->
     return {"target": target, "preview": preview, "detail": message}
 
 
+@app.post("/api/hosts/{host_id}/install-salt")
+def api_install_salt(host_id: str, request: Request) -> dict:
+    """Put Salt on one host.
+
+    Baseline evaluates every declared state with `salt-call --local` on the
+    host, so a host without Salt fails every apply — and the only thing the
+    console could do about it was say so. Operator+, re-checked by the
+    Controller against the same human.
+    """
+    who = _require(request, "operator")
+    ok, message = controller.request_install_salt(who, host_id)
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    return {"host_id": host_id, "detail": message}
+
+
 @app.get("/api/rules")
 def api_rules(request: Request) -> dict:
     _require_read(request)

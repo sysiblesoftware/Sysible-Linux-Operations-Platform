@@ -1113,6 +1113,15 @@ function startPanel(){
   </div>`;
 }
 
+// A host whose last run could not start because Salt is not on it. The
+// Controller's reply is the sentence Baseline's own parser wrote, so this
+// looks for the fact rather than for a phrase that might be reworded.
+function noSalt(h){
+  const last = runsFor(h.id)[0];
+  return !!(last && !last.preview && last.error && /not installed/i.test(last.error)
+            && /salt/i.test(last.error));
+}
+
 function hostDetail(h){
   const d = statesFor(h), st = hostStatus(h, d.all);
   const last = runsFor(h.id)[0];
@@ -1124,7 +1133,14 @@ function hostDetail(h){
       ${CAN_WRITE ? `<button class='primary' data-assignhost="${esc(h.id)}">Assign a state…</button>` : ''}
       ${d.all.length ? `<button data-preview="${esc(h.id)}">Preview</button>` : ''}
       ${d.all.length && CAN_WRITE ? `<button data-apply="${esc(h.id)}">Apply now</button>` : ''}
+      ${noSalt(h) && CAN_WRITE ? `<button class=primary data-installsalt="${esc(h.id)}"
+        >Install Salt on this host</button>` : ''}
     </div>
+    ${noSalt(h) ? `<div class=sec><div class=box><div class=ln>
+      <span class="k err">no Salt</span>
+      <span class=faint>Baseline evaluates a state with <span class=mono>salt-call
+      --local</span> on the host, so nothing can be applied here until it is
+      installed. Nothing else about this host is wrong.</span></div></div></div>` : ''}
     <div class=sec><h4>State</h4><div class=box>
       <div class=ln><span class="k ${st.cls}">${esc(st.label)}</span>
         <span class=faint>${esc(st.note)}</span>
@@ -1846,6 +1862,24 @@ function applyWhy(){
   }).join('') + '</div>';
 }
 
+// Installing Salt is minutes, not seconds, on a host that has to fetch package
+// metadata first — so the button says what it is doing and stays disabled,
+// rather than looking like it did nothing for four minutes.
+async function installSalt(hostId){
+  const btn = document.querySelector(`[data-installsalt="${CSS.escape(hostId)}"]`);
+  if(btn){ btn.disabled = true; btn.textContent = 'Installing Salt\u2026'; }
+  say(`Installing Salt on ${hostId} \u2014 this can take a few minutes.`, 'ok');
+  try{
+    const r = await api('hosts/' + encodeURIComponent(hostId) + '/install-salt',
+                        {method: 'POST'});
+    say(r.detail || `Salt installed on ${hostId}.`, 'ok');
+    load();
+  }catch(e){
+    say(e.message, 'err');
+    if(btn){ btn.disabled = false; btn.textContent = 'Install Salt on this host'; }
+  }
+}
+
 // ---- wiring ----------------------------------------------------------------
 
 document.addEventListener('click', async (ev) => {
@@ -1869,6 +1903,7 @@ document.addEventListener('click', async (ev) => {
     if(t.dataset.applyall)   return applyEverywhere(t.dataset.applyall, false);
     if(t.dataset.preview)   return applyTo(t.dataset.preview, true);
     if(t.dataset.apply)     return applyTo(t.dataset.apply, false);
+    if(t.dataset.installsalt) return installSalt(t.dataset.installsalt);
     if(t.dataset.delrule){
       if(!confirm(`Delete the rule "${t.dataset.delrule}"? Anything it was doing after a state is applied stops happening.`)) return;
       await api('rules/' + encodeURIComponent(t.dataset.delrule), {method: 'DELETE'});
