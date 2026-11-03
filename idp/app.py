@@ -2573,10 +2573,22 @@ _UPDATES_JS = r"""
       if(note){
         var w=el('span','waiting');
         if(note[0]==='restart'){
+          // MINUTES, not seconds. Updating SLOP rebuilds EVERY image in the
+          // project — this console among them — and that is minutes of work.
+          // "a few seconds" was wrong by an order of magnitude, and an
+          // operator told seconds who then watches six minutes pass concludes
+          // it has hung. Reported as exactly that: "it's just stuck".
+          //
+          // The services are deliberately not listed here. This comment is
+          // served inside the page, and a test forbids that list appearing in
+          // it — because a list spelled out by hand is a list that is wrong
+          // the first time a module is added. (That test has now been tripped
+          // by an explanation of why the list should not be spelled out.)
           w.appendChild(el('b',null,'SLOP is restarting itself. '));
           w.appendChild(document.createTextNode(
-            'This console is part of what is being updated, so it drops out for '
-            +'a few seconds and comes back on its own. '));
+            'This console is part of what is being updated, so it goes away '
+            +'and comes back on its own. A full rebuild is usually a few '
+            +'minutes, and the work carries on without this page. '));
         } else {
           w.appendChild(el('b',null,'Lost contact with the updater. '));
           w.appendChild(document.createTextNode(
@@ -2683,11 +2695,32 @@ _UPDATES_JS = r"""
     watching=true; lost=0;
     pollIn(600);
   }
+  // How long we have been out of contact, in words. The attempt COUNT was
+  // meaningless to an operator — "attempt 97" says nothing about whether
+  // anything is wrong, and reads like a failure report. Elapsed time is the
+  // thing they are actually judging, and it lets the note say when the wait
+  // has genuinely become unusual rather than leaving them to guess.
+  var lostSince=0;
+  function waitedFor(){
+    var s = Math.max(0, Math.round((Date.now()-lostSince)/1000));
+    if(s < 90) return s+'s';
+    var m = Math.floor(s/60);
+    return m+'m '+(s%60)+'s';
+  }
   function unreachableJob(why){
     lost++;
-    var note = selfJob
-      ? ['restart','Reconnecting… (attempt '+lost+')']
-      : ['lost','Reconnecting… (attempt '+lost+')'];
+    if(lost===1) lostSince=Date.now();
+    var waited = waitedFor();
+    // Past the point where a rebuild would normally be done, stop reassuring
+    // and say so — but keep waiting, because the work is still running on the
+    // host whatever this page can see.
+    var longAgo = (Date.now()-lostSince) > 15*60*1000;
+    var tail = longAgo
+      ? 'Still waiting after '+waited+' — longer than a rebuild usually takes. '
+        +'It is still running on the host; sysiblectl slop logs will say where '
+        +'it has got to.'
+      : 'Waiting for it to come back — '+waited+'.';
+    var note = selfJob ? ['restart',tail] : ['lost',tail];
     if(lastJob) showJob(lastJob, note);
     pollIn(backoffMs(lost));
   }
@@ -2708,8 +2741,21 @@ _UPDATES_JS = r"""
         var j=d.job;
         if(!j){
           // It finished and aged out of the helper's reporting window while we
-          // were away. Nothing left to report, so stop and re-read the table.
-          stopWatch(); load(); return;
+          // were away — the helper keeps a result for a bounded time so last
+          // week's update does not greet someone who just opened the page.
+          //
+          // SAY SO. This used to stop and silently re-read the table, so an
+          // update that outlasted the window ended with the panel vanishing
+          // and no verdict at all — on the one screen whose entire job is to
+          // report how it went. We were plainly watching something; it is
+          // over; the table is the record now.
+          stopWatch();
+          if(lastJob){
+            pushToast('The update finished while this page was out of contact — '
+                      +'the versions below are what is installed now.',
+                      {title:'Software & services', kind:'info', ttl:12000});
+          }
+          load(); return;
         }
         lost=0;
         selfJob = selfJob || !!j.self_update;

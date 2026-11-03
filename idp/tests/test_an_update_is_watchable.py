@@ -227,15 +227,20 @@ def test_the_console_waits_out_the_restart_instead_of_giving_up(live):
                 "() => (document.getElementById('jobsay')||{}).textContent"
                 ".indexOf('restarting itself') >= 0", timeout=10000)
             out = _panel(pg)
-            assert "Reconnecting" in out["say"], out["say"]
+            assert "Waiting" in out["say"] or "waiting" in out["say"], out["say"]
             assert "reload" not in out["say"].lower(), out["say"]
             # It keeps the phase it last saw rather than blanking.
             assert "Build & start" in [s["label"] for s in out["steps"]]
 
-            first = int(re.search(r"attempt (\d+)", out["say"]).group(1))
+            # ELAPSED TIME, not an attempt count. The panel used to report
+            # "(attempt 97)" — a retry counter an operator cannot judge, which
+            # reads like a failure report. What it shows now is how long it has
+            # been waiting, and the assertion is the same either way: the
+            # number keeps moving, so the page is still trying.
+            first = int(re.search(r"(\d+)s", out["say"]).group(1))
             pg.wait_for_function(
                 f"() => {{var t=(document.getElementById('jobsay')||{{}}).textContent;"
-                f" var m=/attempt ([0-9]+)/.exec(t); return m && +m[1] > {first + 1};}}",
+                f" var m=/([0-9]+)s/.exec(t); return m && +m[1] > {first};}}",
                 timeout=20000)
             assert script.asked == before, \
                 "the aborted requests should not have reached the server"
