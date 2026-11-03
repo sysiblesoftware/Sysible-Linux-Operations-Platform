@@ -515,6 +515,209 @@ def agent_snapshot(request: Request, body: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# --------------------------------------------------------------------------- #
+# Restore points — a whole machine, captured from inside it
+# --------------------------------------------------------------------------- #
+# Four steps, because a filesystem does not fit in a request. The config
+# snapshot route above posts every file base64'd in one body and is capped at
+# a few MiB; a machine is gigabytes across a hundred thousand files, and no
+# cap would make that shape sane — the body is assembled in memory at both
+# ends.
+#
+#   open     name it, get an id
+#   manifest describe entries in chunks; be told which hashes are NEW
+#   blobs    upload exactly those
+#   seal     refuse unless every byte arrived
+#
+# The reply to `manifest` is where the disk and the wire are both saved: the
+# store is content-addressed, so "new" means new to the WHOLE store — not to
+# this host. A second point on an unchanged host, or the tenth identical VM,
+# uploads nothing at all.
+@app.post("/api/agent/restore-point/open")
+def agent_rp_open(request: Request, body: dict = Body(...)) -> dict:
+    _require_agent(request)
+    b = body or {}
+    try:
+        pid = store.open_restore_point(str(b.get("host_id") or ""),
+                                       str(b.get("label") or ""),
+                                       roots=str(b.get("roots") or ""),
+                                       note=str(b.get("note") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"point_id": pid}
+
+
+@app.post("/api/agent/restore-point/manifest")
+def agent_rp_manifest(request: Request, body: dict = Body(...)) -> dict:
+    """One chunk of the manifest. Replies with the hashes we do not have."""
+    _require_agent(request)
+    try:
+        return store.add_restore_point_entries(int((body or {}).get("point_id") or 0),
+                                               (body or {}).get("entries") or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/agent/restore-point/blobs")
+def agent_rp_blobs(request: Request, body: dict = Body(...)) -> dict:
+    """Content for the hashes the manifest step asked for, and only those."""
+    _require_agent(request)
+    stored = 0
+    for b in (body or {}).get("blobs") or []:
+        sha = str(b.get("sha256") or "")
+        try:
+            content = base64.b64decode(b.get("content_b64") or "")
+        except Exception:
+            raise HTTPException(status_code=400,
+                                detail=f"bad base64 for {sha[:12] or '(no digest)'}")
+        try:
+            store.put_blob(sha, content)
+        except ValueError as e:
+            # The digest did not match. Never silently accept it: this store is
+            # content-ADDRESSED, so a blob under the wrong hash poisons every
+            # manifest on every host that ever names it.
+            raise HTTPException(status_code=400, detail=str(e))
+        stored += 1
+    return {"stored": stored}
+
+
+@app.post("/api/agent/restore-point/seal")
+def agent_rp_seal(request: Request, body: dict = Body(...)) -> dict:
+    _require_agent(request)
+    try:
+        return store.seal_restore_point(int((body or {}).get("point_id") or 0))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/restore-points")
+def api_restore_points(request: Request, host_id: str = Query(default=""),
+                       restorable: bool = Query(default=False)) -> dict:
+    """What this host can be put back to. `restorable` hides captures still in
+    progress — an open point is not a machine you can return to."""
+    _require_identity(request)
+    return {"points": store.list_restore_points(host_id, sealed_only=restorable)}
+
+
+@app.get("/api/restore-points/{point_id}")
+def api_restore_point(point_id: int, request: Request) -> dict:
+    _require_identity(request)
+    p = store.restore_point(point_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="No such restore point.")
+    ents = store.restore_point_entries(point_id)
+    p["files"] = len(ents)
+    p["bytes"] = sum(int(e["size"] or 0) for e in ents)
+    return p
+
+
+@app.get("/api/restore-points/{point_id}/manifest")
+def api_restore_point_manifest(point_id: int, request: Request,
+                               limit: int = Query(default=2000, le=20000),
+                               offset: int = Query(default=0)) -> dict:
+    """Paged, for the same reason the capture is chunked."""
+    _require_identity(request)
+    if not store.restore_point(point_id):
+        raise HTTPException(status_code=404, detail="No such restore point.")
+    return {"entries": store.restore_point_entries(point_id, limit=limit,
+                                                   offset=offset),
+            "limit": limit, "offset": offset}
+
+
+@app.delete("/api/restore-points/{point_id}")
+def api_delete_restore_point(point_id: int, request: Request) -> dict:
+    who = _require_writer(request)
+    p = store.restore_point(point_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="No such restore point.")
+    store.delete_restore_point(point_id)
+    store.audit(who.user, "restore-point.delete",
+                f"{p['host_id']} {p.get('label') or point_id}")
+    return {"ok": True}
+
+
+@app.post("/api/restore-points/{point_id}/restore")
+def api_restore_point_restore(point_id: int, request: Request,
+                              body: dict = Body(default=None)) -> dict:
+    """Put this host back to this point, then reboot it.
+
+    OPERATOR+. The single most consequential thing this service can be asked
+    for: it rewrites a filesystem as root and restarts the machine. The host
+    is taken from the POINT, never from the request — a caller cannot name a
+    host, so no request can ask web-01 to become web-02.
+    """
+    who = _require_writer(request)
+    p = store.restore_point(point_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="No such restore point.")
+    reboot = True
+    if body and "reboot" in body:
+        reboot = bool(body.get("reboot"))
+    try:
+        job = store.queue_point_restore(p["host_id"], point_id, who.user,
+                                        reboot=reboot)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"job": job, "detail": (
+        f"{p['host_id']} will be put back to “{p.get('label') or point_id}” on its "
+        f"next check-in" + (" and then reboot." if reboot else "."))}
+
+
+@app.get("/api/restore-jobs")
+def api_restore_jobs(request: Request, host_id: str = Query(default="")) -> dict:
+    _require_identity(request)
+    return {"jobs": store.restore_jobs(host_id)}
+
+
+@app.get("/api/agent/restore-point/pending")
+def agent_rp_pending(request: Request, host_id: str = Query(...)) -> dict:
+    """What this host should be putting itself back to, if anything.
+
+    The manifest is NOT inlined — it is a whole filesystem. The agent pages it
+    from /api/agent/restore-point/manifest and fetches blobs it does not
+    already have on disk.
+    """
+    _require_agent(request)
+    job = store.pending_point_restore(host_id)
+    return {"job": job}
+
+
+@app.post("/api/agent/restore-point/start")
+def agent_rp_start(request: Request, body: dict = Body(...)) -> dict:
+    _require_agent(request)
+    return {"ok": store.start_point_restore(int((body or {}).get("job_id") or 0))}
+
+
+@app.get("/api/agent/restore-point/manifest")
+def agent_rp_fetch_manifest(request: Request, point_id: int = Query(...),
+                            limit: int = Query(default=2000, le=20000),
+                            offset: int = Query(default=0)) -> dict:
+    _require_agent(request)
+    return {"entries": store.restore_point_entries(point_id, limit=limit,
+                                                   offset=offset)}
+
+
+@app.get("/api/agent/restore-point/blob")
+def agent_rp_blob(request: Request, sha256: str = Query(...)) -> Response:
+    """One blob, raw. The agent verifies the digest again before it writes —
+    this store is content-addressed and the hash is the whole contract."""
+    _require_agent(request)
+    content = store.get_blob(sha256)
+    if content is None:
+        raise HTTPException(status_code=404, detail="No such content.")
+    return Response(content=content, media_type="application/octet-stream",
+                    headers={"X-Flashback-Sha256": sha256})
+
+
+@app.post("/api/agent/restore-point/finish")
+def agent_rp_finish(request: Request, body: dict = Body(...)) -> dict:
+    _require_agent(request)
+    b = body or {}
+    return {"ok": store.finish_point_restore(int(b.get("job_id") or 0),
+                                             ok=bool(b.get("ok", True)),
+                                             note=str(b.get("note") or ""))}
+
+
 @app.get("/api/agent/restores")
 def agent_restores(request: Request, host_id: str = Query(...)) -> list:
     _require_agent(request)
