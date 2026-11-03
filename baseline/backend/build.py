@@ -355,6 +355,112 @@ def _str_representer(dumper, data):
 _Dumper.add_representer(str, _str_representer)
 
 
+# What a state CONTAINS, in a phrase. The states list showed a name, a version
+# and a verdict — three things about a declaration and nothing about what it
+# declares — so the only way to learn that "web-stack" installs nginx was to
+# open it. On a screen whose job is to say what the fleet is configured to be,
+# that is the one fact missing.
+#
+# Read back out of the SLS rather than stored alongside it. A state can also be
+# written by hand as YAML (that is a first-class way in here), so a summary kept
+# at save time would be right for the form and absent or stale for every
+# hand-written one. The SLS is the single source of truth about itself.
+_MODULE_NOUNS = (
+    # (module prefix, singular, plural). Ordered: the first match wins, so
+    # file.directory is a directory before file.* makes it a file.
+    ("pkg.installed", "package", "packages"),
+    ("pkg.latest", "package", "packages"),
+    ("pkg.removed", "package removed", "packages removed"),
+    ("pkg.purged", "package removed", "packages removed"),
+    ("service.running", "service", "services"),
+    ("service.enabled", "service", "services"),
+    ("service.dead", "service stopped", "services stopped"),
+    ("service.disabled", "service stopped", "services stopped"),
+    ("file.directory", "directory", "directories"),
+    ("file.line", "file edit", "file edits"),
+    ("file.append", "file edit", "file edits"),
+    ("file.replace", "file edit", "file edits"),
+    ("file.absent", "file removed", "files removed"),
+    ("file.symlink", "symlink", "symlinks"),
+    ("file.", "file", "files"),
+    ("user.", "user", "users"),
+    ("group.", "group", "groups"),
+    ("sysctl.", "kernel parameter", "kernel parameters"),
+    ("cron.", "scheduled command", "scheduled commands"),
+    ("cmd.", "command", "commands"),
+    ("host.", "hosts entry", "hosts entries"),
+    ("mount.", "mount", "mounts"),
+    ("archive.", "archive", "archives"),
+    ("git.", "git checkout", "git checkouts"),
+)
+
+
+def _noun(module: str):
+    for prefix, one, many in _MODULE_NOUNS:
+        if module.startswith(prefix):
+            return one, many
+    # An unrecognised module is still worth counting — it is a real thing the
+    # state does, and calling it nothing would understate the declaration.
+    return module.split(".")[0] or "item", (module.split(".")[0] or "item") + "s"
+
+
+def _count(module: str, args) -> int:
+    """How many THINGS this one block declares.
+
+    One pkg.installed with `pkgs: [nginx, curl, git]` declares three packages,
+    not one. Counting blocks made "12 packages" read as "1 package" on exactly
+    the states that bundle the most — the ones whose contents an operator most
+    wants to know before applying them to a fleet.
+    """
+    if not module.startswith("pkg."):
+        return 1
+    for arg in (args if isinstance(args, list) else []):
+        if isinstance(arg, dict):
+            pkgs = arg.get("pkgs")
+            if isinstance(pkgs, (list, tuple)) and pkgs:
+                return len(pkgs)
+            if isinstance(pkgs, dict) and pkgs:
+                return len(pkgs)
+    return 1
+
+
+def summarise(sls: str) -> dict:
+    """{"parts": ["2 packages", "1 service"], "items": 3} for one state's SLS.
+
+    Never raises. A state can hold hand-written YAML and even a templated or
+    malformed one must not take the whole list down with it — an unreadable
+    summary is a blank cell, not a broken page.
+    """
+    try:
+        doc = yaml.safe_load(sls or "") or {}
+    except Exception:
+        return {"parts": [], "items": 0, "unreadable": True}
+    if not isinstance(doc, dict):
+        return {"parts": [], "items": 0, "unreadable": True}
+    tally, order = {}, []
+    for body in doc.values():
+        modules = []
+        if isinstance(body, dict):
+            # {"pkg.installed": [...]} — the ordinary shape.
+            modules = [k for k in body if isinstance(k, str) and "." in k]
+            # Salt's other shape: {"pkg": ["installed", {...}]}, where the
+            # function is the first string in the list. Missed, every state
+            # written that way summarised as empty.
+            for k, v in body.items():
+                if isinstance(k, str) and "." not in k and isinstance(v, list):
+                    fn = next((x for x in v if isinstance(x, str)), "")
+                    if fn:
+                        modules.append(f"{k}.{fn}")
+        for module in modules:
+            one, many = _noun(module)
+            if many not in tally:
+                order.append((one, many))
+            tally[many] = tally.get(many, 0) + _count(module, body.get(module))
+    parts = [f"{tally[many]} {one if tally[many] == 1 else many}"
+             for one, many in order]
+    return {"parts": parts, "items": sum(tally.values())}
+
+
 def to_sls(items) -> str:
     """The Salt SLS these items describe.
 
@@ -373,3 +479,104 @@ def to_sls(items) -> str:
         return ""
     return yaml.dump(doc, Dumper=_Dumper, sort_keys=False,
                      default_flow_style=False, allow_unicode=True, width=10000)
+
+
+# ---------------------------------------------------------------------------
+# Somewhere to start
+# ---------------------------------------------------------------------------
+# "+ New state" opened an empty builder with an empty item list. That is a
+# blank page, and a blank page is where a new operator stops: the console has
+# just told them a state is "the packages, files and services a host must
+# have" and then asked them to invent one. These are recognisable starting
+# points, pre-filled with items the SAME builder understands — so the first
+# thing anyone does is edit something real rather than conjure something from
+# nothing.
+#
+# Deliberately small and deliberately boring. They are examples of the shape of
+# a state, not a product catalogue, and every one of them is a thing a person
+# actually configures on a fleet. They are offered, never applied: picking one
+# fills the form, and nothing reaches a host until it is saved and assigned.
+TEMPLATES = [
+    {
+        "id": "web",
+        "label": "Web server",
+        "name": "web-server",
+        "blurb": "nginx installed, running, and serving a directory that exists.",
+        "items": [
+            {"kind": "package", "names": ["nginx"]},
+            {"kind": "dir", "path": "/srv/www", "mode": "0755"},
+            {"kind": "service", "name": "nginx", "enable": True},
+        ],
+    },
+    {
+        "id": "ssh",
+        "label": "SSH hardening",
+        "name": "ssh-hardening",
+        "blurb": "Root login and password auth off, sshd restarted to match.",
+        "items": [
+            {"kind": "line", "path": "/etc/ssh/sshd_config",
+             "line": "PermitRootLogin no"},
+            {"kind": "line", "path": "/etc/ssh/sshd_config",
+             "line": "PasswordAuthentication no"},
+            {"kind": "service", "name": "ssh", "enable": True},
+        ],
+    },
+    {
+        "id": "base",
+        "label": "Common tooling",
+        "name": "common-tools",
+        "blurb": "The handful of packages every box is expected to have.",
+        "items": [
+            {"kind": "package",
+             "names": ["curl", "git", "htop", "rsync", "vim", "ca-certificates"]},
+        ],
+    },
+    {
+        "id": "ntp",
+        "label": "Clock in sync",
+        "name": "time-sync",
+        "blurb": "systemd-timesyncd on and running, so logs across the fleet line up.",
+        "items": [
+            {"kind": "package", "names": ["systemd-timesyncd"]},
+            {"kind": "service", "name": "systemd-timesyncd", "enable": True},
+        ],
+    },
+    {
+        "id": "ops",
+        "label": "Operator account",
+        "name": "operator-account",
+        "blurb": "A deploy user in sudo, with a home directory.",
+        "items": [
+            {"kind": "group", "name": "deploy"},
+            {"kind": "user", "name": "deploy", "fullname": "Deployment account",
+             "groups": ["sudo", "deploy"], "shell": "/bin/bash",
+             "home": "/home/deploy"},
+        ],
+    },
+    {
+        "id": "motd",
+        "label": "Login banner",
+        "name": "login-banner",
+        "blurb": "One file, rewritten to match exactly — the smallest real state.",
+        "items": [
+            {"kind": "file", "path": "/etc/motd", "mode": "0644",
+             "contents": "Managed by Sysible Baseline. Changes here are "
+                         "overwritten on the next apply.\n"},
+        ],
+    },
+]
+
+
+def templates() -> list:
+    """The starting points, with the SLS each would produce.
+
+    The SLS is generated HERE rather than written out by hand, so a template
+    cannot describe something the builder would not actually emit — which is
+    the one way a starting point could teach a new operator the wrong shape.
+    """
+    out = []
+    for t in TEMPLATES:
+        items = normalise(t["items"])
+        out.append({**t, "items": items, "sls": to_sls(items),
+                    "contains": summarise(to_sls(items))["parts"]})
+    return out

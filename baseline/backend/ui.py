@@ -131,6 +131,17 @@ letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
 .grid .gh .s{letter-spacing:0;text-transform:none;font-size:11px;color:var(--faint)}
 .grid .gh button{margin-left:auto;flex:none}
 /* The overview's roll-up: one chip per verdict, each a way into the list. */
+/* The next step. Sits under the fleet chips and above the problem list,
+   because a half-configured fleet has no problems to list — nothing is
+   drifting when nothing is being checked, and "all clear" is then the most
+   misleading thing this screen could say. */
+.next{border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:10px;background:var(--panel);padding:.7em .9em;margin:0 0 1.3em}
+.next .nx{color:var(--accent);font-size:11px;letter-spacing:.07em;
+  text-transform:uppercase;font-weight:600}
+.next .nw{font-size:14px;font-weight:600;margin:.15em 0 .25em}
+.next .ny{color:var(--muted);font-size:12.5px;line-height:1.55;max-width:60em}
+.next button{margin-top:.6em}
 .chips{display:flex;flex-wrap:wrap;gap:.5em;margin:0 0 1.3em}
 .chip{display:flex;align-items:baseline;gap:.45em;border:1px solid var(--line);
 border-radius:10px;background:var(--panel);padding:.55em .8em;cursor:pointer;
@@ -295,6 +306,18 @@ button.mode.on{background:var(--panel2);color:var(--text);font-weight:600}
 .item-grid .hint{color:var(--faint);font-size:11px}
 .item-grid label.check{flex-direction:row;align-items:center;gap:7px}
 .item-grid label.check input{width:auto}
+/* Starting points, in the NEW-state dialog only. A card per template, so the
+   first thing an operator does is edit something real instead of conjuring a
+   state from an empty list. */
+.startlab{color:var(--faint);font-size:12px;margin:0 0 8px}
+.tpls{display:grid;grid-template-columns:repeat(auto-fill,minmax(14em,1fr));gap:8px;
+  margin:0 0 14px}
+button.tpl{display:block;text-align:left;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel2);color:var(--text);padding:9px 11px;cursor:pointer;font:inherit}
+button.tpl:hover{border-color:var(--accent);background:var(--panel)}
+button.tpl .tl{font-weight:600;font-size:13px}
+button.tpl .tb{color:var(--muted);font-size:11.5px;line-height:1.45;margin-top:2px}
+button.tpl .tc{color:var(--faint);font-size:11px;margin-top:4px;font-family:var(--mono)}
 .additem{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;
          padding-top:12px;border-top:1px dashed var(--line)}
 .additem select{min-width:220px}
@@ -488,6 +511,16 @@ def console_page(who) -> str:
 
         # Build mode: the list, and one picker to add to it.
         "<div id=s-build>"
+        # Somewhere to start. A NEW state used to open on an empty list under a
+        # picker, which is a blank page — the console had just explained what a
+        # state is and then asked the operator to invent one. These fill the
+        # list with something real to edit. Hidden when editing an existing
+        # state, where replacing its items wholesale is not a starting point,
+        # it is data loss.
+        "  <div id=s-start hidden>"
+        "    <div class=startlab>Start from one of these, or build your own:</div>"
+        "    <div class=tpls id=s-tpls></div>"
+        "  </div>"
         "  <div id=s-items></div>"
         "  <div class=additem>"
         "    <select id=s-kind aria-label='What to add'></select>"
@@ -879,6 +912,88 @@ function srch(nav, placeholder){
 // The question this answers is "is my fleet all right", which nothing on the
 // three-column screen answered: you had to pick a host to learn anything, and
 // then you had learned it about one host.
+// What to do next, once there IS something managed. startPanel() covers the
+// empty console and then stops: the moment one state exists the Overview goes
+// back to listing problems, and a half-configured fleet — a state declared and
+// assigned to nothing, sixteen hosts with nothing on them, a host that has
+// never actually been applied — reads as "no problems" because nothing is
+// drifting. Nothing is drifting because nothing is being checked.
+//
+// ONE step, the earliest unfinished one. A list of five suggestions is a
+// backlog, and a backlog on the first screen is the thing a new operator
+// scrolls past.
+function nextStep(){
+  const hosts = STATE.hosts || [];
+  const states = STATE.states || [];
+  const assigned = new Set((STATE.assign || []).map((a) => a.state));
+
+  // 1. Declared and assigned to nothing. The most common half-finished state,
+  //    and the one the console is quietest about: it has no verdict at all.
+  const orphans = states.filter((s) => !assigned.has(s.name));
+  if(orphans.length && states.length){
+    const n = orphans.length;
+    return {
+      what: `${n} state${n === 1 ? ' is' : 's are'} declared but assigned to nothing`,
+      why: `${n === 1 ? esc(orphans[0].name) + ' is' : 'They are'} not being checked on
+        any host. Declaring a state does not apply it.`,
+      go: CAN_WRITE ? {label: 'Assign ' + (n === 1 ? esc(orphans[0].name) : 'a state'),
+                       nav: 'states', state: n === 1 ? orphans[0].name : null} : null,
+    };
+  }
+
+  // 2. Hosts with nothing on them.
+  const bare = hosts.filter((h) => !statesFor(h).all.length);
+  if(bare.length && states.length){
+    const n = bare.length;
+    return {
+      what: `${n} host${n === 1 ? ' has' : 's have'} no state assigned`,
+      why: `Baseline is not checking ${n === 1 ? 'it' : 'them'} at all, so
+        ${n === 1 ? 'it' : 'they'} will never report drift. Assigning a whole
+        environment at once is usually quicker than one host at a time.`,
+      go: {label: 'Open hosts', nav: 'hosts'},
+    };
+  }
+
+  // 3. Assigned, but never actually run. "Must satisfy nginx" is a wish until
+  //    something applies it.
+  const never = hosts.filter((h) => statesFor(h).all.length && !runsFor(h.id).length);
+  if(never.length){
+    const n = never.length;
+    return {
+      what: `${n} host${n === 1 ? ' has' : 's have'} a state that has never been applied`,
+      why: `What ${n === 1 ? 'it' : 'they'} must satisfy is declared, but nothing has
+        run yet — so Baseline has not checked whether it is true.`,
+      go: {label: 'Open hosts', nav: 'hosts'},
+    };
+  }
+
+  // 4. Salt missing. Last because it is a blocker rather than a step, and the
+  //    host rows already say it loudly where it applies.
+  const nosalt = hosts.filter(noSalt);
+  if(nosalt.length){
+    const n = nosalt.length;
+    return {
+      what: `${n} host${n === 1 ? '' : 's'} cannot be checked \u2014 Salt is not installed`,
+      why: `Baseline evaluates a state with <span class=mono>salt-call --local</span> on
+        the host. Nothing else about ${n === 1 ? 'it is' : 'them is'} wrong, and the
+        console can install it.`,
+      go: {label: 'Open hosts', nav: 'hosts'},
+    };
+  }
+  return null;
+}
+
+function stepPanel(step){
+  return `<div class=next>
+    <div class=nx>Next</div>
+    <div class=nw>${step.what}</div>
+    <div class=ny>${step.why}</div>
+    ${step.go ? `<button class='sm primary' data-step="${esc(step.go.nav)}"
+       ${step.go.state ? `data-stepstate="${esc(step.go.state)}"` : ''}
+       >${step.go.label}</button>` : ''}
+  </div>`;
+}
+
 function viewOverview(){
   if(startingOut()) return startPanel();
   const hosts = STATE.hosts || [];
@@ -901,6 +1016,8 @@ function viewOverview(){
   let out = vh('Overview', `${hosts.length} host${hosts.length === 1 ? '' : 's'} · `
     + `${(STATE.states || []).length} state${(STATE.states || []).length === 1 ? '' : 's'}`)
     + `<div class=chips>${chips}</div>`;
+  const step = nextStep();
+  if(step) out += stepPanel(step);
   if(need.length){
     // A SECTION heading, not a second view heading. It was `.vh h1` — the
     // element that names the open section — so the Overview read as two
@@ -915,7 +1032,15 @@ function viewOverview(){
            <span class="c ${st.cls}">${esc(st.label)}</span></div>`).join('')
       + '</div>';
   } else {
-    out += `<div class=grid><div class=empty>Every managed host is as declared.</div></div>`;
+    // "Every managed host is as declared" is VACUOUSLY true when nothing is
+    // managed, and reads as all-clear directly under a panel saying nothing is
+    // being checked — the console arguing with itself on its first screen. An
+    // absence of verdicts is not a good verdict.
+    const managed = rows.filter((x) => x.d.all.length).length;
+    out += `<div class=grid><div class=empty>${managed
+      ? 'Every managed host is as declared.'
+      : 'No host has a state assigned yet, so there is nothing to check and no '
+        + 'verdict to give.'}</div></div>`;
   }
   return out;
 }
@@ -992,7 +1117,9 @@ function viewStates(){
     + srch('states', 'Filter states\u2026'));
   if(!states.length){
     return head + `<div class=grid><div class=empty>Nothing declared yet. A state is
-      the packages, files and services a host must have.</div></div>`;
+      the packages, files and services a host must have.${CAN_WRITE
+        ? ' <b>+ New state</b> opens a builder with half a dozen starting points \u2014 a web server, SSH hardening, the common tools \u2014 so you can edit something real rather than start from an empty list.'
+        : ' Ask an operator to declare the first one.'}</div></div>`;
   }
   const q = (FILTER.states || '').trim().toLowerCase();
   const rows = states.map((x) => ({s: x, st: stateStatus(x.name), on: hostsWith(x.name)}))
@@ -1002,18 +1129,32 @@ function viewStates(){
       \u201c${esc(q)}\u201d.</div></div>`;
   }
   rows.sort((a, b) => a.st.rank - b.st.rank || a.s.name.localeCompare(b.s.name));
-  const COLS = 'grid-template-columns:minmax(0,16em) minmax(0,5em) minmax(0,1fr) auto';
+  // WHAT IT DECLARES is a column now. The list carried a name, a version and a
+  // verdict — three facts about a declaration and none about what it declares —
+  // so "does web-stack install nginx?" could only be answered by opening every
+  // state in turn. The summary is read back out of the SLS server-side, which
+  // means a hand-written state is summarised too.
+  const COLS = 'grid-template-columns:minmax(0,14em) minmax(0,5.5em) minmax(0,1fr) '
+             + 'minmax(0,7em) minmax(0,9em)';
   return head + '<div class=grid>'
     + `<div class=hd style="${COLS}"><span>State</span><span>Version</span>
-       <span>On</span><span>Worst</span></div>`
-    + rows.map(({s, st, on}) => `<div class="r${SEL.state === s.name ? ' sel' : ''}"
+       <span>Declares</span><span>On</span><span>Worst</span></div>`
+    + rows.map(({s, st, on}) => {
+        const what = s.unreadable
+          ? '<span class="err">cannot be read \u2014 open it to see why</span>'
+          : (s.contains || []).length
+            ? esc((s.contains || []).join(' \u00b7 '))
+            : '<span class="f">nothing \u2014 an empty declaration</span>';
+        return `<div class="r${SEL.state === s.name ? ' sel' : ''}"
         data-state="${esc(s.name)}" style="${COLS}" title="${esc(st.note)}">
         <span class="c m">${esc(s.name)}</span>
         <span class="c f m">v${esc(s.version)}</span>
+        <span class="c f">${what}</span>
         <span class="c f">${on.length
           ? esc(`${on.length} host${on.length === 1 ? '' : 's'}`)
-          : 'no host \u2014 declaring is not assigning'}</span>
-        <span class="c ${st.cls}">${esc(st.label)}</span></div>`).join('')
+          : 'no host'}</span>
+        <span class="c ${st.cls}">${esc(st.label)}</span></div>`;
+      }).join('')
     + '</div>';
 }
 
@@ -1453,6 +1594,30 @@ async function showYaml(){
   }
 }
 
+// Starting points for a new state. Fetched once; the list is small, fixed, and
+// generated server-side through the real emitters so a card cannot show a shape
+// the builder would not produce.
+let TPLS = null;
+async function loadTemplates(){
+  if(TPLS) return TPLS;
+  try{ TPLS = (await api('templates')).templates || []; }
+  catch(e){ TPLS = []; }          // no starting points is a smaller problem
+  return TPLS;                     // than a dialog that will not open
+}
+
+async function renderTemplates(show){
+  const box = $('s-start');
+  box.hidden = !show;
+  if(!show) return;
+  const list = await loadTemplates();
+  if(!list.length){ box.hidden = true; return; }
+  $('s-tpls').innerHTML = list.map((t) => `<button type=button class=tpl
+      data-tpl="${esc(t.id)}">
+      <div class=tl>${esc(t.label)}</div>
+      <div class=tb>${esc(t.blurb || '')}</div>
+      <div class=tc>${esc((t.contains || []).join(' \u00b7 '))}</div></button>`).join('');
+}
+
 async function openState(name){
   try{ await kinds(); }
   catch(e){ say(e.message, 'err'); return; }
@@ -1473,6 +1638,10 @@ async function openState(name){
     ITEMS = (st.items || []).slice();
     $('s-sls').value = st.sls || '';
   }
+  // Only on a NEW state, and only for someone who can save one. Replacing an
+  // existing state's items with a template is not a starting point, it is
+  // throwing away what is there.
+  await renderTemplates(!name && CAN_WRITE);
   renderItems();
   $('s-save').hidden = !CAN_WRITE;
   $('s-add').hidden = !CAN_WRITE;
@@ -1482,6 +1651,26 @@ async function openState(name){
 }
 
 // ---- builder events --------------------------------------------------------
+$('s-tpls').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-tpl]');
+  if(!b) return;
+  ev.preventDefault();
+  const t = (TPLS || []).find((x) => x.id === b.dataset.tpl);
+  if(!t) return;
+  ITEMS = JSON.parse(JSON.stringify(t.items || []));
+  SOURCE = 'builder';
+  // The name is a SUGGESTION, and only into an empty box: someone who already
+  // typed "web-01-nginx" and then wanted the web template as a starting point
+  // should not have their name replaced by "web-server".
+  if(!$('s-name').value.trim()) $('s-name').value = t.name || '';
+  setMode('build');
+  renderItems();
+  // The strip has done its job. Leaving it up invites a second click that
+  // silently discards everything the first one just filled in.
+  $('s-start').hidden = true;
+  const first = $('s-items').querySelector('.item input, .item textarea');
+  if(first) first.focus();
+});
 $('s-kind').addEventListener('change', kindHelp);
 $('s-add').addEventListener('click', () => {
   const kind = $('s-kind').value;
@@ -1889,6 +2078,13 @@ document.addEventListener('click', async (ev) => {
     // header, and the one in the day-one panel that is the whole point of
     // that panel.
     if(t.id === 'newstate' || t.id === 'startstate') return openState('');
+    // The Next panel's button. It navigates — and when one state is the whole
+    // problem, it opens the assign dialog for that state rather than making
+    // the operator find it again in a list it just named.
+    if(t.dataset.step){
+      if(t.dataset.stepstate && CAN_WRITE) openAssign(t.dataset.stepstate);
+      return go(t.dataset.step);
+    }
     if(t.id === 'newrule')  return openRule('');
     if(t.dataset.edit)      return openState(t.dataset.edit);
     if(t.dataset.delstate)  return deleteState(t.dataset.delstate);

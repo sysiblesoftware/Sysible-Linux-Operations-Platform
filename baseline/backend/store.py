@@ -190,11 +190,27 @@ def state_versions(name: str) -> list:
 
 
 def list_states() -> list:
+    """Every state's latest version, WITH a phrase saying what it contains.
+
+    The list used to carry a name, a version and a verdict — three facts about
+    a declaration and none about what it declares — so "does web-stack install
+    nginx?" could only be answered by opening it, one state at a time. The SLS
+    comes back from the same query and is summarised here, which costs one
+    extra column on a table that is never large (states are written by people).
+    """
+    from . import build
     with _LOCK, _db() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT name, version, created, source FROM states s "
+        rows = [dict(r) for r in c.execute(
+            "SELECT name, version, created, source, sls FROM states s "
             "WHERE version = (SELECT MAX(version) FROM states WHERE name = s.name) "
             "ORDER BY name").fetchall()]
+    for r in rows:
+        sm = build.summarise(r.pop("sls", "") or "")
+        r["contains"] = sm["parts"]
+        r["items"] = sm["items"]
+        if sm.get("unreadable"):
+            r["unreadable"] = True
+    return rows
 
 
 def delete_state(name: str) -> dict:

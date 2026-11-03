@@ -136,6 +136,18 @@ def api_kinds(request: Request) -> dict:
     return {"kinds": build.catalog()}
 
 
+@app.get("/api/templates")
+def api_templates(request: Request) -> dict:
+    """Somewhere to start, instead of a blank builder.
+
+    Generated through the real emitters (see build.templates), so a starting
+    point cannot show a shape the builder would not actually produce. Offered
+    only — nothing here touches a host until it is saved and assigned.
+    """
+    _require_read(request)
+    return {"templates": build.templates()}
+
+
 @app.get("/api/states/{name}")
 def api_state(name: str, request: Request, version: int = Query(default=0)) -> dict:
     _require_read(request)
