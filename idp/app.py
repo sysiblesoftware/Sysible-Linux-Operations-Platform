@@ -171,6 +171,20 @@ def _get_user(username: str) -> sqlite3.Row | None:
 
 _INITIAL_PW_FILE = "initial-password"
 
+# The credentials a fresh SLOP ships with. These are DOCUMENTED and therefore
+# public: every install runs on them until somebody changes them, which is a
+# deliberate product decision — "I can't find the default slop username and
+# password" is the support question they exist to answer.
+#
+# The previous default generated a random password instead and wrote it to a
+# 0600 file so it never entered the container log. That is still the right
+# setting for anything reachable from outside, and it is one value away:
+# SLOP_ADMIN_PASSWORD=random. Note that SLOP_MIN_PASSWORD_LEN (10 by default)
+# applies to every password a human sets afterwards, so the default below is
+# shorter than any replacement for it can be.
+_DEFAULT_ADMIN_USER = "admin"
+_DEFAULT_ADMIN_PASSWORD = "sysible"
+
 
 def _initial_password_path() -> str:
     return os.path.join(os.environ.get("SLOP_DATA_DIR", "/data"), _INITIAL_PW_FILE)
@@ -284,14 +298,23 @@ def _bootstrap_admin() -> None:
         n = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
     if n:
         return
-    user = os.environ.get("SLOP_ADMIN_USER", "admin").strip() or "admin"
+    user = (os.environ.get("SLOP_ADMIN_USER", _DEFAULT_ADMIN_USER).strip()
+            or _DEFAULT_ADMIN_USER)
     pw = os.environ.get("SLOP_ADMIN_PASSWORD", "").strip()
     generated = False
-    if not pw:
+    shipped_default = False
+    if pw.lower() == "random":
         pw = secrets.token_urlsafe(12)
         generated = True
-    # Force a change on first login when we generated the password (or when asked).
-    must_change = generated or os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "1") == "1"
+    elif not pw:
+        pw = _DEFAULT_ADMIN_PASSWORD
+        shipped_default = True
+    # A GENERATED password must be changed: nobody chose it, it exists only in a
+    # file on disk, and leaving it live indefinitely is the thing the file was
+    # introduced to avoid. The shipped default is deliberately NOT forced — it is
+    # documented, and making the documented credential fail until replaced turned
+    # the first login into a puzzle instead of a login.
+    must_change = generated or os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "0") == "1"
     _upsert_user(user, pw, "superuser", must_change)
     banner = "=" * 70
     print(banner)
@@ -312,6 +335,15 @@ def _bootstrap_admin() -> None:
         else:
             # A read-only data dir is the one case where the log is all there is.
             print(f"   password: {pw}    <-- could not write the password file")
+    elif shipped_default:
+        # Printed on purpose. Withholding a value that is in the docs protects
+        # nothing, and the generated-password machinery above exists precisely so
+        # that a secret password is never the one being printed.
+        print(f"   password: {pw}")
+        print("   This is the SHIPPED DEFAULT and it is public. Change it at")
+        print("   /account, or set SLOP_ADMIN_PASSWORD before the first run.")
+        print("   Exposed to a network? Use SLOP_ADMIN_PASSWORD=random instead:")
+        print("   a random password is written to a 0600 file, never the log.")
     else:
         print("   password: (from SLOP_ADMIN_PASSWORD)")
     print(banner, flush=True)
@@ -1684,19 +1716,21 @@ def _config_page(sess: sqlite3.Row) -> str:
     _admin_pw_set = bool(os.environ.get("SLOP_ADMIN_PASSWORD", "").strip())
 
     identity = _cfg_table([
-        ("SLOP_ADMIN_USER", escape(os.environ.get("SLOP_ADMIN_USER", "admin") or "admin"),
+        ("SLOP_ADMIN_USER", escape(os.environ.get("SLOP_ADMIN_USER", _DEFAULT_ADMIN_USER)
+                                    or _DEFAULT_ADMIN_USER),
          "Username of the first-run bootstrap superuser."),
         ("SLOP_ADMIN_PASSWORD",
-         "<span class=pill>set</span>" if _admin_pw_set else "<span class=pill>auto-generated</span>",
-         # It is no longer printed anywhere: this page was still sending the
-         # operator to the logs for a password that has not been in them since
-         # it moved to a 0600 file.
-         "Bootstrap admin password. Empty = a random one is generated into "
-         "`$SLOP_DATA_DIR/initial-password` (mode 0600), never the log. "
-         "It is deleted the first time that account signs in."),
+         "<span class=pill>set</span>" if _admin_pw_set
+         else "<span class=pill>shipped default</span>",
+         "Bootstrap admin password. Empty = the documented default "
+         f"`{_DEFAULT_ADMIN_PASSWORD}`, which is public and should be changed. "
+         "Set it to `random` to have one generated into "
+         "`$SLOP_DATA_DIR/initial-password` (mode 0600, never the log, deleted "
+         "at first sign-in) — the right choice for anything exposed."),
         ("SLOP_ADMIN_FORCE_CHANGE",
-         "on" if os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "1") == "1" else "off",
-         "Force the bootstrap admin to change the password at first login."),
+         "on" if os.environ.get("SLOP_ADMIN_FORCE_CHANGE", "0") == "1" else "off",
+         "Force the bootstrap admin to change the password at first login. "
+         "Always on for a generated password."),
         ("SLOP_MIN_PASSWORD_LEN", str(_MIN_PW),
          "Minimum length for a new or changed password."),
         ("SLOP_SESSION_TTL", f"{SESSION_TTL}s (≈{SESSION_TTL // 3600}h)",

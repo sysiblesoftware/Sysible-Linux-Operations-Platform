@@ -35,6 +35,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import compose
+
 # One name, reused: a helper from a previous run is removed before a new one
 # starts, so its log survives exactly until the next job needs the name.
 HELPER = "sysible-slop-selfupdate"
@@ -130,6 +132,12 @@ def spawn(script: str, cwd: Path, action: str = "update") -> tuple[bool, str]:
         val = os.environ.get(var)
         if val:
             argv += ["-e", f"{var}={val}"]
+    # The scripts above are literals naming `docker compose`. This image may
+    # carry only the standalone binary, in which case the helper would die with
+    # Docker's own "'compose' is not a docker command" — in a detached container
+    # whose log the operator has to go and find. One fixed binary name is
+    # substituted; nothing request-derived enters the script.
+    script = compose.shell_script(script)
     argv += [image, "sh", "-c", script]
     p = _docker(*argv, timeout=60)
     if p.returncode != 0:

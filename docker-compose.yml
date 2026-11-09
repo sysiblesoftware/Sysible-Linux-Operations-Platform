@@ -41,9 +41,11 @@ services:
     restart: unless-stopped
     environment:
       # No domain to configure — the IdP is same-origin behind the gateway and its
-      # session cookie is always host-only. First-run bootstrap only: leave
-      # SLOP_ADMIN_PASSWORD empty to have a random one generated and printed to the
-      # idp logs once (docker logs sysible-slop-idp).
+      # session cookie is always host-only. First-run bootstrap only: left empty,
+      # the documented default admin / sysible is used (public — change it at
+      # /account). SLOP_ADMIN_PASSWORD=random generates one into
+      # /data/initial-password (0600, never the log) instead, which is what to use
+      # for anything exposed.
       SLOP_ADMIN_USER: ${SLOP_ADMIN_USER:-admin}
       SLOP_ADMIN_PASSWORD: ${SLOP_ADMIN_PASSWORD:-}
       # Administration -> Software updates talks to the updater sidecar over the

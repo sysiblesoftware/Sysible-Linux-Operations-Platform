@@ -119,8 +119,36 @@ the portal:
   or remove users, set roles, and reset any user's password (which forces a change
   at their next login and drops their live sessions immediately).
 
-First run creates an initial `admin` superuser; set `SLOP_ADMIN_PASSWORD` or read
-the one-time generated password from the IdP logs (`docker logs sysible-slop-idp`).
+### Signing in the first time
+
+A fresh SLOP ships with one account:
+
+| | |
+|---|---|
+| **Username** | `admin` |
+| **Password** | `sysible` |
+
+That default is public — change it at `https://<server-ip>/account` as soon as you
+are in. `SLOP_MIN_PASSWORD_LEN` (10 by default) applies to the replacement, so it
+has to be longer than the default it replaces.
+
+To start from something that is not public, set `SLOP_ADMIN_PASSWORD` in `.env`
+before the first run — either to a password of your own, or to the literal word
+`random`, which generates one and writes it to `/data/initial-password` inside the
+idp container at mode 0600. It is never written to the log (a container log is
+replayed by `docker compose logs` to anyone who can read it, for as long as the
+service lives), and it is deleted the first time that account signs in:
+
+```
+docker compose exec idp cat /data/initial-password
+```
+
+A generated password always forces a change at first login. The shipped default
+does not; set `SLOP_ADMIN_FORCE_CHANGE=1` if you want it to.
+
+`SLOP_ADMIN_USER` renames the bootstrap account. All three settings apply only on
+the very first run, when the user table is empty — changing them later does
+nothing, because the account already exists.
 
 ## CE limitations (hardened in EE)
 

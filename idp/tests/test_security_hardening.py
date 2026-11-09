@@ -28,8 +28,13 @@ def mod(tmp_path):
         SLOP_DATA_DIR=str(tmp_path), SLOP_DB_PATH=str(tmp_path / "idp.db"),
         SLOP_ADMIN_USER="admin", SLOP_ADMIN_FORCE_CHANGE="0",
         SLOP_ALLOW_INSECURE_COOKIE="1",
+        # These tests are about the GENERATED bootstrap password — the 0600 file,
+        # the log staying clean, the file being removed at first sign-in. An empty
+        # SLOP_ADMIN_PASSWORD used to mean "generate one"; it now means "use the
+        # documented default", so generation has to be asked for by name or this
+        # whole suite would quietly stop testing the thing it is named after.
+        SLOP_ADMIN_PASSWORD="random",
     )
-    os.environ.pop("SLOP_ADMIN_PASSWORD", None)
     import app as m
     return importlib.reload(m)
 

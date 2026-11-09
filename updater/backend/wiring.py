@@ -38,6 +38,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from . import compose
+
 from . import apps
 
 # Default agent ports, matching SLOP's compose. Only used when SLOP's .env does
@@ -234,7 +236,13 @@ def recreate_controller(timeout: float = 180) -> tuple[bool, str]:
     if ctl_dir is None:
         return False, f"{ctl_root} has no compose file"
     try:
-        p = subprocess.run(["docker", "compose", "up", "-d"], cwd=str(ctl_dir),
+        # This one already checks there is a compose FILE (compose_dir above);
+        # what it never checked is that compose itself exists here.
+        _blocked = compose.unavailable_reason()
+        if _blocked:
+            return False, _blocked
+        p = subprocess.run(compose.normalize(["docker", "compose", "up", "-d"]),
+                           cwd=str(ctl_dir),
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, f"{type(e).__name__} recreating the Controller"

@@ -22,6 +22,9 @@ import time
 from pathlib import Path
 
 from . import apps, detached, git, wiring
+# Imported under an alias on purpose: `compose` is already a Path
+# parameter in half the functions here.
+from . import compose as _compose_mod
 
 # Bound the log: a --build pours out a lot, and this lives in memory.
 MAX_LOG_LINES = int(os.environ.get("SYSIBLE_UPDATER_MAX_LOG_LINES", "600"))
@@ -159,6 +162,10 @@ def _rev(root: Path) -> str:
 
 def _run(argv: list[str], cwd: Path) -> int:
     """Run one step, streaming its output into the job log. Returns the exit code."""
+    # The argv tables here name `docker compose`; this image may only have the
+    # standalone binary. Swapping the prefix at execution keeps the tables
+    # literal (see ACTIONS) while still running on either.
+    argv = _compose_mod.normalize(argv)
     _log(f"$ {' '.join(argv)}")
     try:
         p = subprocess.Popen(argv, cwd=str(cwd), stdout=subprocess.PIPE,
@@ -322,6 +329,9 @@ def _queue_worker(items: list, actor: str) -> None:
 
 def start(key: str, root: Path, compose: Path, actor: str) -> tuple[bool, str]:
     """Begin an update. Returns (started, message). Refuses while one is running."""
+    blocked = _compose_mod.blocked_reason(compose)
+    if blocked:
+        return False, blocked
     global _job
     # The in-process lock cannot see a detached helper: it lives in another
     # container, and a restart of this one resets the lock while the work carries
@@ -481,6 +491,9 @@ def start_module_action(key: str, module: str, action: str, compose: Path,
     report its own result.
     """
     global _job
+    blocked = _compose_mod.blocked_reason(compose)
+    if blocked:
+        return False, blocked
     refusal = module_action_refusal(key, module, action)
     if refusal:
         return False, refusal
@@ -522,6 +535,9 @@ def start_action(key: str, action: str, compose: Path, actor: str) -> tuple[bool
     """Begin a lifecycle action. Shares the update lock: a restart during a
     `compose up --build` of the same stack would fight over container names."""
     global _job
+    blocked = _compose_mod.blocked_reason(compose)
+    if blocked:
+        return False, blocked
     refusal = action_refusal(key, action)
     if refusal:
         return False, refusal
@@ -563,7 +579,8 @@ def services(compose: Path) -> list[dict]:
     hang Administration."""
     import json as _json
     try:
-        p = subprocess.run(["docker", "compose", "ps", "--all", "--format", "json"],
+        p = subprocess.run(_compose_mod.normalize(
+                               ["docker", "compose", "ps", "--all", "--format", "json"]),
                            cwd=str(compose), capture_output=True, text=True, timeout=15)
     except Exception:
         return []
