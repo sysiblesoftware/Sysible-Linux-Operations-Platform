@@ -534,6 +534,46 @@ def _current(request: Request) -> sqlite3.Row | None:
 # the sign-in flow reads as one product with the portal and the app consoles: same
 # engineering-dark ground, same brand green, same light-theme toggle. The legacy
 # --fg/--mut/--brand names are kept as aliases so the page bodies need no edits.
+# ONE theme for the whole suite, chosen once and shared by every Sysible console.
+#
+# The Controller kept its choice under "sysible_theme", SLOP under "slop-theme",
+# SLEP under "slep_theme" — three keys for one setting. Behind the gateway all
+# three are served from the SAME ORIGIN, so they share localStorage and could
+# always have agreed; they simply never looked at the same key. The visible
+# result was a light SLOP sign-in handing over to a dark Controller.
+#
+# The defaults disagreed too: SLOP followed the OS, the Controller and SLEP hard
+# -coded dark. So on a light-mode desktop the split appeared without anyone ever
+# touching a toggle.
+#
+# This script is the single source of that decision:
+#   - reads "sysible-theme";
+#   - if unset, adopts the first legacy key that holds a real value and WRITES
+#     it forward, so nobody loses the theme they had picked;
+#   - if still unset, follows prefers-color-scheme;
+#   - applies it to <html data-theme> BEFORE first paint, so no console flashes
+#     the wrong colour on the way in;
+#   - listens for `storage`, so changing the theme in one app repaints the
+#     others that are already open;
+#   - exposes window.sysibleTheme for the toggle to call.
+#
+# It is embedded verbatim in every console, this repo's and the other two's.
+# tests/test_the_theme_is_one_setting.py asserts the copies are identical, so
+# they cannot drift back apart in silence.
+_THEME_JS = (
+    "(function(){var K='sysible-theme',O=['sysible_theme','slop-theme','slep_theme'"
+    "],r=document.documentElement;function g(){try{var t=localStorage.getItem(K);if"
+    "(t!=='light'&&t!=='dark'){for(var i=0;i<O.length;i++){var v=localStorage.getIt"
+    "em(O[i]);if(v==='light'||v==='dark'){t=v;try{localStorage.setItem(K,t)}catch(e"
+    "){}break}}}if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: lig"
+    "ht)').matches?'light':'dark';return t}catch(e){return'dark'}}function a(t){r.s"
+    "etAttribute('data-theme',t)}a(g());try{window.addEventListener('storage',funct"
+    "ion(e){if(e.key===K&&(e.newValue==='light'||e.newValue==='dark'))a(e.newValue)"
+    "})}catch(e){}window.sysibleTheme={get:g,apply:a,set:function(t){a(t);try{local"
+    "Storage.setItem(K,t)}catch(e){}}}})();"
+)
+
+
 _CSS = """
 :root{--bg:#0d1117;--panel:#131923;--panel2:#1a212d;--line:#26303f;
 --text:#e6edf5;--muted:#93a1b5;--faint:#6f7d92;
@@ -1074,15 +1114,14 @@ def _page(title: str, body: str, wide: bool = False, xl: bool = False) -> str:
     `wide`, and every /admin tab uses it: the tab strip is one control, so a
     card that resized as you moved along it would read as the page breaking."""
     # The pre-paint script picks up the theme the operator chose on the portal
-    # (shared 'slop-theme' key), falling back to the OS preference, so the login
-    # never flashes the wrong theme. The trailing script wires the corner toggle.
+    # (the one 'sysible-theme' key every Sysible console reads), falling back to
+    # the OS preference, so the login never flashes the wrong theme. The trailing
+    # script wires the corner toggle through window.sysibleTheme.
     return (
         f"<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width,initial-scale=1'>"
         f"<title>{escape(title)}</title>"
-        f"<script>try{{var t=localStorage.getItem('slop-theme');"
-        f"if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';"
-        f"document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>"
+        f"<script>{_THEME_JS}</script>"
         f"<style>{_CSS}</style></head><body>"
         f"<div class=bg></div>"
         f"<button class=theme-btn id=theme title='Toggle light / dark' aria-label='Toggle theme'>&#9728;</button>"
@@ -1102,10 +1141,16 @@ def _page(title: str, body: str, wide: bool = False, xl: bool = False) -> str:
         # Pages that have nothing to say simply never call pushToast.
         f"<div class=toast-stack id=toasts></div>"
         f"<script>{_TOAST_JS}</script>"
+        # The toggle goes through window.sysibleTheme.set, which the shared
+        # script above installs: it writes the ONE key every Sysible console
+        # reads, so flipping it here flips the Controller and SLEP too. Writing
+        # localStorage directly from here is what let this drift in the first
+        # place.
         f"<script>(function(){{var b=document.getElementById('theme'),r=document.documentElement;"
         f"function s(){{b.textContent=r.getAttribute('data-theme')==='light'?'\\u263e':'\\u2600'}}s();"
-        f"b.addEventListener('click',function(){{var n=r.getAttribute('data-theme')==='light'?'dark':'light';"
-        f"r.setAttribute('data-theme',n);try{{localStorage.setItem('slop-theme',n)}}catch(e){{}}s()}})}})();</script>"
+        f"addEventListener('storage',s);"
+        f"b.addEventListener('click',function(){{"
+        f"window.sysibleTheme.set(r.getAttribute('data-theme')==='light'?'dark':'light');s()}})}})();</script>"
         f"</body></html>"
     )
 

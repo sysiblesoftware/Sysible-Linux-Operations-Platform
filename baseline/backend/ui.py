@@ -441,6 +441,46 @@ FAVICON_SVG = """\
 """
 
 
+# ONE theme for the whole suite, chosen once and shared by every Sysible console.
+#
+# The Controller kept its choice under "sysible_theme", SLOP under "slop-theme",
+# SLEP under "slep_theme" — three keys for one setting. Behind the gateway all
+# three are served from the SAME ORIGIN, so they share localStorage and could
+# always have agreed; they simply never looked at the same key. The visible
+# result was a light SLOP sign-in handing over to a dark Controller.
+#
+# The defaults disagreed too: SLOP followed the OS, the Controller and SLEP hard
+# -coded dark. So on a light-mode desktop the split appeared without anyone ever
+# touching a toggle.
+#
+# This script is the single source of that decision:
+#   - reads "sysible-theme";
+#   - if unset, adopts the first legacy key that holds a real value and WRITES
+#     it forward, so nobody loses the theme they had picked;
+#   - if still unset, follows prefers-color-scheme;
+#   - applies it to <html data-theme> BEFORE first paint, so no console flashes
+#     the wrong colour on the way in;
+#   - listens for `storage`, so changing the theme in one app repaints the
+#     others that are already open;
+#   - exposes window.sysibleTheme for the toggle to call.
+#
+# It is embedded verbatim in every console, this repo's and the other two's.
+# tests/test_the_theme_is_one_setting.py asserts the copies are identical, so
+# they cannot drift back apart in silence.
+_THEME_JS = (
+    "(function(){var K='sysible-theme',O=['sysible_theme','slop-theme','slep_theme'"
+    "],r=document.documentElement;function g(){try{var t=localStorage.getItem(K);if"
+    "(t!=='light'&&t!=='dark'){for(var i=0;i<O.length;i++){var v=localStorage.getIt"
+    "em(O[i]);if(v==='light'||v==='dark'){t=v;try{localStorage.setItem(K,t)}catch(e"
+    "){}break}}}if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: lig"
+    "ht)').matches?'light':'dark';return t}catch(e){return'dark'}}function a(t){r.s"
+    "etAttribute('data-theme',t)}a(g());try{window.addEventListener('storage',funct"
+    "ion(e){if(e.key===K&&(e.newValue==='light'||e.newValue==='dark'))a(e.newValue)"
+    "})}catch(e){}window.sysibleTheme={get:g,apply:a,set:function(t){a(t);try{local"
+    "Storage.setItem(K,t)}catch(e){}}}})();"
+)
+
+
 def _shell(title: str, body: str, who: str = "", tail: str = "") -> str:
     return (
         "<!doctype html><html lang=en data-theme=dark><head><meta charset=utf-8>"
@@ -449,10 +489,7 @@ def _shell(title: str, body: str, who: str = "", tail: str = "") -> str:
         f"<title>{escape(title)}</title>"
         # Theme, chosen the same way and from the same key as every other SLOP
         # app, so switching between them does not flash a different colour.
-        "<script>try{var t=localStorage.getItem('slop-theme');"
-        "if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)')"
-        ".matches?'light':'dark';"
-        "document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
+        f"<script>{_THEME_JS}</script>"
         f"<style>{_CSS}</style></head><body>"
         "<header class=head><div class=brand>Sysible <b>Baseline</b> — desired-state "
         "configuration</div>"
