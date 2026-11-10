@@ -1,0 +1,918 @@
+"""
+Builds the zip file the Webserver Portal hands a logged-in host
+operator: host_agent/agent.py plus everything it needs to run against
+*this* controller with zero manual configuration - no more setting
+SYSIBLE_CONTROLLER/SYSIBLE_ENROLL_TOKEN/SYSIBLE_CA_CERT by hand.
+
+Built entirely in memory (io.BytesIO) - nothing touches disk, so
+there's no stale-bundle cleanup to worry about and every download is
+generated fresh from whatever Controller Configuration currently says
+plus a brand-new one-time enrollment token (see backend/portal_app.py).
+"""
+
+import io
+import os
+import socket
+import zipfile
+from pathlib import Path
+
+import psutil
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+AGENT_SOURCE_FILE = PROJECT_ROOT / "host_agent" / "agent.py"
+# host_agent's own requirements file (not the project root one, which also
+# lists backend/client dependencies the agent has no use for) - bundled
+# into the zip verbatim and installed by run_agent.sh/disenroll_agent.sh,
+# so adding a dependency to the agent only ever means updating this one
+# file instead of also hand-editing the install scripts below.
+AGENT_REQUIREMENTS_FILE = PROJECT_ROOT / "host_agent" / "requirements.txt"
+# Integrity module, bundled alongside agent.py. Always installed (guarded
+# import in agent.py; enables integrity self-measurement/reporting).
+AGENT_INTEGRITY_SOURCE_FILE = PROJECT_ROOT / "host_agent" / "agent_integrity.py"
+# Staged restore-point apply (guarded import in agent.py). Shipped always: it
+# is what turns a queued restore into one applied offline on the next boot, and
+# an agent without it refuses the restore rather than writing a filesystem
+# under live processes.
+AGENT_RESTORE_SOURCE_FILE = PROJECT_ROOT / "host_agent" / "flashback_restore.py"
+CERT_FILE = Path(os.getenv("SYSIBLE_CERT_FILE", str(PROJECT_ROOT / "certs" / "server.crt")))
+# What new agent bundles should pin as their trust anchor - see
+# backend/tls_manager.py's module docstring. trust.crt is the issuing
+# CA chain when a PKI-issued cert has been installed, or just doesn't
+# exist yet on a controller still running its original self-signed
+# cert (CERT_FILE is its own valid anchor in that case - see
+# _trust_cert_path below).
+TRUST_FILE = Path(os.getenv("SYSIBLE_TRUST_FILE", str(PROJECT_ROOT / "certs" / "trust.crt")))
+
+BUNDLE_FILENAME = "sysible-agent-bundle.zip"
+
+
+def _is_container() -> bool:
+    """True when the controller runs from the Docker image. The image sets
+    SYSIBLE_CONTAINER=1; /.dockerenv is the fallback."""
+    v = (os.getenv("SYSIBLE_CONTAINER") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    try:
+        return os.path.exists("/.dockerenv")
+    except Exception:
+        return False
+
+
+def _advertised_addr() -> str:
+    """The address the operator told this controller agents actually reach it at
+    (SYSIBLE_CONTROLLER_ADDR). Essential in a container, whose own NICs only carry
+    docker-bridge IPs (172.x) the fleet can't route to."""
+    return (os.getenv("SYSIBLE_CONTROLLER_ADDR") or "").strip()
+
+
+def detect_local_ips() -> list[str]:
+    """Enumerate this controller's own non-loopback IPv4 addresses across
+    every network interface (psutil.net_if_addrs() - already a backend
+    dependency, so this adds no new one). Powers both the "pick one IP"
+    dropdown in Controller Configuration (GET /controller-config/local-ips)
+    and the "all" address_mode below, which skips picking entirely and
+    just hands agent bundles every address found here.
+
+    Container-aware: a container's own NICs are docker-bridge addresses (172.x)
+    that no managed host can reach, so the REACHABLE address is whatever the
+    operator set as SYSIBLE_CONTROLLER_ADDR. Surface that first, and in a
+    container return ONLY it (when set) — otherwise "Detect Local IPs", the "all"
+    mode, and the first-run default would all advertise an unreachable 172.x."""
+    ips: list[str] = []
+    adv = _advertised_addr()
+    if adv:
+        ips.append(adv)
+    if _is_container() and adv:
+        return ips
+    try:
+        for addrs in psutil.net_if_addrs().values():
+            for addr in addrs:
+                if addr.family == socket.AF_INET and not addr.address.startswith("127."):
+                    if addr.address not in ips:
+                        ips.append(addr.address)
+    except Exception:
+        pass
+    return ips
+
+
+def resolve_controller_addresses(config: dict) -> list[str]:
+    """Turns a controller_config dict (see backend/db.py's
+    get_controller_config) into the ordered list of address strings an
+    agent bundle should be built against. "all" mode is the odd one out:
+    there's no stored address to read because the whole point is to
+    avoid the admin having to pick one, so it's resolved fresh here from
+    detect_local_ips() every time a bundle is downloaded rather than
+    once at save time - if the controller's NICs change later, the next
+    download just picks that up instead of shipping a stale list."""
+    # IP-ONLY by design: a bundle must never bake in a hostname, because that
+    # assumes DNS is configured on every managed host — the exact fragility that
+    # strands agents after a rename / DNS change. "all" ships every NIC IP; "ip"
+    # ships the one configured IP. A legacy "hostname" config is transparently
+    # migrated to IP here (prefer the stored IP, else every detected NIC IP) so an
+    # old install keeps producing working bundles without ever emitting a hostname.
+    mode = config.get("address_mode")
+    if mode == "all":
+        return detect_local_ips()
+    if mode == "ip" and config.get("ip"):
+        return [config["ip"]]
+    if config.get("ip"):
+        return [config["ip"]]
+    return detect_local_ips()
+
+
+def bundle_addresses(config: dict) -> list[str]:
+    """Addresses to bake into a freshly MINTED agent bundle.
+
+    Same as resolve_controller_addresses, but self-heals a dead DHCP lease: in
+    "ip" mode, if the saved PRIVATE (RFC1918) ip is no longer one of this
+    controller's live NIC IPs — the box's address changed — fall back to the
+    current NIC IPs so a regenerated bundle follows the box's real address instead
+    of baking a dead one. A public/NAT ip (never a local NIC, not RFC1918) is
+    preserved so a port-forwarded controller keeps working. This heal is applied
+    ONLY to bundles — never to resolve_controller_addresses itself, which the TLS
+    cert-change detection relies on to read the admin's SAVED address verbatim.
+    """
+    mode = config.get("address_mode")
+    ip = config.get("ip")
+    if mode != "all" and ip:
+        # In a container, NEVER self-heal to a detected NIC IP — the container's
+        # NIC is a docker-bridge address the fleet can't reach, so the "not a live
+        # NIC IP → fall back to detected" rule would wrongly replace a good
+        # 192.168.x address with an unreachable 172.x. Trust the saved address.
+        if _is_container():
+            return resolve_controller_addresses(config)
+        try:
+            import ipaddress
+            detected = detect_local_ips()
+            if detected and ip not in detected and ipaddress.ip_address(ip).is_private:
+                return detected
+        except Exception:
+            pass
+    return resolve_controller_addresses(config)
+
+
+_CERT_INSTALL_DIR = "/etc/sysible"
+_CERT_INSTALL_PATH = f"{_CERT_INSTALL_DIR}/controller.crt"
+
+# Stable, permanent home for the agent on the managed host - distinct
+# from the *controller's* own /opt/sysible (api_key.txt, certs/,
+# hosts.json - see backend/auth.py, remote_routes.py, install_sysible.sh)
+# since on a self-managed controller host both could otherwise collide.
+# run_agent.sh below copies agent.py + sysible_agent.env here and points
+# the systemd unit at this fixed path, so the service keeps working even
+# after the operator deletes the original downloaded/extracted folder.
+_AGENT_INSTALL_DIR = "/opt/sysible-agent"
+
+_SERVICE_NAME = "sysible-agent"
+_SERVICE_UNIT_PATH = f"/etc/systemd/system/{_SERVICE_NAME}.service"
+
+# Robustly install the agent's Python runtime + its one dependency (`requests`;
+# everything else in agent.py is stdlib) across apt / dnf / yum / zypper.
+#
+# Ordering matters for reliability on locked-down and non-Debian hosts:
+#   1. Make sure a `python3` interpreter exists at all (minimal SUSE/RHEL images
+#      may ship none) - install it from the distro if missing.
+#   2. Prefer the DISTRO `python3-requests` package. It needs no PyPI access
+#      (works offline / behind a proxy), needs no compiler, and sidesteps PEP 668
+#      entirely - which is exactly why the pip-only path failed on SUSE.
+#   3. Only if requests is still missing, fall back to pip - and use
+#      `--break-system-packages` ONLY when this pip actually supports the flag
+#      (SUSE Leap's older pip doesn't, and blindly passing it aborted the whole
+#      install under `set -e`).
+#   4. Hard-gate on `import requests`: the agent can't run without it, so fail
+#      loudly with copy-paste remediation rather than installing a dead service.
+# Every package-manager call is `|| true`-guarded so a mirror hiccup can't trip
+# `set -e`; the final import check is the real success criterion.
+_PIP_INSTALL_BLOCK = r"""# 1) Ensure a python3 interpreter exists.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not found - installing it via the host package manager..."
+  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y || true; apt-get install -y python3 || true;
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y python3 || true;
+  elif command -v yum >/dev/null 2>&1; then yum install -y python3 || true;
+  elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install python3 || true;
+  else echo "No supported package manager (apt/dnf/yum/zypper) found to install python3." >&2; fi
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 is required but could not be installed automatically. Install Python 3 and re-run." >&2
+  exit 1
+fi
+echo "Using $(python3 --version 2>&1) at $(command -v python3)"
+
+# 2) If requests isn't already importable, prefer the distro package.
+if ! python3 -c 'import requests' >/dev/null 2>&1; then
+  echo "Installing 'requests' from the host package manager (python3-requests)..."
+  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y || true; apt-get install -y python3-requests || true;
+  elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install python3-requests || true;
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y python3-requests || true;
+  elif command -v yum >/dev/null 2>&1; then yum install -y python3-requests || true;
+  fi
+fi
+
+# 3) Still missing -> fall back to pip (ensuring pip exists first).
+if ! python3 -c 'import requests' >/dev/null 2>&1; then
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    echo "pip not found - installing python3-pip..."
+    if command -v apt-get >/dev/null 2>&1; then apt-get install -y python3-pip || true;
+    elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install python3-pip || true;
+    elif command -v dnf >/dev/null 2>&1; then dnf install -y python3-pip || true;
+    elif command -v yum >/dev/null 2>&1; then yum install -y python3-pip || true;
+    fi
+    python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+  if python3 -m pip --version >/dev/null 2>&1; then
+    echo "Installing requirements via pip..."
+    if ! python3 -m pip install -r ./requirements.txt >/dev/null 2>&1; then
+      if python3 -m pip install --help 2>/dev/null | grep -q -- '--break-system-packages'; then
+        echo "  retrying with --break-system-packages (PEP 668)..."
+        python3 -m pip install --break-system-packages -r ./requirements.txt || true
+      fi
+    fi
+  fi
+fi
+
+# 4) Hard gate: the agent cannot run without requests.
+if ! python3 -c 'import requests' >/dev/null 2>&1; then
+  echo "ERROR: could not install the 'requests' Python package automatically." >&2
+  echo "Install it manually, then re-run this script:" >&2
+  echo "  zypper install python3-requests    # SUSE / openSUSE" >&2
+  echo "  dnf install python3-requests       # RHEL / Fedora / Alma / Rocky" >&2
+  echo "  apt-get install python3-requests   # Debian / Ubuntu" >&2
+  echo "  (or) python3 -m pip install requests" >&2
+  exit 1
+fi
+echo "Python dependencies OK (requests present)." """
+
+# The exact fragment in host_agent/agent.py whose default we patch
+# below - kept as one constant so the patch and the loud failure if it
+# stops matching live next to each other. Was the whole
+# `CONTROLLER = os.getenv(...)` line before the multi-IP failover
+# feature wrapped that same os.getenv(...) call inside a
+# _CONTROLLER_CANDIDATES list comprehension instead - matching just
+# this fragment (rather than the full line it now sits inside) means
+# this keeps working regardless of what surrounds it.
+_CONTROLLER_DEFAULT_LINE = 'os.getenv("SYSIBLE_CONTROLLER", "https://127.0.0.1:9000")'
+
+
+def agent_version_of(src_text: str) -> str:
+    """The 12-char version hash the fleet reports for a given agent source.
+
+    The enrollment bundle bakes the resolved controller URL into agent.py's
+    os.getenv("SYSIBLE_CONTROLLER", "...") default, so the installed file differs
+    per host. Normalize that line back to its canonical placeholder before
+    hashing (the agent does the same in AGENT_VERSION) so a patched-but-current
+    agent isn't reported as permanently outdated. Used by both the version-check
+    (_current_agent_version) and the update push (_build_agent_update_command)."""
+    import hashlib
+    import re
+    canon = re.sub(
+        r'os\.getenv\("SYSIBLE_CONTROLLER",\s*"[^"]*"\)',
+        lambda _m: _CONTROLLER_DEFAULT_LINE, src_text)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+
+
+def _env_file(controller_url: str, token: str, include_cert: bool) -> str:
+    lines = [
+        f"SYSIBLE_CONTROLLER={controller_url}",
+        f"SYSIBLE_ENROLL_TOKEN={token}",
+    ]
+
+    if include_cert:
+        # Absolute path, not a path relative to the bundle folder -
+        # run_agent.sh below actually installs the cert here, so this
+        # keeps working regardless of where the agent itself ends up
+        # running from (now always _AGENT_INSTALL_DIR, via systemd).
+        lines.append(f"SYSIBLE_CA_CERT={_CERT_INSTALL_PATH}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _systemd_unit() -> str:
+    """A managed host running the agent in a foreground terminal used to
+    mean: the operator's session shows every "[agent] running task ..."
+    line live, and the agent dies the moment that terminal closes
+    (unless they remembered nohup/screen/tmux, which nothing here ever
+    told them to do). Installing this unit instead means the agent runs
+    detached, restarts itself on crash or reboot, and its output goes to
+    the journal (`journalctl -u sysible-agent`) instead of an open
+    terminal - exactly the "should all be in the background as a
+    systemd process" ask."""
+    return f"""[Unit]
+Description=Sysible host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile={_AGENT_INSTALL_DIR}/sysible_agent.env
+WorkingDirectory={_AGENT_INSTALL_DIR}
+# Without this, systemd gives the agent a PIPE for stdout, Python block-buffers
+# it, and the one or two lines a task prints sit in a 4-8 KB buffer for hours —
+# so `journalctl -u sysible-agent` shows nothing but systemd's own start/stop
+# lines, and a misbehaving host cannot be diagnosed at all. (agent.py also
+# line-buffers itself, which is what fixes hosts already running an older unit.)
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 {_AGENT_INSTALL_DIR}/agent.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _run_script(include_cert: bool) -> str:
+    cert_steps = (
+        f'echo "Installing controller certificate to {_CERT_INSTALL_PATH}..."\n'
+        f"mkdir -p {_CERT_INSTALL_DIR}\n"
+        f"cp -f ./server.crt {_CERT_INSTALL_PATH}\n"
+        f"chmod 644 {_CERT_INSTALL_PATH}\n\n"
+        if include_cert
+        else "# NOTE: no TLS cert was bundled (controller has none yet at build\n"
+             "# time) - the agent will warn and fall back to default cert\n"
+             "# verification, which will likely fail against a self-signed\n"
+             "# controller. Re-download once the controller has a cert, or set\n"
+             "# SYSIBLE_CA_CERT yourself once you've copied one over.\n\n"
+    )
+
+    return f"""#!/bin/bash
+# Generated by the Sysible Webserver Portal - run this on the host you
+# want managed by Sysible. Installs the agent as a systemd service
+# ({_SERVICE_NAME}) that runs in the background, restarts itself on
+# crash/reboot, and logs to the journal instead of this terminal.
+# Requires systemd. Python 3 and the agent's one dependency (`requests`) are
+# installed automatically below across apt/dnf/yum/zypper - preferring the
+# distro `python3-requests` package (no PyPI needed) and falling back to pip.
+#
+# Must be run as root: it writes the controller cert to
+# {_CERT_INSTALL_DIR}, installs the agent under {_AGENT_INSTALL_DIR},
+# the agent persists its state under /var/lib/sysible, and it registers
+# a unit under /etc/systemd/system - all system locations.
+set -e
+cd "$(dirname "${{BASH_SOURCE[0]}}")"
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "This script needs root (writes to {_CERT_INSTALL_DIR}, {_AGENT_INSTALL_DIR}, /var/lib/sysible, and /etc/systemd/system) - re-run with sudo." >&2
+  exit 1
+fi
+
+# --- which account runs the agent service ----------------------------------
+# Default: root (unchanged). Opt in to an unprivileged agent with:
+#   sudo ./run_agent.sh --unprivileged      # dedicated locked 'sysible' user
+#   sudo ./run_agent.sh --user=NAME         # an existing account you manage
+#   sudo SYSIBLE_AGENT_USER=NAME ./run_agent.sh
+# The chosen account is granted passwordless sudo so the controller's
+# root-level command builders keep working; the agent escalates each
+# command via `sudo -n`. The installer itself still runs as root.
+AGENT_USER="${{SYSIBLE_AGENT_USER:-root}}"
+for arg in "$@"; do
+  case "$arg" in
+    --unprivileged) AGENT_USER="sysible" ;;
+    --user=*) AGENT_USER="${{arg#--user=}}" ;;
+  esac
+done
+
+{cert_steps}echo "Installing agent to {_AGENT_INSTALL_DIR}..."
+mkdir -p {_AGENT_INSTALL_DIR}
+cp -f ./agent.py {_AGENT_INSTALL_DIR}/agent.py
+# Integrity self-measurement module (guarded import in agent.py) — always
+# installed so the controller can seal a baseline and detect tampering.
+cp -f ./agent_integrity.py {_AGENT_INSTALL_DIR}/agent_integrity.py
+cp -f ./flashback_restore.py {_AGENT_INSTALL_DIR}/flashback_restore.py
+cp -f ./sysible_agent.env {_AGENT_INSTALL_DIR}/sysible_agent.env
+chmod 600 {_AGENT_INSTALL_DIR}/sysible_agent.env
+
+# Installed system-wide (not --user): the systemd service below runs as
+# root with a minimal environment, where a --user install's reliance on
+# $HOME being set the way an interactive sudo shell sets it is one more
+# thing that could silently not line up.
+echo "Installing Python dependencies (./requirements.txt)..."
+{_PIP_INSTALL_BLOCK}
+
+if [[ "$AGENT_USER" != "root" ]]; then
+  echo "Configuring the agent to run as non-root user '$AGENT_USER' with passwordless sudo..."
+  if ! id "$AGENT_USER" &>/dev/null; then
+    if [[ "$AGENT_USER" == "sysible" ]]; then
+      useradd --system --no-create-home --shell /usr/sbin/nologin sysible 2>/dev/null \
+        || useradd --system --no-create-home --shell /sbin/nologin sysible
+      echo "  created locked system account 'sysible'"
+    else
+      echo "  user '$AGENT_USER' does not exist - create it first, or use --unprivileged for a dedicated 'sysible' account." >&2
+      exit 1
+    fi
+  fi
+  # Passwordless sudo for the agent account, validated before it goes live
+  # so a malformed drop-in can never break sudo on the host.
+  SUDOERS_FILE=/etc/sudoers.d/sysible-agent
+  echo "$AGENT_USER ALL=(ALL) NOPASSWD: ALL" > "$SUDOERS_FILE.tmp"
+  chmod 440 "$SUDOERS_FILE.tmp"
+  if visudo -cf "$SUDOERS_FILE.tmp" >/dev/null 2>&1; then
+    mv -f "$SUDOERS_FILE.tmp" "$SUDOERS_FILE"
+  else
+    rm -f "$SUDOERS_FILE.tmp"
+    echo "  ERROR: generated sudoers entry failed validation - aborting." >&2
+    exit 1
+  fi
+  # The agent must read its env/cert and persist state as its own account.
+  mkdir -p /var/lib/sysible
+  chown -R "$AGENT_USER" {_AGENT_INSTALL_DIR} /var/lib/sysible
+  # Point the unit at the chosen account instead of root.
+  sed -i "s/^User=root$/User=$AGENT_USER/" ./{_SERVICE_NAME}.service
+fi
+
+echo "Installing systemd service ({_SERVICE_NAME})..."
+# Point the unit at the python3 we actually found, rather than a hardcoded
+# /usr/bin/python3 (some hosts, incl. minimal SUSE, put it elsewhere).
+PY3="$(command -v python3)"
+sed -i "s#^ExecStart=/usr/bin/python3 #ExecStart=$PY3 #" ./{_SERVICE_NAME}.service
+cp -f ./{_SERVICE_NAME}.service {_SERVICE_UNIT_PATH}
+systemctl daemon-reload
+systemctl enable --now {_SERVICE_NAME}.service
+
+echo
+echo "Agent installed and running in the background as a systemd service (user: $AGENT_USER)."
+echo "  Status:  systemctl status {_SERVICE_NAME}"
+echo "  Logs:    journalctl -u {_SERVICE_NAME} -f"
+echo "  Stop:    systemctl disable --now {_SERVICE_NAME}"
+"""
+
+
+def _disenroll_script() -> str:
+    """Cleanly removes the agent from a host: notifies the controller
+    (self-disenroll via POST /agents/{host_id}/disenroll, authenticated
+    with this host's own host_id+agent_secret straight out of
+    agent_state.json - the same credential pair heartbeat()/fetch_tasks()
+    already use, never a plaintext password) so the host stops showing
+    up enrolled in the GUI, then tears down everything run_agent.sh
+    installed: the systemd service, {_AGENT_INSTALL_DIR}, the pinned
+    cert, and the agent's local state.
+
+    The controller call happens FIRST, before any local file is
+    deleted - agent_state.json is the only copy of the agent_secret
+    that proves this host's identity to the controller, so deleting it
+    first would leave an orphaned "still enrolled" row behind with no
+    way to clean it up short of the admin-only DELETE route."""
+    return f"""#!/bin/bash
+# Generated by the Sysible Webserver Portal - run this on an enrolled
+# host to cleanly remove the agent: tells the controller to drop this
+# host's enrollment, then uninstalls everything run_agent.sh installed.
+#
+# Must be run as root - same locations run_agent.sh wrote to.
+set -e
+cd "$(dirname "${{BASH_SOURCE[0]}}")"
+
+STATE_FILE="/var/lib/sysible/agent_state.json"
+ENV_FILE="{_AGENT_INSTALL_DIR}/sysible_agent.env"
+CERT_FILE="{_CERT_INSTALL_PATH}"
+UNIT_FILE="{_SERVICE_UNIT_PATH}"
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "This script needs root (same locations run_agent.sh wrote to) - re-run with sudo." >&2
+  exit 1
+fi
+
+# --------------------------------------------------------
+# 1. Notify the controller while we still have credentials to prove
+#    who we are. Once STATE_FILE is removed in step 3 there is no way
+#    to authenticate a self-disenroll, so this has to happen first -
+#    otherwise the controller would keep showing this host as enrolled
+#    forever with no local trace left to fix it.
+# --------------------------------------------------------
+if [[ -f "$STATE_FILE" ]]; then
+  echo "Notifying controller..."
+{_PIP_INSTALL_BLOCK}
+  if python3 - "$STATE_FILE" "$ENV_FILE" "$CERT_FILE" <<'PYEOF'
+import json
+import os
+import sys
+
+state_file, env_file, cert_file = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+except (OSError, json.JSONDecodeError):
+    print("[disenroll] no readable state file - skipping controller notification")
+    sys.exit(0)
+
+host_id = state.get("host_id")
+agent_secret = state.get("agent_secret")
+if not host_id or not agent_secret:
+    print("[disenroll] state file missing host_id/agent_secret - skipping controller notification")
+    sys.exit(0)
+
+controller = "https://127.0.0.1:9000"
+try:
+    with open(env_file) as f:
+        for line in f:
+            if line.startswith("SYSIBLE_CONTROLLER="):
+                controller = line.strip().split("=", 1)[1]
+                break
+except OSError:
+    pass
+
+verify = cert_file if os.path.exists(cert_file) else True
+
+try:
+    import requests
+    r = requests.post(
+        f"{{controller}}/agents/{{host_id}}/disenroll",
+        json={{"host_id": host_id, "agent_secret": agent_secret}},
+        verify=verify,
+        timeout=10,
+    )
+    if r.ok:
+        print("[disenroll] controller acknowledged - host removed from enrollment")
+    else:
+        print(f"[disenroll] controller responded {{r.status_code}}: {{r.text}} - continuing with local cleanup anyway")
+        sys.exit(3)
+except Exception as e:
+    print(f"[disenroll] could not reach controller ({{e}}) - continuing with local cleanup anyway")
+    sys.exit(3)
+PYEOF
+  then NOTIFY_OK=1; else NOTIFY_OK=0; fi
+else
+  echo "No local agent state found (already disenrolled, or never enrolled) - skipping controller notification."
+fi
+
+# --------------------------------------------------------
+# 2. Stop and disable the service
+# --------------------------------------------------------
+if systemctl list-unit-files {_SERVICE_NAME}.service &>/dev/null; then
+  echo "Stopping {_SERVICE_NAME}..."
+  systemctl disable --now {_SERVICE_NAME}.service 2>/dev/null || true
+fi
+
+# Note which account the service ran as (root by default) before we delete
+# the unit, so the non-root setup can be undone below.
+AGENT_USER="root"
+if [[ -f "$UNIT_FILE" ]]; then
+  AGENT_USER="$(sed -n 's/^User=//p' "$UNIT_FILE" | head -n1)"
+  [[ -z "$AGENT_USER" ]] && AGENT_USER="root"
+fi
+
+# --------------------------------------------------------
+# 3. Remove everything run_agent.sh installed
+# --------------------------------------------------------
+echo "Removing installed files..."
+rm -f "$UNIT_FILE"
+systemctl daemon-reload 2>/dev/null || true
+rm -rf {_AGENT_INSTALL_DIR}
+rm -f "$CERT_FILE"
+rm -f "$STATE_FILE"
+rmdir --ignore-fail-on-non-empty /var/lib/sysible 2>/dev/null || true
+rmdir --ignore-fail-on-non-empty {_CERT_INSTALL_DIR} 2>/dev/null || true
+
+# --------------------------------------------------------
+# 4. Undo the non-root agent setup, if this host used it
+# --------------------------------------------------------
+if [[ "$AGENT_USER" != "root" ]]; then
+  rm -f /etc/sudoers.d/sysible-agent
+  if [[ "$AGENT_USER" == "sysible" ]] && id sysible &>/dev/null; then
+    userdel sysible 2>/dev/null || true
+    echo "Removed the dedicated 'sysible' account and its sudoers entry."
+  else
+    echo "Removed the agent sudoers entry (left account '$AGENT_USER' in place)."
+  fi
+fi
+
+echo
+echo "Agent disenrolled and removed from this host."
+
+# If the controller notification didn't get through, the host's row is still on the
+# controller. Point the operator at the one-liner that force-removes it from the
+# controller side (uses the live TLS cert, so it works even when this host's pinned
+# cert had drifted — the usual reason the notify above failed).
+if [[ "${{NOTIFY_OK:-1}}" != "1" ]]; then
+  echo
+  echo "NOTE: the controller was NOT notified, so it may still list this host."
+  echo "      Finish the cleanup ON THE CONTROLLER with:"
+  echo "        sudo sysible_controller disenroll --name \\"$(hostname)\\""
+  echo "      (or --ip <this host's IP>, or the host_id shown in Host Enrollment)."
+fi
+"""
+
+
+def _migrate_script() -> str:
+    """Repoints an ALREADY-installed agent at a different controller address — an IP
+    change, a DNS cutover, or a failover to a standby controller — without reinstalling.
+    Rewrites SYSIBLE_CONTROLLER in the installed env file and restarts the service; the
+    agent keeps its host_id/agent_secret and re-attaches to the SAME identity, which is
+    valid when the new controller shares the same database (a restored backup or a
+    replica). For a genuinely SEPARATE controller (its own database) pass
+    --token <enroll-token> minted there: the script then also clears local state so the
+    agent enrolls fresh. Accepts comma-joined candidate URLs (the same failover list the
+    agent already understands) and an optional --cert update."""
+    return f"""#!/bin/bash
+# Generated by the Sysible Webserver Portal — run on an enrolled host to point its
+# agent at a DIFFERENT controller (IP change, DNS cutover, or failover) without
+# reinstalling. The agent keeps its identity and re-attaches, so on a shared-database
+# failover there's nothing else to do.
+#
+#   sudo ./migrate_agent.sh https://NEW-CONTROLLER:9000
+#   sudo ./migrate_agent.sh https://c1:9000,https://c2:9000          # failover candidates
+#   sudo ./migrate_agent.sh https://NEW:9000 --token <enroll-token>  # separate controller (its own DB)
+#   sudo ./migrate_agent.sh https://NEW:9000 --cert ./new-controller.crt
+#
+# Must be run as root (edits the installed env under {_AGENT_INSTALL_DIR} and the
+# pinned cert under {_CERT_INSTALL_DIR}, and restarts the systemd service).
+set -e
+cd "$(dirname "${{BASH_SOURCE[0]}}")"
+
+ENV_FILE="{_AGENT_INSTALL_DIR}/sysible_agent.env"
+CERT_FILE="{_CERT_INSTALL_PATH}"
+STATE_FILE="/var/lib/sysible/agent_state.json"
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "This script needs root (edits {_AGENT_INSTALL_DIR} and restarts the service) — re-run with sudo." >&2
+  exit 1
+fi
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: $ENV_FILE not found — is the agent installed here? Run run_agent.sh first." >&2
+  exit 1
+fi
+
+NEW_CONTROLLER=""; NEW_TOKEN=""; NEW_CERT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --token) NEW_TOKEN="$2"; shift 2 ;;
+    --cert)  NEW_CERT="$2"; shift 2 ;;
+    -*)      echo "Unknown option: $1" >&2; exit 1 ;;
+    *)       if [[ -z "$NEW_CONTROLLER" ]]; then NEW_CONTROLLER="$1"; fi; shift ;;
+  esac
+done
+
+if [[ -z "$NEW_CONTROLLER" ]]; then
+  echo "Usage: sudo ./migrate_agent.sh <new-controller-url[,url2,...]> [--token T] [--cert PATH]" >&2
+  exit 1
+fi
+
+# Install a new pinned controller cert if one was provided (the new controller may
+# present a different certificate than the one this host currently trusts).
+if [[ -n "$NEW_CERT" ]]; then
+  if [[ ! -f "$NEW_CERT" ]]; then echo "ERROR: --cert file '$NEW_CERT' not found." >&2; exit 1; fi
+  mkdir -p {_CERT_INSTALL_DIR}
+  cp -f "$NEW_CERT" "$CERT_FILE"
+  chmod 644 "$CERT_FILE"
+  echo "Installed new controller cert to $CERT_FILE."
+fi
+
+# Update-or-append a key in the env file, preserving every other line and value.
+update_env() {{
+  local key="$1" val="$2" tmp found=0
+  tmp="$(mktemp)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$key="* ]]; then echo "$key=$val" >> "$tmp"; found=1; else echo "$line" >> "$tmp"; fi
+  done < "$ENV_FILE"
+  if [[ "$found" -eq 0 ]]; then echo "$key=$val" >> "$tmp"; fi
+  cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
+}}
+
+update_env SYSIBLE_CONTROLLER "$NEW_CONTROLLER"
+if [[ -n "$NEW_TOKEN" ]]; then update_env SYSIBLE_ENROLL_TOKEN "$NEW_TOKEN"; fi
+chmod 600 "$ENV_FILE"
+echo "Repointed agent env at: $NEW_CONTROLLER"
+
+# A genuinely separate controller (its own database) can't know this host's existing
+# agent_secret, so a fresh enroll token means "start over there": drop local state so
+# the agent registers anew. Without --token we KEEP state (same-database failover /
+# restored backup), so the agent re-attaches to its existing identity instead of
+# duplicating.
+if [[ -n "$NEW_TOKEN" ]]; then
+  rm -f "$STATE_FILE"
+  echo "Cleared local state — the agent will enroll fresh on the new controller."
+fi
+
+echo "Restarting {_SERVICE_NAME}..."
+systemctl restart {_SERVICE_NAME}.service
+echo
+echo "Migration applied. Watch it connect:  journalctl -u {_SERVICE_NAME} -f"
+"""
+
+
+def _readme(include_cert: bool) -> str:
+    cert_line = (
+        "  - server.crt          Controller's TLS certificate (installed to\n"
+        f"                         {_CERT_INSTALL_PATH} by run_agent.sh)\n"
+        if include_cert
+        else ""
+    )
+
+    return f"""Sysible Agent Bundle
+=====================
+
+Contents:
+  - agent.py                  The Sysible host agent
+  - requirements.txt          Python packages the agent needs (installed by run_agent.sh)
+  - sysible_agent.env         Controller address + your one-time enrollment token
+{cert_line}  - {_SERVICE_NAME}.service   systemd unit installed by run_agent.sh
+  - run_agent.sh               Installs the agent + service with the above pre-configured
+  - disenroll_agent.sh         Cleanly removes the agent from this host (see below)
+  - migrate_agent.sh           Repoints this agent at a different controller (see below)
+
+Quick start:
+  1. Copy this whole folder to the host you want managed.
+  2. chmod +x run_agent.sh
+  3. sudo ./run_agent.sh
+
+This installs the agent under {_AGENT_INSTALL_DIR} and runs it as a
+systemd service ({_SERVICE_NAME}) that starts in the background, restarts
+itself automatically (on crash or reboot), and logs to the journal
+instead of your terminal. Once it's running you can disconnect or close
+this terminal - the agent keeps going.
+
+Running the agent unprivileged (optional):
+  By default the service runs as root. To run it as a non-root account
+  with passwordless sudo instead, install with one of:
+    sudo ./run_agent.sh --unprivileged     # dedicated, locked 'sysible' user
+    sudo ./run_agent.sh --user=NAME         # an existing account you manage
+  The installer still needs root (it creates the account, writes a
+  /etc/sudoers.d/sysible-agent drop-in granting passwordless sudo, and
+  sets User= on the unit). The agent then escalates each command through
+  `sudo -n`. disenroll_agent.sh removes the sudoers drop-in (and the
+  'sysible' account if it created one). Note: because the agent's tools
+  span the whole system, the account needs full NOPASSWD sudo - the
+  benefit is no root login and a sudo audit trail, not a smaller blast
+  radius if the agent is compromised.
+
+  Check on it:   systemctl status {_SERVICE_NAME}
+  Watch its log: journalctl -u {_SERVICE_NAME} -f
+  Stop for good: systemctl disable --now {_SERVICE_NAME}
+
+To remove this host from Sysible entirely (not just stop it - also
+tells the controller to drop the enrollment so it stops showing up in
+the GUI):
+  4. sudo ./disenroll_agent.sh
+
+Root is required: the script installs the controller's certificate to
+{_CERT_INSTALL_DIR}, the agent itself under {_AGENT_INSTALL_DIR}, the
+service unit under /etc/systemd/system, and the agent persists its
+state under /var/lib/sysible - all system directories.
+
+Moving to a different controller (IP change / DNS cutover / failover):
+  sudo ./migrate_agent.sh https://NEW-CONTROLLER:9000
+  Repoints this installed agent at another controller and restarts it -
+  no reinstall. On a failover where the new controller shares the same
+  database (a restored backup or a replica), the agent keeps its identity
+  and simply re-attaches. You can pass several comma-joined URLs as
+  failover candidates, and --cert ./new.crt if the new controller presents
+  a different certificate. For a genuinely SEPARATE controller with its
+  own database, add --token <enroll-token> minted there and the agent
+  enrolls fresh.
+
+The enrollment token in sysible_agent.env is single-use and expires in
+365 days - if you didn't use it, generate a fresh download from the
+portal rather than reusing this folder on a second host.
+"""
+
+
+def _patch_agent_controller_default(agent_source: str, controller_url: str) -> str:
+    """Bake the resolved controller URL into agent.py's own default
+    (still overridable by SYSIBLE_CONTROLLER) - so the agent points at
+    the right controller even if its EnvironmentFile (sysible_agent.env)
+    is ever missing or not picked up, e.g. someone runs
+    `python3 agent.py` by hand outside of the systemd unit run_agent.sh
+    installs.
+
+    controller_url may itself be several comma-joined candidate URLs
+    (the "all" address_mode case) - that's fine here, since this just
+    swaps it in as the os.getenv() fallback string verbatim, and
+    agent.py's own _CONTROLLER_CANDIDATES parsing (the code right after
+    this fragment) is what actually splits a comma-joined default back
+    apart, exactly the same as it would for the env var itself."""
+    if _CONTROLLER_DEFAULT_LINE not in agent_source:
+        raise RuntimeError(
+            "host_agent/agent.py's CONTROLLER default fragment has changed - "
+            "update backend/agent_bundle.py's _CONTROLLER_DEFAULT_LINE/"
+            "_patch_agent_controller_default to match."
+        )
+
+    # Embed the URL as a JSON string literal (valid, fully-escaped Python) rather
+    # than raw f-string interpolation, so a stray quote/backslash/newline in the
+    # controller address can never break out of the string and inject code into
+    # agent.py (which runs as root on every host). The ingest-time validator on
+    # SetControllerConfigRequest.ip is the primary guard; this is defense in depth.
+    # For a normal URL json.dumps yields the identical `"https://host:port"` form,
+    # so agent_version_of()'s canonicalization regex still matches.
+    import json
+    patched_fragment = f'os.getenv("SYSIBLE_CONTROLLER", {json.dumps(controller_url)})'
+
+    return agent_source.replace(_CONTROLLER_DEFAULT_LINE, patched_fragment, 1)
+
+
+def _trust_cert_path():
+    """The trust anchor to hand new agent bundles - trust.crt if a cert
+    has been installed via Sysible Settings' TLS section (covers both
+    the default self-signed case, where install_sysible.sh/tls_manager
+    just seed it as a copy of server.crt, and a PKI-issued cert, where
+    it's the actual issuing CA chain), falling back to server.crt
+    directly for a controller that predates trust.crt entirely. Returns
+    None if neither file exists yet (no cert at all, e.g. mid-install)."""
+    if TRUST_FILE.exists():
+        return TRUST_FILE
+    if CERT_FILE.exists():
+        return CERT_FILE
+    return None
+
+
+def build_agent_bundle(controller_addresses, controller_port: int, token: str):
+    """Returns (filename, zip_bytes). `controller_addresses` is either a
+    single hostname/IP string (the normal "hostname"/"ip" address_mode)
+    or a list of addresses ("all" mode - see resolve_controller_addresses
+    above): every address becomes its own https://host:port URL, joined
+    with commas into one SYSIBLE_CONTROLLER value that
+    host_agent/agent.py's failover logic splits back apart and tries in
+    order until one connects. Raises FileNotFoundError if
+    host_agent/agent.py or host_agent/requirements.txt is missing
+    (shouldn't happen in a normal checkout, but fail loudly rather than
+    shipping an incomplete bundle)."""
+
+    agent_source = AGENT_SOURCE_FILE.read_text()
+    requirements_text = AGENT_REQUIREMENTS_FILE.read_text()
+
+    if isinstance(controller_addresses, str):
+        controller_addresses = [controller_addresses]
+    if not controller_addresses:
+        raise ValueError("build_agent_bundle: no controller address(es) to build against")
+
+    controller_url = ",".join(f"https://{addr}:{controller_port}" for addr in controller_addresses)
+
+    agent_source = _patch_agent_controller_default(agent_source, controller_url)
+
+    trust_path = _trust_cert_path()
+    include_cert = trust_path is not None
+
+    buf = io.BytesIO()
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("agent.py", agent_source)
+        # Integrity module (always installed). Shipped verbatim.
+        zf.writestr("agent_integrity.py", AGENT_INTEGRITY_SOURCE_FILE.read_text())
+        zf.writestr("flashback_restore.py", AGENT_RESTORE_SOURCE_FILE.read_text())
+        zf.writestr("requirements.txt", requirements_text)
+        zf.writestr("sysible_agent.env", _env_file(controller_url, token, include_cert))
+
+        zf.writestr(f"{_SERVICE_NAME}.service", _systemd_unit())
+
+        run_script = _run_script(include_cert)
+        zf.writestr("run_agent.sh", run_script)
+        # zipfile doesn't preserve unix permissions by default - set
+        # the executable bit explicitly so it doesn't need a manual
+        # chmod after extracting (the README still mentions it too,
+        # in case the host's unzip tool drops external_attr anyway).
+        info = zf.getinfo("run_agent.sh")
+        info.external_attr = (0o755 & 0xFFFF) << 16
+
+        zf.writestr("disenroll_agent.sh", _disenroll_script())
+        info = zf.getinfo("disenroll_agent.sh")
+        info.external_attr = (0o755 & 0xFFFF) << 16
+
+        zf.writestr("migrate_agent.sh", _migrate_script())
+        info = zf.getinfo("migrate_agent.sh")
+        info.external_attr = (0o755 & 0xFFFF) << 16
+
+        if include_cert:
+            # Zip entry is still named server.crt - that's the filename
+            # run_agent.sh's cp step (see _run_script above) installs to
+            # _CERT_INSTALL_PATH for the agent to pin; only the source
+            # of its *content* changes here (trust.crt's content, not
+            # necessarily server.crt's).
+            zf.writestr("server.crt", trust_path.read_text())
+
+        zf.writestr("README.txt", _readme(include_cert))
+
+    return BUNDLE_FILENAME, buf.getvalue()
+
+
+def mint_agent_bundle(controller_addresses, controller_port: int, environment: str = ""):
+    """Mint a fresh single-use enrollment token and build the agent bundle
+    against it, returning (filename, zip_bytes).
+
+    `environment` (optional) is stamped on the token so the host lands directly in
+    that Controller environment when it self-enrolls — used by SLEP to build VMs
+    straight into a chosen environment. Empty for a normal console-minted bundle.
+
+    This is the ONE place that couples token creation to the build. Every
+    download route (the admin API's /download-agent-bundle, the portal's
+    browser download, and the portal's curl/CLI endpoint) goes through here
+    so the "one bundle = one single-use token" invariant can't drift between
+    them. Address resolution and HTTP error handling stay at the call sites,
+    since they differ per surface (API raises, portal redirects).
+
+    Because every bundle mints a working single-use enrollment token, the host
+    cap is enforced HERE, at the single choke point, so no download surface can
+    hand out onboarding credentials once the fleet is at the limit. Raises HTTP
+    403 at/over the cap (a doomed onboarding is stopped up front instead of
+    failing only at the final /agents/enroll call)."""
+    import secrets
+    from backend.db import create_enroll_token
+    from backend.edition import enforce_host_limit
+
+    # Community host cap (no-op in an unlimited/Enterprise build). A bundle is a
+    # brand-new host's onboarding credentials, so this is always a "new host"
+    # check.
+    enforce_host_limit()
+
+    token = secrets.token_hex(16)
+    create_enroll_token(token, environment=environment)
+    return build_agent_bundle(controller_addresses, controller_port, token)

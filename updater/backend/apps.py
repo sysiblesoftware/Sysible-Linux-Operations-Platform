@@ -87,17 +87,105 @@ MODULES: dict[str, tuple[tuple[str, str, str], ...]] = {
 }
 
 
+# Where a vendored app's source sits inside the SLOP checkout. Three products
+# used to be three git checkouts on this host; their source is in apps/ now and
+# they are built by SLOP's one compose file.
+VENDOR_SUBDIR = "apps"
+
+
+def slop_dir() -> Path | None:
+    """SLOP's own checkout, which is where apps/ lives."""
+    return checkout_dir("slop")
+
+
+def vendored(key: str) -> Path | None:
+    """This product's source inside the SLOP checkout, if it is in there.
+
+    Independent of whether the integrated profile is RUNNING: this answers "is
+    this product part of the platform's tree", which is what decides whether it
+    can have an update of its own.
+    """
+    if key == "slop":
+        return None
+    root = slop_dir()
+    if root is None:
+        return None
+    cand = root / VENDOR_SUBDIR / key
+    return cand if cand.is_dir() else None
+
+
+def integrated() -> bool:
+    """Whether this host runs the one-checkout layout.
+
+    Set by `install.sh --integrated`, which writes it to the compose .env so it
+    survives every later recreate. Deliberately NOT inferred from apps/ being
+    present: that directory arrives with a git pull, and a pull must not change
+    what this screen says is running. A host that has not migrated would have
+    three rows start claiming to be "built with the platform" while three
+    standalone stacks went on serving every request.
+    """
+    return (os.environ.get("SYSIBLE_INTEGRATED") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def is_vendored(key: str) -> bool:
+    """Whether this product is built from the platform's tree rather than its own.
+
+    Three things, all of them required:
+
+      * the host opted in (above), so a pull cannot flip it;
+      * apps/<key> is in the platform's checkout, so there is something to build;
+      * there is NO separate checkout of it.
+
+    That last one is what makes a migration survivable. On a host part-way
+    through -- apps/controller present, /opt/sysible-src/sysible-controller
+    still there and still running -- the separate checkout is the thing actually
+    serving requests, so it keeps its own row and its own update button until
+    someone removes it. A product does not quietly lose its update because a
+    directory appeared somewhere else.
+    """
+    return (integrated()
+            and vendored(key) is not None
+            and checkout_dir(key) is None)
+
+
+def keys() -> list[str]:
+    """Every product, vendored or not.
+
+    A vendored product keeps its row. It is not separately UPDATABLE — there is
+    no checkout to pull and no compose project of its own to build — and the row
+    says so instead of offering a button that cannot work. What it does not do is
+    disappear: an operator who knows this platform has a Controller should not
+    have to work out that the row went away because the source moved into another
+    repository. Its services are still its own, listed under its own name.
+    """
+    return list(ALLOWLIST)
+
+
 def modules(key: str) -> list[dict]:
     """The named modules inside this product's checkout, if any.
 
     Reported even when the product is not installed on this host, so the screen
     can say "Flashback would come with SLOP" rather than silently omitting it.
     """
-    return [{"key": k, "label": lbl, "detail": d} for k, lbl, d in MODULES.get(key, ())]
+    return [{"key": k, "label": lbl, "detail": d} for k, lbl, d in _entries(key)]
+
+
+def _entries(key: str) -> tuple[tuple[str, str, str], ...]:
+    """This product's service entries.
+
+    Deliberately NOT folded into the platform's row when the product is
+    vendored. The services are built from SLOP's tree then, and the platform IS
+    what updates them — but they are still the Controller's services, and the
+    screen has a row with the Controller's name on it to put them under. Moving
+    them would make the platform's row nine cards deep and leave three rows with
+    nothing in them, which is the shape this screen was just taken out of.
+    """
+    return MODULES.get(key, ())
 
 
 def module_keys(key: str) -> list[str]:
-    return [k for k, _lbl, _d in MODULES.get(key, ())]
+    return [k for k, _lbl, _d in _entries(key)]
 
 
 def is_module(key: str, module: str) -> bool:
@@ -107,10 +195,6 @@ def is_module(key: str, module: str) -> bool:
 
 
 _COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
-
-
-def keys() -> list[str]:
-    return list(ALLOWLIST)
 
 
 def label(key: str) -> str:
@@ -144,6 +228,21 @@ def checkout_dir(key: str) -> Path | None:
     except OSError:
         pass
     return None
+
+
+def compose_dir_for(key: str) -> Path | None:
+    """Where `docker compose` must run to see THIS product's services.
+
+    Its own checkout normally. For a vendored product it is SLOP's, because its
+    services are built by SLOP's compose file and belong to SLOP's project — and
+    a `compose ps` anywhere else would report it as having no containers at all,
+    on a host where it is running perfectly well.
+    """
+    if is_vendored(key):
+        root = slop_dir()
+        return compose_dir(root) if root else None
+    root = checkout_dir(key)
+    return compose_dir(root) if root else None
 
 
 def compose_dir(root: Path) -> Path | None:

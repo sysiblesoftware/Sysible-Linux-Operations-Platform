@@ -1,0 +1,29 @@
+# The integrated platform: one checkout, one compose project, one update.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.integrated.yml \
+#                  --profile integrated up -d --build
+#
+# or, the same thing with the arguments already filled in:
+#
+#   sudo ./install.sh --integrated
+#
+# docker-compose.yml holds the three app SERVICES, behind the `integrated`
+# profile. This file holds the one thing that has to change OUTSIDE those
+# services when they are running: where the gateway looks for them.
+#
+# They are separate files on purpose. The upstreams below are the half of the
+# switch that is easy to forget, and forgetting it does not fail -- the gateway
+# goes on dialling host.docker.internal:8800, finds nothing listening now that
+# the app is a service on this network, and every app reports down on a platform
+# that is running perfectly well. Keeping the profile and the upstreams apart
+# would make that the DEFAULT outcome of a half-remembered command. Here, the
+# -f that brings in the services is the -f that moves the gateway.
+services:
+  gateway:
+    environment:
+      # By service name on this project's network. The Caddyfile already dials
+      # these over https with tls_insecure_skip_verify, which is what the apps'
+      # self-signed certs need; nothing about the TLS hop changes.
+      SLOP_CONTROLLER_UPSTREAM: "controller:8800"
+      SLOP_SLEP_UPSTREAM: "slep:8810"
+      SLOP_CONNECT_UPSTREAM: "connect:8700"

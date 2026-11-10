@@ -1,0 +1,503 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api.js";
+import { hasUpdates, hostsWithUpdates } from "../updates.js";
+import HostResults from "../components/HostResults.jsx";
+
+const C = { sec: "#e06c6c", upd: "#e0a83a", ok: "#4ec07a", reboot: "#e0a83a", faint: "#7a7a7a" };
+
+// An install runs on the CONTROLLER, not in this tab, so the progress panel has
+// to be able to find its way back after a navigation — leaving the page used to
+// drop it on the floor while the install carried on running. The controller is
+// the source of truth (GET /api/fleet-updates/install-jobs); this only remembers
+// what the operator has already dealt with, so a finished install they cleared
+// does not reappear every time they open the page.
+//   "all" — cleared entirely.  "ok"  — succeeded hosts cleared by a rescan,
+//                                      failures still worth showing.
+const DISMISS_KEY = "sysible.updates.dismissedInstalls";
+const RESTORE_FINISHED_WITHIN_S = 2 * 3600;   // an install from this morning is history, not news
+
+function readDismissed() {
+  try {
+    const v = JSON.parse(localStorage.getItem(DISMISS_KEY) || "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }   // private mode / disabled storage: nothing was ever dismissed
+}
+
+function markDismissed(id, how) {
+  if (!id) return;
+  try {
+    const m = readDismissed();
+    m[id] = how;
+    // Bounded: the controller only retains ~20 jobs, so older ids are dead weight.
+    const keys = Object.keys(m);
+    const keep = keys.length > 40 ? keys.slice(-40) : keys;
+    localStorage.setItem(DISMISS_KEY, JSON.stringify(
+      Object.fromEntries(keep.map((k) => [k, m[k]]))));
+  } catch { /* dismissal just doesn't persist — the panel is still clearable */ }
+}
+const ST = { queued: "#7a7a7a", running: "#e0a83a", done: "#4ec07a", failed: "#e06c6c" };
+
+// One host's install row: status dot + name + state, click to expand the
+// captured command output.
+function InstallHostRow({ h }) {
+  const [open, setOpen] = React.useState(false);
+  const hasOut = (h.output || "").trim().length > 0;
+  return (
+    <div style={{ borderTop: "1px solid var(--border)" }}>
+      <div className="spread" style={{ padding: "5px 8px", cursor: hasOut ? "pointer" : "default", gap: 8 }}
+           onClick={() => hasOut && setOpen((o) => !o)}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span className="faint" style={{ width: 10 }}>{hasOut ? (open ? "▾" : "▸") : ""}</span>
+          <span className="dot" style={{ background: ST[h.status] || C.faint }} />
+          <span>{h.host}</span>
+        </span>
+        <span style={{ fontSize: 12, color: ST[h.status] || C.faint, display: "flex", alignItems: "center", gap: 6 }}>
+          {h.status === "running" && <span className="spin" />}
+          {h.status}{h.code != null ? ` · exit ${h.code}` : ""}
+        </span>
+      </div>
+      {open && hasOut && (
+        <pre style={{ margin: 0, maxHeight: 260, overflow: "auto", background: "#0d1117", color: "#c9d1d9",
+                      borderTop: "1px solid var(--border)", padding: "8px 10px",
+                      fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, whiteSpace: "pre-wrap" }}>
+          {h.output}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function InstallProgress({ job, onDismiss }) {
+  const hosts = job.hosts || [];
+  const done = hosts.filter((h) => h.status === "done" || h.status === "failed").length;
+  const failed = hosts.filter((h) => h.status === "failed").length;
+  const kindLabel = job.kind === "all" ? "all updates" : "security updates";
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="spread" style={{ marginBottom: 6 }}>
+        <strong>Installing {kindLabel}</strong>
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <span className="faint" style={{ fontSize: 12 }}>
+            {done} / {hosts.length} complete{failed ? ` · ${failed} failed` : ""}{job.done ? " · finished" : ""}
+          </span>
+          {/* The panel now survives leaving the page, so a finished install needs
+              an explicit way out — navigating away is no longer one. */}
+          {job.done && onDismiss && (
+            <button className="btn ghost sm" onClick={onDismiss}
+                    title="Clear this finished install">Dismiss</button>
+          )}
+        </div>
+      </div>
+      <div style={{ height: 8, borderRadius: 4, background: "var(--border)", overflow: "hidden", marginBottom: 6 }}>
+        <div style={{ width: (hosts.length ? (done / hosts.length) * 100 : 0) + "%", height: "100%",
+                      background: failed ? "#e0a83a" : "#4ec07a", transition: "width .3s" }} />
+      </div>
+      <div style={{ maxHeight: 320, overflow: "auto" }}>
+        {hosts.map((h) => <InstallHostRow key={h.id || h.host} h={h} />)}
+      </div>
+    </div>
+  );
+}
+
+// Fleet patch status: pending updates, security updates, and reboot-required per
+// host — with one-click "install security" / "install all" / "reboot" across the
+// selected hosts. Read-only for auditors (the install/reboot actions 403).
+const _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// "Defer to maintenance window": instead of installing now, schedule the install for
+// a recurring maintenance window on the selected hosts. Reuses the existing scheduler
+// (security_updates / all_updates actions) — the same engine the Schedules page uses,
+// so attribution and the run loop all apply unchanged.
+function DeferModal({ count, targets, onClose, onScheduled }) {
+  const [action, setAction] = useState("all_updates");
+  const [cadence, setCadence] = useState("weekly");
+  const [weekday, setWeekday] = useState(6);       // Sun — a common quiet window
+  const [at, setAt] = useState("02:00");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const when = cadence === "weekly" ? `${_WEEKDAYS[weekday]} at ${at}, every week`
+    : cadence === "daily" ? `every day at ${at}` : `hourly at :${at.split(":")[1] || "00"}`;
+
+  async function submit() {
+    setBusy(true); setErr("");
+    try {
+      const label = action === "security_updates" ? "Security updates" : "All updates";
+      const job = await api.scheduleCreate({
+        name: name.trim() || `${label} — ${count} host${count === 1 ? "" : "s"}`,
+        action, arg: "", targets, cadence, at, weekday: Number(weekday), enabled: true,
+      });
+      onScheduled(job, when);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+        <h3>Defer to maintenance window</h3>
+        <p className="faint" style={{ textAlign: "center", marginTop: 0, fontSize: 13 }}>
+          Schedule the install for <b>{count}</b> selected host{count === 1 ? "" : "s"} instead of
+          running it now. It runs unattended in the window and shows up under <b>Schedules</b>.
+        </p>
+
+        <label className="field"><span>Install</span>
+          <select value={action} onChange={(e) => setAction(e.target.value)}>
+            <option value="all_updates">All updates</option>
+            <option value="security_updates">Security updates only</option>
+          </select></label>
+
+        <label className="field"><span>Window</span>
+          <select value={cadence} onChange={(e) => setCadence(e.target.value)}>
+            <option value="weekly">Weekly</option>
+            <option value="daily">Daily</option>
+          </select></label>
+
+        <div className="row" style={{ gap: 10 }}>
+          {cadence === "weekly" && (
+            <label className="field" style={{ flex: 1 }}><span>Day</span>
+              <select value={weekday} onChange={(e) => setWeekday(e.target.value)}>
+                {_WEEKDAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+              </select></label>
+          )}
+          <label className="field" style={{ flex: 1 }}><span>Time (host local)</span>
+            <input type="time" value={at} onChange={(e) => setAt(e.target.value)} /></label>
+        </div>
+
+        <label className="field"><span>Name (optional)</span>
+          <input value={name} placeholder={`${action === "security_updates" ? "Security updates" : "All updates"} — ${count} host${count === 1 ? "" : "s"}`}
+                 onChange={(e) => setName(e.target.value)} /></label>
+
+        <p className="faint" style={{ fontSize: 12, margin: "2px 0 10px" }}>Will run: <b>{when}</b>.</p>
+        {err && <div className="error-box" style={{ marginBottom: 8 }}>{err}</div>}
+
+        <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn" onClick={submit} disabled={busy}>
+            {busy ? <span className="spin" /> : "Schedule it"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function Updates({ role }) {
+  const canAct = role !== "auditor";
+  const [data, setData] = useState({ hosts: [], ts: 0 });
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [checked, setChecked] = useState([]);   // host ids
+  const [results, setResults] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [deferOpen, setDeferOpen] = useState(false);
+  const [nobest, setNobest] = useState(false);       // dnf --nobest for "Install all updates"
+  const [skipBroken, setSkipBroken] = useState(false); // dnf --skip-broken
+  const [okMsg, setOkMsg] = useState("");
+
+  const [liveLoading, setLiveLoading] = useState(false);
+  const load = useCallback((refresh = 0, live = 0) => {
+    (live ? setLiveLoading : setLoading)(true); setErr("");
+    api.fleetUpdates(refresh, live)
+      .then((d) => setData({ hosts: d.hosts || [], ts: (d.ts ? d.ts * 1000 : Date.now()) }))
+      .catch((e) => setErr(e.message))
+      .finally(() => { setLoading(false); setLiveLoading(false); });
+  }, []);
+  useEffect(() => { load(0); }, [load]);
+
+  const hosts = data.hosts;
+  const summary = useMemo(() => {
+    let withUpd = 0, sec = 0, reboot = 0, offline = 0;
+    for (const h of hosts) {
+      if (h.online === false) { offline++; continue; }
+      if (hasUpdates(h)) withUpd++;
+      sec += h.security || 0;
+      if (h.reboot) reboot++;
+    }
+    return { withUpd, sec, reboot, offline, total: hosts.length };
+  }, [hosts]);
+
+  const groups = useMemo(() => {
+    const g = {};
+    for (const h of hosts) (g[h.environment || "Unassigned"] = g[h.environment || "Unassigned"] || []).push(h);
+    return Object.entries(g).sort(([a], [b]) => (a === "Unassigned" ? 1 : b === "Unassigned" ? -1 : a.localeCompare(b)));
+  }, [hosts]);
+
+  // hasUpdates, not h.total: on SUSE a host can sit at PENDING 0 with a needed
+  // SECURITY patch, because the two columns come from two different zypper
+  // commands. Keying on total alone left exactly the hosts with outstanding
+  // security work unselectable. See src/updates.js.
+  const actionable = hostsWithUpdates(hosts).map((h) => h.id);
+  // Hosts waiting on a reboot. Deliberately independent of pending updates: a
+  // host that has finished installing sits at 0 pending and still needs the
+  // reboot, so "Select all with updates" selects NOTHING on exactly the fleet
+  // you most need to reboot — which is the state right after a patch run. Same
+  // rule as the "N need reboot" count in the header, so the two always agree.
+  const rebootable = hosts.filter((h) => h.online !== false && h.reboot).map((h) => h.id);
+  const toggle = (id) => setChecked((c) => c.includes(id) ? c.filter((x) => x !== id) : [...c, id]);
+
+  // Any ONLINE host is selectable — not just ones with pending updates — because
+  // Reboot targets hosts regardless of update state (a host can be at 0 pending
+  // but still "need reboot"). Gating the checkbox on h.total>0 made every box
+  // unclickable after a rescan that found no updates.
+  const selectableIds = (list) => list.filter((h) => h.online !== false).map((h) => h.id);
+  const groupAllOn = (list) => {
+    const ids = selectableIds(list);
+    return ids.length > 0 && ids.every((id) => checked.includes(id));
+  };
+  const toggleGroup = (list) => {
+    const ids = selectableIds(list);
+    const allOn = ids.length > 0 && ids.every((id) => checked.includes(id));
+    setChecked((c) => allOn ? c.filter((id) => !ids.includes(id)) : [...new Set([...c, ...ids])]);
+  };
+
+  const [job, setJob] = useState(null);          // live install job {kind, done, hosts:[...]}
+  const jobPoll = React.useRef(null);
+  const stopPoll = useCallback(() => {
+    if (jobPoll.current) { clearInterval(jobPoll.current); jobPoll.current = null; }
+  }, []);
+  useEffect(() => () => stopPoll(), [stopPoll]);
+
+  // Follow a job that is already running on the controller: poll it to the end,
+  // then refresh the counts once. Used both by a fresh install and by the
+  // re-attach below, so there is one polling path rather than two that drift.
+  const follow = useCallback((jobId) => {
+    stopPoll();
+    let counted = false;
+    jobPoll.current = setInterval(async () => {
+      try {
+        const s = await api.fleetInstallStatus(jobId);
+        // Don't clobber a newer job the operator kicked off while this poll was
+        // in flight.
+        setJob((cur) => (cur && cur.id && cur.id !== jobId ? cur : s));
+        if (s.done) { stopPoll(); if (!counted) { counted = true; load(1); } }
+      } catch { stopPoll(); }
+    }, 3000);
+  }, [stopPoll, load]);
+
+  // Re-attach on mount to an install that is already in flight — or one that
+  // finished while the operator was on another page, since the panel is the only
+  // place a failed host's command output lives. Without this, "install, navigate
+  // away, come back" showed nothing at all while the install was still running.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.fleetInstallJobs();
+        const dismissed = readDismissed();
+        const jobs = (r.jobs || []).filter((j) => dismissed[j.id] !== "all");
+        // Newest-first from the controller: prefer anything still running, else
+        // the most recent one that finished recently enough to still be news.
+        const pick = jobs.find((j) => !j.done)
+          || jobs.find((j) => j.done && (j.finished_ago == null
+                                         || j.finished_ago <= RESTORE_FINISHED_WITHIN_S));
+        if (!pick || cancelled) return;
+        const full = await api.fleetInstallStatus(pick.id);
+        if (cancelled) return;
+        setJob(dismissed[pick.id] === "ok"
+          ? { ...full, hosts: (full.hosts || []).filter((h) => h.status !== "done") }
+          : full);
+        if (!full.done) follow(full.id);
+      } catch { /* nothing in flight, or the controller restarted — nothing to re-attach to */ }
+    })();
+    return () => { cancelled = true; };
+  }, [follow]);
+
+  const dismissJob = () => {
+    if (!job) return;
+    markDismissed(job.id, "all");
+    stopPoll();
+    setJob(null);
+  };
+
+  // Rescan clears the finished-install panel of hosts that succeeded, so only
+  // the ones still needing attention (failed) remain — and if every host
+  // succeeded, the whole panel drops away. Only touches a FINISHED job: while an
+  // install is still running the polled status would just re-add them anyway.
+  const pruneFinishedJob = () => {
+    if (!job || !job.done) return;
+    const remaining = (job.hosts || []).filter((h) => h.status !== "done");
+    // Remember it, or the pruned hosts walk straight back in on the next visit.
+    markDismissed(job.id, remaining.length ? "ok" : "all");
+    setJob(remaining.length ? { ...job, hosts: remaining } : null);
+  };
+  const rescan = (live = 0) => { pruneFinishedJob(); load(1, live); };
+
+  async function run(kind) {
+    if (!checked.length) { setErr("Select one or more hosts first."); return; }
+    if (kind === "reboot") {
+      if (!window.confirm("Reboot the selected hosts now?")) return;
+      setBusy("reboot"); setErr(""); setResults(null);
+      try { const r = await api.fleet("reboot", checked); setResults({ label: "Reboot host", rows: r.results || [] }); load(1); }
+      catch (e) { setErr(e.message); } finally { setBusy(""); }
+      return;
+    }
+    // Installs run in the BACKGROUND (a package upgrade can take minutes) with
+    // per-host status + output; poll the job and refresh counts as hosts finish.
+    const label = kind === "security" ? "security updates" : "all updates";
+    if (!window.confirm(`Install ${label} on ${checked.length} host(s)? Runs in the background — you'll see per-host progress below.`)) return;
+    setBusy(kind); setErr(""); setResults(null);
+    stopPoll();
+    try {
+      // Resolver flags apply only to an "all" dnf/yum run (where "nothing provides…"
+      // conflicts arise); the security path uses the security plugin's own resolution.
+      const flags = kind === "all" ? [nobest && "nobest", skipBroken && "skip-broken"].filter(Boolean).join(" ") : "";
+      const r = await api.fleetInstall(checked, kind, flags);
+      setJob({ id: r.job_id, kind, done: false, hosts: r.hosts });
+      follow(r.job_id);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(""); }
+  }
+
+  const Cell = ({ n, color }) => (
+    <span style={{ fontWeight: n > 0 ? 700 : 400, color: n > 0 ? color : C.faint }}>{n == null ? "—" : n}</span>
+  );
+
+  return (
+    <div>
+      <div className="spread" style={{ marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+        <div className="row" style={{ gap: 16, flexWrap: "wrap", alignItems: "baseline" }}>
+          {summary.total > 0 && summary.withUpd === 0 && summary.sec === 0 && summary.reboot === 0 ? (
+            <span style={{ color: C.ok, fontWeight: 600 }}>
+              ✓ All {summary.total - summary.offline} host{(summary.total - summary.offline) === 1 ? "" : "s"} up to date
+            </span>
+          ) : (
+            <>
+              <span><b style={{ fontSize: 18 }}>{summary.withUpd}</b> <span className="faint">host{summary.withUpd === 1 ? "" : "s"} with updates</span></span>
+              <span><b style={{ fontSize: 18, color: summary.sec ? C.sec : undefined }}>{summary.sec}</b> <span className="faint">security</span></span>
+              <span><b style={{ fontSize: 18, color: summary.reboot ? C.reboot : undefined }}>{summary.reboot}</b> <span className="faint">need reboot</span></span>
+            </>
+          )}
+          {summary.offline > 0 && <span className="faint">{summary.offline} offline</span>}
+        </div>
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          {data.ts > 0 && <span className="faint" style={{ fontSize: 12 }}>scanned {new Date(data.ts).toLocaleTimeString()}</span>}
+          <button className="btn ghost sm" onClick={() => rescan(0)} disabled={loading || liveLoading}
+                  title="Recount using each host's cached repo metadata (fast)">
+            {loading ? <span className="spin" /> : "Rescan"}</button>
+          <button className="btn ghost sm" onClick={() => rescan(1)} disabled={loading || liveLoading}
+                  title="Refresh each host's repo metadata first, then count (live, slower)">
+            {liveLoading ? <span className="spin" /> : "Refresh metadata & rescan"}</button>
+        </div>
+      </div>
+
+      {err && <div className="error-box">{err}</div>}
+      {job && <InstallProgress job={job} onDismiss={dismissJob} />}
+
+      {canAct && (
+        <div className="row" style={{ gap: 8, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn ghost sm" onClick={() => setChecked(actionable)}>Select all with updates</button>
+          <button className="btn ghost sm" disabled={!rebootable.length}
+                  title={rebootable.length
+                    ? `Select the ${rebootable.length} online host(s) reporting that they need a reboot`
+                    : "No host is reporting that it needs a reboot"}
+                  onClick={() => setChecked(rebootable)}>
+            Select all needing reboot{rebootable.length ? ` (${rebootable.length})` : ""}</button>
+          <button className="btn ghost sm" onClick={() => setChecked([])}>Clear</button>
+          <span className="faint" style={{ fontSize: 12 }}>{checked.length} selected</span>
+          <div style={{ flex: 1 }} />
+          <button className="btn sm" disabled={!checked.length || busy} onClick={() => run("security")}>
+            {busy === "security" ? <span className="spin" /> : "Install security updates"}</button>
+          <button className="btn sm" disabled={!checked.length || busy} onClick={() => run("all")}>
+            {busy === "all" ? <span className="spin" /> : "Install all updates"}</button>
+          <label className="faint" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
+                 title="dnf/yum --nobest: allow a non-latest candidate when the newest can't be resolved">
+            <input type="checkbox" checked={nobest} onChange={(e) => setNobest(e.target.checked)} disabled={busy} /> --nobest
+          </label>
+          <label className="faint" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
+                 title="dnf/yum --skip-broken: skip packages whose dependencies can't be satisfied">
+            <input type="checkbox" checked={skipBroken} onChange={(e) => setSkipBroken(e.target.checked)} disabled={busy} /> --skip-broken
+          </label>
+          <button className="btn sm ghost" disabled={!checked.length || busy}
+                  title="Schedule the install for a maintenance window instead of running it now"
+                  onClick={() => { setErr(""); setOkMsg(""); setDeferOpen(true); }}>
+            Defer to maintenance window</button>
+          <button className="btn sm danger" disabled={!checked.length || busy} onClick={() => run("reboot")}>
+            {busy === "reboot" ? <span className="spin" /> : "Reboot"}</button>
+        </div>
+      )}
+
+      {okMsg && <div className="ok-text" style={{ marginBottom: 10 }}>{okMsg}</div>}
+      {deferOpen && (
+        <DeferModal count={checked.length} targets={checked}
+          onClose={() => setDeferOpen(false)}
+          onScheduled={(job, when) => {
+            setDeferOpen(false);
+            setOkMsg(`Scheduled “${job.name}” — ${when}. Manage it under Schedules.`);
+          }} />
+      )}
+
+      {hosts.length === 0 ? (
+        <div className="empty" style={{ padding: 24 }}>
+          {loading ? "Scanning the fleet for pending updates…" : "No hosts, or no scan yet. Click Rescan."}
+        </div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
+            <colgroup>
+              {canAct && <col style={{ width: 40 }} />}
+              <col />{/* Host — absorbs the remaining width */}
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 84 }} />
+              <col style={{ width: 96 }} />
+            </colgroup>
+            <thead>
+              <tr style={{ textAlign: "left", color: "var(--text-faint)", fontSize: 11 }}>
+                {canAct && <th style={{ padding: "6px 8px", width: 28 }}></th>}
+                <th style={{ padding: "6px 8px" }}>Host</th>
+                <th style={{ padding: "6px 8px", textAlign: "right" }}>Pending</th>
+                <th style={{ padding: "6px 8px", textAlign: "right" }}>Security</th>
+                <th style={{ padding: "6px 8px", textAlign: "center" }}>Reboot</th>
+                <th style={{ padding: "6px 8px" }}>Mgr</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map(([env, list]) => (
+                <React.Fragment key={env}>
+                  <tr><td colSpan={canAct ? 6 : 5} style={{ padding: "7px 8px", borderTop: "1px solid var(--border)",
+                      fontWeight: 700, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--text-faint)" }}>
+                    {canAct && <input type="checkbox" title={`Select all in ${env}`}
+                                      style={{ marginRight: 8, verticalAlign: "middle" }}
+                                      checked={groupAllOn(list)} onChange={() => toggleGroup(list)} />}
+                    {env}</td></tr>
+                  {list.map((h) => {
+                    const off = h.online === false;
+                    return (
+                      <tr key={h.id} style={{ borderTop: "1px solid var(--border)", opacity: off ? 0.55 : 1 }}>
+                        {canAct && <td style={{ padding: "5px 8px" }}>
+                          <input type="checkbox" disabled={off} checked={checked.includes(h.id)}
+                                 onChange={() => toggle(h.id)} /></td>}
+                        <td style={{ padding: "5px 8px" }}>{h.host}
+                          {off && <span className="faint" style={{ marginLeft: 6, fontSize: 11 }}>offline</span>}
+                          {h.error && !off && <span className="faint" style={{ marginLeft: 6, fontSize: 11 }} title={h.error}>· {h.error}</span>}
+                        </td>
+                        <td style={{ padding: "5px 8px", textAlign: "right" }}><Cell n={h.total} color={C.upd} /></td>
+                        <td style={{ padding: "5px 8px", textAlign: "right" }}><Cell n={h.security} color={C.sec} /></td>
+                        <td style={{ padding: "5px 8px", textAlign: "center" }}>{h.reboot ? <span style={{ color: C.reboot, fontWeight: 700 }}>yes</span> : <span className="faint">—</span>}</td>
+                        <td style={{ padding: "5px 8px", color: "var(--text-faint)" }}>{h.mgr || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {results && (
+        <div className="card" style={{ marginTop: 14 }}>
+          <strong>{results.label}</strong>
+          <HostResults rows={results.rows} />
+        </div>
+      )}
+
+      <p className="faint" style={{ fontSize: 12, marginTop: 12 }}>
+        "Rescan" recounts from each host's cached repo metadata (fast). "Refresh metadata &amp; rescan"
+        forces a repo refresh first for live counts (slower, hits mirrors). Security counts are best-effort
+        per package manager.
+      </p>
+    </div>
+  );
+}

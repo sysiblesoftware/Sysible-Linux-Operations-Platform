@@ -1,0 +1,119 @@
+# Sysible Controller — single-node deployment.
+#
+#   docker compose up -d --build      # build + start
+#   docker compose logs -f            # watch startup; the seeded admin password
+#                                     # is printed once on first run
+#
+# The web console is at  https://<host>:8800  (self-signed cert -> your browser
+# will warn once). Agents enroll against  https://<host>:9000.
+#
+# IMPORTANT: set SYSIBLE_CONTROLLER_HOSTNAMES to the DNS name(s)/IP(s) that
+# agents and browsers will actually use to reach this host, so the auto-generated
+# TLS cert covers them (agents pin this cert). You can add more later from the
+# console: Settings -> Regenerate certificate.
+
+services:
+  controller:
+    build:
+      context: .
+      args:
+        # URL prefix the console is served under. "/" standalone; the SLOP
+        # installer sets "/controller/" so the SPA's assets + API base live under
+        # the gateway's /controller/* path on the one shared origin.
+        # EMPTY, not "/": vite falls back to a relative base that is correct both
+        # at the root and under /controller/. A "/" here re-bakes an absolute
+        # /assets/... and the console comes up blank behind the gateway.
+        SYSIBLE_BASE_PATH: "${SYSIBLE_BASE_PATH:-}"
+    image: sysible-controller:latest
+    container_name: sysible-controller
+    restart: unless-stopped
+    ports:
+      # The console. Defaults to every interface so a STANDALONE Controller keeps
+      # working unchanged; behind SLOP the installer sets this to the docker bridge
+      # gateway, so the console is reachable from this host and its containers (the
+      # Caddy gateway) but not from the network — the gateway's security headers and
+      # the platform's central login throttle then cannot be skipped by going
+      # straight to :8800.
+      - "${SYSIBLE_CONTROLLER_CONSOLE_BIND:-0.0.0.0}:8800:8800"
+      # NOT restricted: this is the agent + CLI API, and managed hosts across the
+      # network dial it. Binding it would strand the fleet.
+      - "9000:9000"   # controller API — agents + CLI
+      # Webserver Portal — the self-service page a host operator signs in to for
+      # an agent bundle. It is a SEPARATE listener on its own port, started from
+      # the console, and it was never published: it came up inside the container,
+      # the console's health check reached it on container-loopback and reported
+      # "Running · reachable at https://<this host>:8090", and nothing on the LAN
+      # could connect (nmap: closed). Published on the same number inside and out
+      # so the address the console prints is the address that works.
+      - "${SYSIBLE_PORTAL_PORT:-8090}:${SYSIBLE_PORTAL_PORT:-8090}"   # webserver portal
+    environment:
+      # Cover the address(es) agents/browsers use to reach this host in the TLS
+      # cert. Comma-separated DNS names and/or IPs. Example:
+      # SYSIBLE_CONTROLLER_HOSTNAMES: "controller.example.com,10.0.0.5"
+      SYSIBLE_CONTROLLER_HOSTNAMES: "${SYSIBLE_CONTROLLER_HOSTNAMES:-}"
+      # The address AGENTS reach this controller at, baked into agent enrollment
+      # bundles. REQUIRED in a container: without it the controller advertises its
+      # docker-bridge IP (172.x) and bundles strand the fleet on an unreachable
+      # address. Set it to this host's LAN IP / DNS name (sysiblectl controller start does).
+      SYSIBLE_CONTROLLER_ADDR: "${SYSIBLE_CONTROLLER_ADDR:-}"
+      # The portal port PUBLISHED above. The portal reads it to know which port
+      # can actually be reached from outside this container — a port publishing is
+      # fixed when the container is created, so a port chosen later in the console
+      # cannot be reached until the container is recreated, and the console says so
+      # instead of printing an address that silently does not work.
+      SYSIBLE_PORTAL_PORT: "${SYSIBLE_PORTAL_PORT:-8090}"
+      # Optionally set the first superuser's password (else one is generated and
+      # printed to the logs once on first run):
+      # SYSIBLE_ADMIN_USERNAME: "admin"
+      # SYSIBLE_ADMIN_PASSWORD: "change-me-please"
+      # Single sign-on behind the SLOP gateway. Both default OFF/empty, so a
+      # standalone controller keeps its own login untouched. The SLOP installer
+      # sets these so the controller trusts the gateway-asserted identity ONLY
+      # when the request carries the matching shared secret (see SLOP docs/SSO.md).
+      SYSIBLE_WEBGUI_TRUST_SSO: "${SYSIBLE_WEBGUI_TRUST_SSO:-0}"
+      SYSIBLE_SSO_SHARED_SECRET: "${SYSIBLE_SSO_SHARED_SECRET:-}"
+      # Config backup (Sysible Flashback). Agents post their /etc snapshots to
+      # THIS controller and it relays them, so it is the only thing that holds
+      # Flashback's agent token. Both empty by default: a standalone controller
+      # simply never offers config backup. The SLOP installer sets them.
+      #
+      # The URL must be reachable FROM THIS CONTAINER. Flashback publishes its
+      # agent API on the SLOP host's loopback, and inside a container 127.0.0.1
+      # is the container itself — so the default goes via host.docker.internal,
+      # mapped below. Without both of these the feature is silently inert: the
+      # variables sat in .env and never reached the process.
+      #
+      # Both names resolve. Controller and SLOP are separate deployments on
+      # separate schedules, so a Controller recreated BEFORE the SLOP stack is
+      # reading an .env that still says FLASHBACK — and the fallback is what
+      # stops config backup switching itself off fleet-wide in that window,
+      # with both halves looking correctly configured.
+      SYSIBLE_FLASHBACK_URL: "${SYSIBLE_FLASHBACK_URL:-}"
+      SYSIBLE_FLASHBACK_AGENT_TOKEN: "${SYSIBLE_FLASHBACK_AGENT_TOKEN:-}"
+      # Desired-state configuration (Sysible Baseline). A SEPARATE service from
+      # Flashback with a SEPARATE token: Flashback's reads and writes a host's
+      # stored configuration, Baseline's declares what a host must become. One
+      # token for both would make a compromise of either a compromise of both.
+      # Both empty by default: a standalone controller manages no desired state.
+      SYSIBLE_BASELINE_URL: "${SYSIBLE_BASELINE_URL:-}"
+      SYSIBLE_BASELINE_AGENT_TOKEN: "${SYSIBLE_BASELINE_AGENT_TOKEN:-}"
+      # Sysible Relay (bastion / jump-box transport). These are the FALLBACK for
+      # each field — the console's Host Enrollment -> Relay / Bastion tab stores
+      # them in the DB and that wins, so an operator can point the controller at a
+      # different bastion without editing this file or recreating the container.
+      # Set them here to bake a relay into a fleet deployment.
+      SYSIBLE_RELAY_HOST: "${SYSIBLE_RELAY_HOST:-}"
+      SYSIBLE_RELAY_USER: "${SYSIBLE_RELAY_USER:-}"
+      SYSIBLE_RELAY_PORT: "${SYSIBLE_RELAY_PORT:-}"
+      SYSIBLE_RELAY_IDENTITY: "${SYSIBLE_RELAY_IDENTITY:-}"
+      SYSIBLE_RELAY_ALLOWLIST: "${SYSIBLE_RELAY_ALLOWLIST:-}"
+      SYSIBLE_RELAY_OS: "${SYSIBLE_RELAY_OS:-}"
+    extra_hosts:
+      # Reach services published on the host (Flashback's agent API). Linux needs
+      # this mapping explicitly; it is a no-op where the name already resolves.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - sysible-data:/data   # DB, certs, API key, cookie secret, portal files
+
+volumes:
+  sysible-data:

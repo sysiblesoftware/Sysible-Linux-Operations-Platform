@@ -804,6 +804,20 @@ margin-top:.45rem;padding-top:.6rem;border-top:1px dashed var(--line)}
 
    Collapsed by default, including SLOP's six: the page's length stopped being
    decided by whichever product happens to be last. */
+/* Automatic updates. One line when off, three when on. */
+.autoup{margin-top:.7rem;padding:.7rem .85rem;border:1px solid var(--line);
+border-radius:10px;background:var(--panel2);display:flex;
+flex-direction:column;gap:.5rem}
+.autoup-on{display:flex;align-items:center;gap:.45rem;font-size:13.5px;cursor:pointer}
+.autoup-when{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;
+font-size:13px;color:var(--muted)}
+.autoup-when[hidden]{display:none}
+.autoup-when select{font:inherit;font-size:13px;padding:.2rem .35rem;
+border-radius:6px;border:1px solid var(--line);background:var(--field);
+color:var(--text)}
+.autoup-plat{display:flex;align-items:center;gap:.35rem;margin-left:.35rem;cursor:pointer}
+.autoup .sub{font-size:12px;line-height:1.45}
+.autoup .sub.warn{color:var(--amber)}
 .prod-disc{grid-column:1/-1;margin-top:.5rem;padding-top:.5rem;
 border-top:1px dashed var(--line);display:flex;align-items:center;
 gap:.4rem;flex-wrap:wrap}
@@ -2151,6 +2165,19 @@ _UPDATES_JS = r"""
       paintServices(a); paintActions(a); paintModules(a);
       return;
     }
+    // Built from the platform's own tree. Not "up to date" (there is no remote
+    // of its own to be up to date WITH) and emphatically not "not installed" —
+    // its containers are running, they are just services of the platform's
+    // project. The row stays, with its name and its services on it, because an
+    // operator who knows this platform has a Controller should not have to work
+    // out that the row went away when the source moved.
+    if(a.vendored){
+      td.appendChild(st('ok','Built with the platform',
+        'updating the Operations Platform updates this'));
+      var vb=document.getElementById('b-'+a.key); if(vb) vb.hidden=true;
+      paintServices(a); paintActions(a); paintModules(a);
+      return;
+    }
     if(a.checked===false){
       td.appendChild(st('unk',"Couldn't check", a.reason||''));
     } else if(a.available){
@@ -3086,7 +3113,94 @@ _UPDATES_JS = r"""
       var p=load(true);
       if(p&&p.then){p.then(done,done);}else{done();}
     });
+    initAutoUpdate();
   });
+
+  // ---- automatic updates -------------------------------------------------
+  // Off until someone turns it on. Updating the platform recreates the gateway,
+  // this console and the updater itself, so a run in the middle of an afternoon
+  // signs everyone out mid-task \u2014 not a thing to switch on for somebody.
+  var AU_IDS=['enabled','cadence','hour','weekday','platform'];
+  function auEl(n){ return document.getElementById('au-'+n); }
+  function paintAutoUpdate(d){
+    var box=document.getElementById('autoup'); if(!box) return;
+    var s=(d&&d.autoupdate)||null;
+    if(!s){ box.hidden=true; return; }
+    box.hidden=false;
+    auEl('enabled').checked = !!s.enabled;
+    auEl('cadence').value = s.cadence || 'weekly';
+    auEl('hour').value = String(s.hour);
+    auEl('weekday').value = String(s.weekday);
+    auEl('platform').checked = s.include_platform !== false;
+    var when=document.getElementById('au-when');
+    if(when) when.hidden = !s.enabled;
+    var dayWrap=document.getElementById('au-day-wrap');
+    if(dayWrap) dayWrap.hidden = (s.cadence !== 'weekly');
+    var note=document.getElementById('au-note');
+    if(!note) return;
+    note.innerHTML=''; note.classList.remove('warn');
+    var bits=[];
+    if(s.enabled && d.next_run_text) bits.push('Next run '+d.next_run_text+'.');
+    // What the LAST run DID, in the words of the outcome it recorded. A
+    // scheduler that reports "last run" without saying whether anything came of
+    // it is the one that gets believed about a checkout which has been refusing
+    // for three weeks.
+    var last=s.last;
+    if(last){
+      var when2=new Date(last.at*1000);
+      var said={updated:'updated', nothing:'found nothing to do',
+                refused:'did not run', failed:'failed'}[last.outcome] || last.outcome;
+      bits.push('Last run '+when2.toLocaleString()+': '+said
+                + (last.detail ? ' \u2014 '+last.detail : '') + '.');
+      if(last.outcome==='refused'||last.outcome==='failed') note.classList.add('warn');
+    } else if(s.enabled){
+      bits.push('It has not run yet.');
+    }
+    if(!s.enabled && !last) bits.push('Nothing is updated unless you press a button.');
+    note.textContent = bits.join(' ');
+  }
+  function saveAutoUpdate(){
+    var body=new URLSearchParams();
+    body.set('csrf', document.getElementById('csrf').value);
+    body.set('enabled', auEl('enabled').checked ? '1' : '0');
+    body.set('cadence', auEl('cadence').value);
+    body.set('hour', auEl('hour').value);
+    body.set('weekday', auEl('weekday').value);
+    body.set('include_platform', auEl('platform').checked ? '1' : '0');
+    return fetch('/admin/updates/autoupdate',{method:'POST',body:body,
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+      .then(function(res){
+        if(!res.ok){
+          pushToast(res.d.detail||'Refused',
+            {title:'Automatic updates',kind:'warn',ttl:0});
+          // Put the controls back to what the SERVER has, not to what the click
+          // wanted: a checkbox left showing "on" after the save was refused is
+          // a page claiming a schedule that does not exist.
+          return loadAutoUpdate();
+        }
+        paintAutoUpdate(res.d);
+        pushToast(res.d.autoupdate.enabled
+          ? ('Automatic updates on' + (res.d.next_run_text
+              ? ' \u2014 next ' + res.d.next_run_text : ''))
+          : 'Automatic updates off', {title:'Automatic updates'});
+      })
+      .catch(function(e){ pushToast(String(e.message||e),
+        {title:'Automatic updates',kind:'error',ttl:0}); return loadAutoUpdate(); });
+  }
+  function loadAutoUpdate(){
+    return fetch('/admin/updates/autoupdate',{headers:{'Accept':'application/json'}})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){ paintAutoUpdate(d); })
+      .catch(function(){ /* the updater is unreachable; the rows already say so */ });
+  }
+  function initAutoUpdate(){
+    AU_IDS.forEach(function(n){
+      var e=auEl(n); if(!e) return;
+      e.addEventListener('change', saveAutoUpdate);
+    });
+    loadAutoUpdate();
+  }
 })();
 """
 
@@ -3268,6 +3382,34 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "<button class='btn sm' id=updateall hidden>Update all</button>"
         "<span class=sub>Availability is remembered for a few minutes; this re-asks "
         "every product&rsquo;s git remote.</span></div>"
+        # Automatic updates. Off until someone turns them on: updating the
+        # platform recreates the gateway, this console and the updater, so a run
+        # in the middle of an afternoon signs everyone out mid-task. The panel
+        # says when the next one is due and what the LAST one actually did,
+        # including when it refused — "last run: Tuesday 03:00" over a checkout
+        # that has been refusing for three weeks is the kind of green that gets
+        # believed.
+        "<div class=autoup id=autoup hidden>"
+        "<label class=autoup-on>"
+        "<input type=checkbox id=au-enabled> <b>Update automatically</b></label>"
+        "<div class=autoup-when id=au-when hidden>"
+        "<label>Every <select id=au-cadence>"
+        "<option value=weekly>week</option><option value=daily>day</option>"
+        "</select></label>"
+        "<label id=au-day-wrap> on <select id=au-weekday>"
+        + "".join(f"<option value={i}>{d}</option>" for i, d in enumerate(
+            ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+             "Saturday", "Sunday")))
+        + "</select></label>"
+        "<label> at <select id=au-hour>"
+        + "".join(f"<option value={h}>{h:02d}:00</option>" for h in range(24))
+        + "</select></label>"
+        "<label class=autoup-plat>"
+        "<input type=checkbox id=au-platform> include the Operations Platform"
+        "</label>"
+        "</div>"
+        "<div class=sub id=au-note></div>"
+        "</div>"
         # The progress panel, ABOVE the table. It used to sit after it — below
         # four product rows and up to six module cards each — so the thing the
         # operator had just started was off the bottom of the page and they
@@ -3377,6 +3519,63 @@ def admin_updates_action(request: Request, csrf: str = Form(""), app: str = Form
         return JSONResponse({"detail": "Request blocked (bad origin or token)."},
                             status_code=403)
     data, error = updates.action(app, action, sess["username"], "superuser")
+    if error:
+        return JSONResponse({"detail": error}, status_code=409)
+    return JSONResponse(data)
+
+
+@app.get("/admin/updates/autoupdate")
+def admin_autoupdate_get(request: Request):
+    """The automatic-update schedule, for the control on Software & services."""
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    data, error = updates.autoupdate(sess["username"], "superuser")
+    if error:
+        # 200 with nothing in it, not 409. An updater that is not deployed, or
+        # is mid-restart because it is updating the platform, is a normal state
+        # of this page and not a bad request from the browser -- and the panel's
+        # correct response to it is to not show itself, which it does for a null
+        # schedule. A 4xx here would put a red line in the console on every load
+        # of a host that is working exactly as configured, and the product rows
+        # already say the updater cannot be reached.
+        return JSONResponse({"autoupdate": None, "reason": error})
+    return JSONResponse(data)
+
+
+@app.post("/admin/updates/autoupdate")
+def admin_autoupdate_set(request: Request, csrf: str = Form(""),
+                         enabled: str = Form(None), cadence: str = Form(None),
+                         hour: str = Form(None), weekday: str = Form(None),
+                         include_platform: str = Form(None)):
+    """Change it. Superuser-gated and carrying the same origin + CSRF guard as
+    every other admin mutation.
+
+    Only the fields the form actually sent are forwarded, so a control that
+    changes the hour cannot also, by omission, switch the schedule off.
+    """
+    sess, err = _require_super(request)
+    if err:
+        return JSONResponse({"detail": "Superuser access required."}, status_code=403)
+    tok = _csrf_token(request)
+    guard = _admin_guard(request, sess, csrf, tok)
+    if guard is not None:
+        return JSONResponse({"detail": "Request blocked (bad origin or token)."},
+                            status_code=403)
+    changes: dict = {}
+    for name, raw in (("enabled", enabled), ("include_platform", include_platform)):
+        if raw is not None:
+            changes[name] = raw.strip().lower() in ("1", "true", "yes", "on")
+    if cadence is not None:
+        changes["cadence"] = cadence.strip()
+    for name, raw in (("hour", hour), ("weekday", weekday)):
+        if raw is not None and raw.strip() != "":
+            try:
+                changes[name] = int(raw)
+            except ValueError:
+                return JSONResponse({"detail": f"{name} must be a number"},
+                                    status_code=400)
+    data, error = updates.set_autoupdate(changes, sess["username"], "superuser")
     if error:
         return JSONResponse({"detail": error}, status_code=409)
     return JSONResponse(data)

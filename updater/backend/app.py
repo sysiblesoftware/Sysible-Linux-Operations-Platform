@@ -29,7 +29,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import apps, git, jobs
+from . import apps, git, jobs, schedule
 
 app = FastAPI(title="Sysible updater", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -161,6 +161,31 @@ def status(request: Request, refresh: bool = False) -> dict:
                # is not installed here, so the screen can say "Flashback would
                # come with SLOP" rather than silently omitting it.
                "modules": apps.modules(key)}
+        # Built from the platform's own tree: no checkout of its own to pull, no
+        # compose project of its own to build. Its services ARE running — they
+        # are services of SLOP's project — so this is emphatically not "not
+        # installed", which is what every path below would have called it.
+        if apps.is_vendored(key):
+            row.update({
+                "installed": True,
+                "vendored": True,
+                "checked": True,
+                "available": False,
+                "can_update": False,
+                "dirty": False,
+                "path": str(apps.vendored(key)),
+                "reason": ("built from the Operations Platform's checkout — "
+                           "updating the platform is what updates this"),
+            })
+            compose = apps.compose_dir_for(key)
+            row["services"] = [
+                svc for svc in (jobs.services(compose) if compose else [])
+                if svc.get("service") in set(apps.module_keys(key))
+            ]
+            row["actions"] = []
+            _attach_modules(row, key, compose)
+            out.append(row)
+            continue
         root = apps.checkout_dir(key)
         if root is None:
             # Not every SLOP host runs every product; say so plainly rather than
@@ -197,26 +222,96 @@ def status(request: Request, refresh: bool = False) -> dict:
         # `compose ps` already paid for above rather than a probe per module, and
         # the actions it will accept. A module key IS its compose service name,
         # which is what lets these two line up.
-        by_service: dict[str, list[dict]] = {}
-        for svc in row["services"]:
-            by_service.setdefault(svc.get("service") or "", []).append(svc)
-        for mod in row["modules"]:
-            mod["services"] = by_service.get(mod["key"], [])
-            mod["actions"] = (jobs.module_actions(key, mod["key"])
-                              if compose is not None else [])
-            # WHY a module offers fewer buttons than its neighbour, in the words
-            # of the table that refuses them. The console used to write this
-            # explanation itself, from two hard-coded sentences about the
-            # gateway and the updater — so the moment a third reason existed
-            # (a single-service product, whose row already runs that exact
-            # command) the page confidently gave the wrong one. One refusal
-            # table, one explanation, carried here.
-            mod["refusals"] = ({a: jobs.module_action_refusal(key, mod["key"], a)
-                                for a in jobs.ACTIONS
-                                if jobs.module_action_refusal(key, mod["key"], a)}
-                               if compose is not None else {})
+        _attach_modules(row, key, compose)
         out.append(row)
     return {"apps": out, "job": jobs.current()}
+
+
+def _attach_modules(row: dict, key: str, compose) -> None:
+    """Give each of a product's cards its live state and the actions it accepts.
+
+    Taken from the one `compose ps` the caller already paid for rather than a
+    probe per card. A module key IS its compose service name, which is what lets
+    these two line up at all.
+
+    The refusals go with them: WHY a card has fewer buttons than its neighbour,
+    in the words of the table that refuses them. The console used to compose that
+    sentence itself from a guess at which rule had fired.
+    """
+    by_service: dict[str, list[dict]] = {}
+    for svc in row.get("services") or []:
+        by_service.setdefault(svc.get("service") or "", []).append(svc)
+    for mod in row["modules"]:
+        mod["services"] = by_service.get(mod["key"], [])
+        mod["actions"] = (jobs.module_actions(key, mod["key"])
+                          if compose is not None else [])
+        mod["refusals"] = ({a: jobs.module_action_refusal(key, mod["key"], a)
+                            for a in jobs.ACTIONS
+                            if jobs.module_action_refusal(key, mod["key"], a)}
+                           if compose is not None else {})
+
+
+@app.get("/api/autoupdate")
+def autoupdate_get(request: Request):
+    """The automatic-update settings, and what the last run actually did."""
+    _authorized(request)
+    s = schedule.settings()
+    nxt = schedule.next_run(s)
+    return {"autoupdate": s,
+            "next_run": nxt.timestamp() if nxt else None,
+            "next_run_text": nxt.strftime("%A %d %B at %H:%M") if nxt else None}
+
+
+@app.post("/api/autoupdate")
+async def autoupdate_set(request: Request):
+    """Change them. Superuser-gated at the IdP, like every other mutation here.
+
+    Only the five settings are writable; `last` is the scheduler's own record of
+    what happened and a caller must not be able to write a run that never
+    happened into it.
+    """
+    actor = _authorized(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected an object.")
+    changes = {}
+    if "enabled" in body:
+        changes["enabled"] = bool(body["enabled"])
+    if "include_platform" in body:
+        changes["include_platform"] = bool(body["include_platform"])
+    if "cadence" in body:
+        if body["cadence"] not in schedule.CADENCES:
+            raise HTTPException(status_code=400,
+                                detail=f"cadence must be one of {schedule.CADENCES}")
+        changes["cadence"] = body["cadence"]
+    for name, hi in (("hour", 23), ("weekday", 6)):
+        if name in body:
+            try:
+                val = int(body[name])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{name} must be a number")
+            if not 0 <= val <= hi:
+                raise HTTPException(status_code=400,
+                                    detail=f"{name} must be between 0 and {hi}")
+            changes[name] = val
+    s = schedule.save(changes)
+    nxt = schedule.next_run(s)
+    print(f"[sysible-updater] {actor} set automatic updates: "
+          f"{'on' if s['enabled'] else 'off'}"
+          + (f", next {nxt:%Y-%m-%d %H:%M}" if nxt else ""), flush=True)
+    return {"autoupdate": s,
+            "next_run": nxt.timestamp() if nxt else None,
+            "next_run_text": nxt.strftime("%A %d %B at %H:%M") if nxt else None}
+
+
+@app.on_event("startup")
+def _start_scheduler() -> None:
+    """Begin ticking once the service is up.
+
+    Started here rather than at import so that reading this module -- which the
+    tests do -- does not quietly start a thread that updates the host.
+    """
+    schedule.start()
 
 
 @app.post("/api/update/{key}")

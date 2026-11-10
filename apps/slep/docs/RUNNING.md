@@ -1,0 +1,118 @@
+# Running SLEP
+
+## Docker (recommended)
+
+One container runs everything (both services + Ansible + Terraform baked in);
+SQLite, project files, and run logs persist in the `slep-data` volume.
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d --build
+# open https://localhost:8810 and create your admin on the first-run screen
+```
+
+### Managing / updating
+
+All Sysible products share one management CLI, **`sysible_ctl`** (it ships in the
+Sysible Controller checkout, at `deploy/sysible_ctl`). Put it on your PATH once:
+
+```sh
+sudo ./deploy/sysible_ctl install     # symlinks `sysible_ctl` onto PATH
+```
+
+Then manage SLEP from anywhere. To pull the latest code and rebuild + restart the
+container in place (the `slep-data` volume is always preserved):
+
+```sh
+sysible_ctl slep update
+```
+
+Other commands: `status` (container state + console health probe), `logs`,
+`restart`, `start`, `stop`, `backup` (timestamped tarball of the data volume),
+and `destroy`. `sysible_ctl update all` updates every installed product at once.
+Run `sysible_ctl help` for the full list.
+
+> If SLEP's container isn't running yet, point the CLI at this checkout:
+> `SYSIBLE_SLEP_DIR=$PWD sysible_ctl slep up`.
+
+### HTTPS / TLS
+
+The console is served over **HTTPS** by default with a **self-signed** certificate,
+generated at first start and stored under the data volume (`data/tls/`). HTTPS is
+what makes the browser treat the page as a *secure context* — required for the
+Monaco IDE's **clipboard/paste** and for encrypting the console across the network.
+
+- Your browser shows a one-time "not private" warning (expected for self-signed) —
+  proceed once and it's remembered.
+- Put your server's IP/hostname in the cert to drop the *name-mismatch* part of the
+  warning: set `SLEP_TLS_HOSTS` (comma-separated), e.g.
+  `SLEP_TLS_HOSTS=192.168.1.50,slep.lan docker compose … up -d`. Delete `data/tls/`
+  to regenerate after changing it.
+- **Warning-free (real) cert:** set `SLEP_TLS=0` (serve plain HTTP internally) and
+  put a reverse proxy (Caddy/nginx/Traefik) in front that terminates TLS with a
+  Let's Encrypt/your-CA certificate for your domain.
+- Firewall the console port (8810) as needed; the backend stays on loopback inside
+  the container and is never exposed.
+
+Salt is not part of SLEP. Keeping hosts in a declared configuration state is
+**Sysible Baseline**'s job — it installs and drives its own Salt, and reacts to
+Salt's event bus after a state is applied.
+
+---
+
+# Development (without Docker)
+
+SLEP is two small FastAPI services plus a static console. No node toolchain is
+required for the MVP console (Monaco loads from a CDN; vendor it under
+`webgui/static/vs` for airgapped installs).
+
+## 1. Install
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+# The runner shells out to these — install whichever engines you'll use:
+.venv/bin/pip install ansible-core          # Ansible (first-class today)
+# System tools the runners shell out to (Docker image bakes these in already):
+#   sudo apt install -y openssh-client sshpass    # sshpass = password-based SSH auth
+# terraform: install per its vendor (Terraform via `sysible-tools` on
+# Sysible Server).
+```
+
+## 2. Run the two services
+
+```sh
+# Backend API (:9100) — owns the DB, project files, and runners.
+.venv/bin/uvicorn backend.app:app --host 0.0.0.0 --port 9100 &
+
+# Web console / BFF (:8810) — serves the UI and proxies /api to the backend.
+.venv/bin/uvicorn webgui.server:app --host 0.0.0.0 --port 8810
+```
+
+Then open **http://localhost:8810** and create your admin on the first-run
+screen.
+
+Environment knobs:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SLEP_DATA_DIR` | `./data` | DB, project workdirs, run logs |
+| `SLEP_BACKEND_URL` | `http://127.0.0.1:9100` | where the BFF finds the backend |
+| `SLEP_CONSOLE_PORT` | `8810` | BFF listen port |
+
+## 3. First run, end to end
+
+1. **Projects → New project.**
+2. In the IDE, **+ File** → `site.yml`, write a playbook, **Save** (Ctrl/⌘-S).
+3. **Inventories → New inventory**, then **+ Host** (or **Import from
+   Controller** with a Controller URL + backend API key to pull your fleet).
+4. **Credentials → New** — add the SSH key or password the run will use.
+5. Back in the project, **▶ Run playbook**, pick the inventory + credential,
+   **Launch**. The run log streams live and the status badge settles on
+   `success`/`failed`.
+
+## Note on the shared dev box
+
+If `PYTHONPATH` is set to another project (e.g. the Controller repo), export
+`PYTHONPATH=$(pwd)` before launching uvicorn so SLEP's `backend`/`webgui`
+packages resolve instead of the other project's. A normal install (its own
+venv/container) doesn't hit this.

@@ -1,0 +1,308 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/sysible-logo-dark.png">
+    <img alt="Sysible" src=".github/sysible-logo-light.png" width="340">
+  </picture>
+</p>
+
+# Sysible Controller
+
+**IT Infrastructure Management Software for Linux fleets — one console, agent or SSH, no DSL to learn.**
+
+> 🐳 **Running it in a container?** Jump to **[Run as a container](#run-as-a-container-docker)** — one image, `docker compose up -d`, state on a persistent volume. Full reference in **[DOCKER.md](DOCKER.md)**.
+
+Sysible Controller is a self-hosted infrastructure management console for Linux system administrators and engineers. One controller, installed on a single Linux machine, gives you a single point of control over an entire fleet of Linux hosts — user and group administration, health diagnostics, service control, scheduled jobs, package and repository management, networking, storage and filesystem management, firewall and security hardening, and a live remote terminal — whether each host runs Sysible's lightweight agent or is reached directly over SSH.
+
+![The Sysible Controller System Administration panel — eighteen fleet-wide tools, one click each](docs/screenshots/screenshot_system_administration.png)
+
+> The **System Administration** panel: eighteen point-and-click tools — users and groups, health/logs/recovery, services, storage, networking, firewall, security, containers, directory services, and more — each acting across your whole fleet of agent and SSH hosts.
+
+## Overview
+
+Sysible Controller is made up of a backend and a browser-based console:
+
+- A **FastAPI backend** that runs as a systemd service on the controller machine, holding the fleet's inventory, credentials, and task queue in a local SQLite database.
+- A **browser-based web console** (a React single-page app served by its own `sysible-webgui` service) that delivers the dashboard, tools, and live terminals from any browser on the network — so the controller can live on a headless server with no desktop session, and administrators can work from Windows, macOS, Linux, or a locked-down workstation.
+
+The console talks to the backend over HTTPS and enforces the fleet's roles, run-as identity, and audit trail.
+
+![The Sysible Controller dashboard with its task search box and tool tiles](docs/screenshots/screenshot_dashboard.png)
+
+It manages target hosts through two interchangeable mechanisms, and a single fleet can mix both freely:
+
+- **The Sysible agent** — a small Python daemon installed on a host as its own systemd service, heartbeating back to the controller and polling for queued work. It runs as root by default; an opt-in install flag (`./run_agent.sh --unprivileged`) instead runs it as a dedicated, locked `sysible` system account with passwordless sudo, so the service isn't a root login and its actions go through a sudo audit trail.
+- **Direct SSH** — for hosts that shouldn't run a persistent agent. Hand the controller SSH credentials once; it generates and installs its own key pair on the host and drives it directly from then on, including a real interactive terminal session.
+- **Sysible Relay (bastion / jump box)** — for hosts on a segmented network the controller can't reach directly. It opens a single-hop SSH `ProxyJump` to a bastion and the on-bastion relay daemon forwards to permitted internal targets; both hops stay host-key-verified. Every SSH path routes through it — dispatch, key enrollment, the terminal, and file transfer — so a relayed host behaves like any other. A host goes through the relay either by explicit opt-in or by matching an allowlist of the networks behind the bastion, and the console serves the jump-box setup script so the bastion is never configured by hand. Configured under **Host Enrollment → Relay / Bastion**.
+
+Both paths feed the exact same fleet-wide tools, so day to day you don't think about which transport a given host uses.
+
+![Sysible Connect — host list on the left, grouped actions on the right](docs/screenshots/screenshot_sysible_connect.png)
+
+> Sysible Connect: the host list stays a plain list; the actions are grouped on the right — Fleet Actions (run a script or reboot/power-off/restart the agent across the fleet), file transfer for the selected host, and SSH-enroll a new host. Check hosts and click **Open Terminal** (or double-click one) to pop out a shell per host.
+
+![A popped-out Sysible Connect terminal with its Files panel open — upload/download for this host](docs/screenshots/screenshot_terminal_file_transfer.png)
+
+> Each terminal pops out into its own window with a full toolbar. The **Files** panel transfers to/from that host — through the agent (as your own account) for agent hosts, or over SFTP (superuser-only) for pure-SSH hosts — with a remote file browser to pick the path.
+
+**Every action runs as the administrator who triggered it.** When the operator logged in as `alice` runs a command, the agent executes it as the local `alice` account on the target host (`runuser -u alice`), with exactly that user's sudo rights — not as a faceless root daemon. Privileged steps are tried unprivileged first (so reads succeed without sudo), then escalated only when the OS reports a privilege error. The run-as identity is derived from the administrator's signed login token on the controller, never from anything the client can spoof, so the host's own sudo policy and audit trail stay meaningful. Hosts whose sudo requires a password are fully supported too — see **Sudo modes** below.
+
+A separate, optional **Webserver Portal** gives host operators — not Sysible administrators — a self-service way to grab the agent bundle or exchange files with the controller from a browser, without ever needing shell access.
+
+## The web console
+
+Sign in at `https://<controller>:8800/` (start it with `sysible_controller webgui start`) with any controller administrator account, and you get the dashboard tiles, the tools with grouped actions and per-host results, multiple live terminals (xterm.js) per host, file upload/download, the activity feed, and the dark/light theme toggle. Multi-host results are **scannable at fleet scale**: each host collapses to a one-line summary (status dot + a one-line verdict such as `HEALTH: OK`), grouped by environment, with a "N hosts · X ok · Y need attention" header, an **Only problems** filter, and a host/output search — OK hosts collapsed, problem hosts expanded and sorted first.
+
+Under the hood the console is a **backend-for-frontend (BFF)**: the `sysible-webgui` service builds every command from shared Python command-builders and dispatch logic. The controller's admin API key stays server-side and never reaches the browser; the browser authenticates with a signed, http-only session cookie. Every action runs as the administrator who triggered it (the run-as model below applies), and the activity log attributes it to them. See [`webgui/README.md`](webgui/README.md) for the console's architecture, environment variables, and reverse-proxy/TLS guidance.
+
+## Why Sysible Controller
+
+Most of the Linux infrastructure tooling landscape pulls administrators toward one of two extremes: heavyweight configuration-management platforms (Ansible, Puppet, Chef, SaltStack) that demand a DSL, a control repo, and a CI-style workflow before you can do anything — or single-host web admin panels (Webmin, Cockpit) that manage one box at a time with no real fleet-wide view. Monitoring stacks (Nagios, Zabbix, Prometheus) sit on top of both, telling you something's wrong without giving you anywhere to act on it.
+
+Sysible Controller is built for the gap in between: **a point-and-click, fleet-wide operations console for the day-to-day work a sysadmin actually does between deployments** — locking an account, checking why a disk is full, restarting a failed service, rolling a repo out to twenty boxes, pulling a quick log tail — without writing a playbook or manifest first.
+
+What that buys you in practice:
+
+- **No DSL, no control repo, no apply step.** Every action is a button, not a YAML file. There's nothing to author, lint, or version before you can act on a host.
+- **One tool, two transports.** Hosts that can run a persistent agent and hosts that can't (appliances, locked-down boxes, anything you'd rather not put a daemon on) sit in the same host list, behind the same buttons, instead of needing two different toolchains.
+- **Detection and remediation in the same pane.** System Health & Logs doesn't just flag a WARNING/CRITICAL host — the same window lets you kill or renice the offending process, restart the failed service, or tail the relevant log, immediately, on the same host.
+- **A lightweight, self-hosted footprint.** One controller machine, one SQLite database, one systemd service. No message bus, no master/minion cluster, no external database to stand up and patch.
+- **Security defaults that don't require a PKI team.** Self-signed TLS scoped to every address the controller can be reached at, a dedicated SSH key pair generated and managed per fleet, single-use enrollment tokens so a leaked agent bundle can't silently enroll a second host, and an audit log of who logged in and what administrator accounts changed — all provisioned automatically at install time.
+- **Self-service without handing out admin access.** The Webserver Portal lets a host owner fetch their own agent bundle or drop off a file without ever touching the admin console, SSH, or a credential that could be used for anything else.
+- **Cross-distro by design.** The installer and every package/repository action detect `dnf`, `yum`, `zypper`, or `apt-get` at the moment they run, so a mixed RHEL/SUSE/Debian fleet is one fleet, not three separate runbooks.
+- **Find any action by name.** A search box on the dashboard matches plain-language tasks — "create a user", "add a repository", "open a firewall port" — and jumps straight to the right tool (and, for User & Group Administration, the right tab), so you never have to remember which of the eighteen System Administration tools owns it.
+- **Dark or light, your call.** A header toggle switches the entire interface between a dark and a light theme on the fly — every page re-skins immediately, no restart — and remembers the choice for next time.
+- **Browser-based, works anywhere.** Point any modern browser at the controller's web console — from Windows, macOS, Linux, or a headless server. There's nothing to install on the operator's machine, and the controller runs fully headless.
+
+## Key capabilities
+
+| Area | What it covers |
+|---|---|
+| **Dashboard / Fleet** | The home screen shows live fleet counts (hosts, online/offline, environments) and a unified **Fleet panel** that combines two lenses: a live **health** overview (an OK/Warning/Critical donut) and a **compliance & posture** summary (high-ticket signal chips, see below). Beneath them, **one card per environment** rolls up both at once — worst health verdict, peak disk/memory, problem signals (crashed/failed services, out-of-memory kills, degraded systemd), and how many hosts **need attention** from the posture scan — sorted worst-first and **expandable to its hosts** (disk/memory meters, load, named crashed services, plus a posture issue badge). **Click a host** for the full per-host drill-down. Health is gathered on demand (with optional auto-refresh); read-only, no operator sudo needed, and shown to sysadmins, superusers, and the read-only auditor (superusers also get the activity feed). |
+| **Compliance & posture** | An on-demand, **read-only** posture scan across the fleet (no agent redeploy, no operator sudo, dispatched without an operator identity so it works for the read-only auditor too) surfaced as high-ticket **signal chips** — reboot required, SSH root-login enabled, firewall disabled, SELinux/AppArmor not enforcing, EOL/unsupported OS, UID-0 or empty-password accounts, TLS certs expiring < 30 days, time not synchronized, plus failed systemd units and disk-critical — and a per-environment "needs attention" rollup. **Click a host** for the full per-category drill-down: operating system, security/MAC hardening, users & SSH config, filesystem, time sync, logging, networking, TLS certificates, services, hardware, virtualization/containers, and AD/identity — each item flagged pass/warn/fail. |
+| **Host Enrollment** | Build and download single-use agent bundles, or copy a **command-line (`curl`) one-liner** that downloads, unzips, and installs the agent on a headless host in one shot (via the Webserver Portal). Organize enrolled hosts into environments (Production, Staging, etc.) — **select several hosts at once** (shift/ctrl-click) and assign them to an environment in a single action; set each host's **sudo policy** (passwordless `NOPASSWD` or password-required "become" sudo), which an environment can also default for every host assigned to it; disenroll cleanly. Disenroll gracefully stops the host's agent service first; for a **zombie agent** — a broken build that keeps heartbeating but can't cleanly uninstall itself — a **Force Delete** drops the host from the console immediately without waiting on that teardown, and invalidates the agent's secret so it's locked out on its next heartbeat. **Create and remove environments** (an environment can't be removed while hosts are still assigned to it). Enrolling the **same machine twice is prevented** — the controller rejects a host whose IP is already managed (by an agent or another SSH record), so one box never shows up as two. |
+| **Sysible Connect** | Unified list of agent- and SSH-managed hosts (with each host's IP shown inline); one-click SSH enrollment (password used once, then discarded in favor of a generated key). **Open a terminal** by double-clicking a host, or by checking one or more hosts and clicking **Open Terminal** — each pops out into its own browser window, with **multiple concurrent sessions per host**, each **opened as your administrator user** (not root). For an **agent host the shell is hosted by the agent itself**: the agent opens a local PTY on the host and streams it back over its existing outbound check-in channel, so a terminal works even when the controller can't reach the host directly (NAT, firewall, outbound-only agents) and needs **no inbound SSH**. A **pure-SSH host** gets a real SSH PTY. Either way it renders full-screen apps (`vim`, `top`, `less`) correctly and resizes with the window, with the `user@host` prompt shown green (red for root). Each pop-out terminal carries its own toolbar: **file transfer** (upload/download to that host — see below), **find-in-output**, **save output**, **Send Ctrl+C**, **Send sudo password** (an **opt-in a superuser grants per administrator** in Settings → Administrators — types your stored sudo password at a prompt on a password-sudo host), and **font size** adjustment. **File transfer** picks its transport per host: an **agent host** transfers *through the agent, as your own account* (≤ 140 KB per file, since it rides inside a task); a **pure-SSH host** transfers over SFTP with the shared controller key and is therefore **superuser-only** (no size limit). A built-in **remote file browser** lets you click into the host's directories to pick the source or destination path. The page is a clean host list on the left with the actions grouped on the right: a **Fleet Actions** box (Run Script on All Hosts, Restart Agent on All Hosts, Reboot All Hosts, Power Off All Hosts — each behind a confirmation; a whole-fleet **Reboot/Power Off requires typing the word** to confirm), and SSH-enroll a new host. A **Check In / Ping** button probes every host — agent hosts by their last heartbeat, SSH hosts by a live connection test — and shows a colored status dot with the age/latency next to each. **Right-click a host** to assign it to an environment. The list **dedupes by IP**, so a machine reached as both agent and SSH (or accidentally enrolled twice) shows as a single host. |
+| **Live Activity & Logs** | A **Sysible Controller superuser-only** dashboard pane showing a live feed of fleet activity — who did what, where, and when (create user, lock account, set hostname, fleet reboot, and so on, with a short human-readable summary rather than raw command text) — alongside a tail of the controller's own service log. The same action dispatched to several hosts is **collapsed into one line**, with the hosts summarized by **environment** — "… on *all prod servers*", or "*all servers (all environments)*" when it spans the fleet (falling back to the host names for a partial set) — and **double-clicking an entry pops out the full command or script** that ran (with a Copy button). Both tabs auto-refresh. Background bookkeeping (user syncs, SSH-enable probes) is excluded so the feed reflects real operator actions only. |
+| **User & Group Administration** | Create/lock/unlock/delete accounts, manage sudo and group membership, set or generate passwords against a fleet-wide policy, manage password aging and account expiration, kill active sessions, and terminate an account fleet-wide in one action — across checked hosts, with per-host result tabs. Check **two or more hosts** to see the union of their users, grouped to surface host mismatches (a user present on some hosts but not others). |
+| **System Health, Logs & Recovery** | A single tabbed window combining health and boot/kernel recovery: disk usage, memory/CPU snapshots, uptime, failed services, large-file search, log search/tail, process inspection (kill/renice/restart), and a combined OK/WARNING/CRITICAL health verdict per host (removable/install media excluded from disk scoring) — **plus** boot-failure analysis, GRUB view/change/rebuild, recovery boot targets, kernel parameters, initramfs regeneration, and old-kernel cleanup. |
+| **Service Management** | List installed **and running** services, start/stop/restart/reload, enable/disable at boot, status, logs, dependency view, and one-click troubleshooting for one service or every failed service fleet-wide; create new systemd services and dependency overrides from the web console. |
+| **Environmental Policies** | The password, lockout, sudo, and umask baseline pushed to managed hosts' real OS configuration — separate from the policy governing logins to the controller itself. |
+| **Cron & Systemd Timers** | Manage both scheduling mechanisms side by side, with a plain-English schedule builder that writes correct cron or `OnCalendar` syntax for you. |
+| **Host Software Management** | Detect the package manager, list/install/remove/update packages, query package info, verify package integrity, and clean the package cache — across `dnf`, `yum`, `zypper`, and `apt` hosts with the same buttons. **Upload a local `.deb`/`.rpm`** and install it across the checked hosts (uploaded over SSH, installed with dependency resolution), with the Update/Upgrade action emphasized as the primary button. |
+| **Repository Management** | Add, enable, disable, and remove package repositories on one host or roll a new repo out to the entire fleet at once. |
+| **Network Management** | Connectivity and DNS diagnostics, port/socket inspection and packet capture, and configuration of IP addressing, DHCP, DNS, hostname, gateways and routing, MTU, and advanced layer-2 setups (bonding, teaming, VLANs, bridges) across managed hosts. |
+| **File System Management** | List directory contents, **view a file's contents** read-only (**View File**, output capped so a huge/binary file can't flood the pane), create/remove directories, copy/move/rename files, manage ownership, permissions, ACLs, and links, mount/unmount/resize/repair filesystems, mount **NFS and CIFS/SMB network shares** (optionally persisted to `/etc/fstab`, with CIFS credentials kept in a root-only file), configure `/etc/fstab` and quotas, and archive/compress files — organized into focused tabs (Directories & Files, Permissions, Mount/Unmount, Network Mounts, Resize & Repair, Disk Usage, fstab & Quotas, Archive). Deleting or unmounting a **system-critical file or mount** (`/`, `/etc/fstab`, `/boot`, …) is guarded: blocked for sysadmins, and a superuser is warned and must confirm. |
+| **Storage Administration** | Install the LVM and RAID tools, partition, format, and monitor disks (SMART); manage LVM physical volumes, volume groups, and logical volumes; configure RAID arrays and replace failed disks; and set up swap space — with beginner-oriented intros on the Disks, Partitions, LVM, and RAID tabs. |
+| **Firewall Administration** | A **Firewall** tab that works on any host *without you knowing its backend*: status, turn the firewall on/off, and allow/close a port, each carried out with whatever that host actually uses — so a mixed fleet of firewalld and ufw hosts can be selected together and managed in one press. Detection prefers whatever is **enforcing now**, then whatever is **enabled at boot** (a stopped firewalld host is still a firewalld host), then what is installed. Turning a firewall on **keeps the ports already in use open** — sshd's real port and the controller's own — so it can't cut the connection you pressed it over, and it **never enables the second firewall** on a host that already has one (running both corrupts netfilter). Backend tabs remain for what only they can express: firewalld zones and rich rules, ufw rules and defaults, and the underlying `nftables` and `iptables` rule sets. Plus **list all actually-listening ports** (via `ss`) regardless of backend. |
+| **Security Administration** | Install the SELinux userspace tools, configure and troubleshoot SELinux, harden SSH access and rotate keys, review audit logs and failed logins, install security updates, set OS-level password policy, apply system hardening, and install/run vulnerability scanners (Lynis and rkhunter) across managed hosts. |
+| **Directory Services (Active Directory / LDAP)** | A one-click **Prepare Host for AD Join** that does the unglamorous prerequisites first — installs realmd/SSSD/adcli, brings up time sync (chrony), enables oddjobd/mkhomedir, and runs a readiness check that verifies the domain's SRV records actually resolve before you attempt the join — so the join itself succeeds the first time. Then join hosts to **Active Directory** (with the join password kept off the command line), with a discovery pre-check that surfaces DNS problems (including the common `.local`/mDNS reserved-name gotcha) instead of a bare "no such realm". Leave a domain, show realm/Kerberos status, permit AD users/groups to log in, enable home-dir creation, test **LDAPS** connectivity, and write a generic SSSD LDAP/LDAPS client config. |
+| **Distro Subscription & Licensing** | Register and manage commercial-distro subscriptions across the fleet: **Red Hat** (`subscription-manager` — register by org + activation key or username/password, a one-click **Register All** that registers and auto-attaches every checked host in one go, refresh, list consumed/available, list repositories, unregister), **Ubuntu Pro** (`pro` — status, attach by token, enable/disable services like esm-infra, livepatch, fips, detach), and **SUSE** (`SUSEConnect` — status, register by reg-code, list extensions/modules, deregister). Each action is guarded to the matching distro. |
+| **Backup & Recovery** | Back up and restore files (timestamped tar.gz), verify backup integrity, install scheduled backups, create and merge LVM snapshots, guide deleted-file recovery, and run a read-only disaster-recovery drill. |
+| **Time Synchronization** | Configure chrony/NTP and point it at chosen servers, verify synchronization, troubleshoot clock drift, and set the system time zone. |
+| **Certificate Management** | Generate CSRs, install/renew/replace certificates, check expiry, verify certificate chains, and troubleshoot TLS endpoints with `openssl s_client`. |
+| **Containers & VMs** | List and start/stop/restart Docker or Podman containers, view container logs and images, prune, and manage libvirt virtual machines (list/start/shutdown/destroy/info). |
+| **Webserver Portal** | A separate, optional HTTPS web app for host operators to self-service agent downloads and file exchange, with full login history, active-session visibility, and a shared file pool managed from the admin console. |
+| **Sysible Controller Settings** | Controller address/port configuration, **role-based administrator accounts** (each administrator is a **Superuser**, a **Sysadmin**, or a read-only **Auditor** — see *Roles & identity* below; a superuser can also promote/demote an existing account's role), the administrator password policy, the audit log, license/version info, and the controller's **Software updates** (Update controller / Update agents — superuser-only), all in one place. |
+
+## Roles & identity
+
+Sysible administrators come in three roles, set per account in Settings (and changeable later — a superuser can promote or demote an existing account):
+
+- **Superuser** — full control of the controller itself: managing other administrators and their roles, the controller/agent software updates, the Webserver Portal and TLS certificate, and viewing the Live Activity & Logs pane. Superusers are the people who run Sysible Controller.
+- **Sysadmin** — full use of the fleet-management tools, but no access to administrator management, the controller/agent updates, the portal/TLS controls, or the live activity/controller logs. Sysadmins are the people who run the *fleet*.
+- **Auditor** — **read-only oversight.** An auditor sees the dashboard (fleet health and compliance/posture), the Update Hosts patch status, and the Activity log, but **cannot run anything** on a host or change any setting. The block is enforced server-side — the controller refuses to queue a host task for an auditor, refuses the SSH exec and interactive-terminal paths, and the web BFF refuses every write/dispatch route — not just hidden in the UI. Auditors are management and compliance reviewers who need to *see* the fleet without being able to touch it.
+
+Crucially, **every administrator's actions on a host run as that administrator's matching local user**, with that user's own sudo rights and the host's own audit trail — not as an anonymous root daemon. The run-as identity is bound to the administrator's signed login token on the controller and can't be set by the client, so a host's local access policy stays authoritative. (Read-only fleet-health, posture, and metrics gathering is the one exception: it's dispatched without an operator identity and runs as the agent itself, so it needs no local account — which is why the read-only auditor can see it.)
+
+![Sysible Controller Settings — role-based administrators](docs/screenshots/screenshot_settings.png)
+
+> Administrators in Settings, each tagged **Superuser**, **Sysadmin**, or read-only **Auditor**. Roles are set when an account is added and can be promoted/demoted later.
+
+### Sudo modes — passwordless or password ("become")
+
+Not every fleet is allowed passwordless sudo. Each host carries a **sudo mode**, and an environment can set the default for hosts assigned to it:
+
+- **NOPASSWD** — the agent's user has passwordless sudo; privileged steps just work.
+- **Password required ("become")** — modeled on Ansible's become-password. The administrator's sudo password is supplied to `sudo -S` over **stdin only** — never on the command line, never in an environment variable, never written to the database or any log. The controller holds it in memory only, keyed to a single task, delivers it once to the authenticated agent that polls for that task, and sweeps it on a short TTL. For convenience it can be **stored encrypted at rest** on the operator's own workstation (Fernet with a `0600` key file, the same model as an SSH private key) and is **namespaced per administrator**, so one admin's password is never used to act as another.
+
+Every administrator — including a **Sysadmin**, who doesn't see the Settings page — sets their own sudo password from a **Sudo Password** button in the dashboard header. It opens a small dialog to store or clear the password as a **fleet default** or **per host**. The same stored password is what the terminal's *Send sudo password* button and every privileged dispatch (create user, disenroll, file transfer, the agent console, …) use to elevate on a password-sudo host. If a host is set to require a password but none is stored for you, the action **stops with a clear message** pointing you at that button instead of failing silently.
+
+The terminal's *Send sudo password* button on Sysible Connect is itself **opt-in**: it's **off by default for every account** and a **superuser grants it per administrator** in **Settings → Administrators** (the web console enforces this server-side). This lets a superuser withhold interactive sudo-password injection from accounts that shouldn't have it, without affecting their other tools.
+
+![Host Enrollment — curl one-liner, bulk environment assignment, and per-host sudo policy](docs/screenshots/screenshot_host_enrollment.png)
+
+> Host Enrollment: download the agent bundle (from the web console or via `curl`), select several hosts at once to set their environment in bulk, and set each host's (or environment's) sudo policy. Your personal sudo password lives on the header's **Sudo Password** button, not here.
+
+![My Sudo Password — the self-service per-administrator password store](docs/screenshots/screenshot_sudo_password.png)
+
+> Any administrator stores or clears their own encrypted sudo password here — as a fleet default or per host.
+
+## Security model
+
+- **HTTPS everywhere** — backend API, Webserver Portal, and agent check-ins all run over TLS using a self-signed certificate generated at install time, scoped to every address the controller might be reached at.
+- **Admin API key** — every web console-to-backend call is gated by a single key issued at install time.
+- **Per-administrator login tokens** — logging in issues a signed, expiring token; the action's run-as identity is derived from that token, so dispatch identity can't be forged by the client. **Removing, demoting, or resetting** an administrator revokes their live token **immediately** (the token is cross-checked against the account's current existence and role on every request), so a fired or demoted admin doesn't keep access until the token happens to expire.
+- **Role-gated sensitive surfaces** — administrator management, the controller/agent software updates, the Webserver Portal controls, the controller's TLS-certificate install, and the Live Activity & Controller Log views require a **Superuser** token; the backend enforces the role server-side, not just in the console.
+- **Read-only Auditor role** — an auditor can view the dashboard, posture/compliance, patch status, and the activity log but **cannot act**: the controller refuses to queue any host task for an auditor token, the web BFF rejects every write/dispatch route (run a tool, fleet actions, file transfer, the terminal websocket, …). Oversight without a path to act.
+- **System-critical path guard** — deleting, unmounting, or removing the fstab entry of a critical system file/mount (`/`, `/etc`, `/etc/fstab`, `/boot`, `/usr`, …) is **blocked for sysadmins** and requires an explicit **superuser confirmation**; a backstop in the command builders refuses it regardless of which front end (or a crafted request) asks.
+- **Sudo-on-Connect is opt-in** — the terminal's *Send sudo password* button is granted per administrator by a superuser (off by default), enforced server-side in the web console.
+- **Login throttling** — repeated failed administrator logins are rate-limited and briefly lock out, blunting password-guessing.
+- **Hardened HTTP surface** — security response headers on every reply, and the interactive API docs/schema explorer disabled in production.
+- **Sudo passwords never at rest in the clear** — become-passwords live in RAM and in transit only, are fed via stdin, and are kept out of the database, process arguments, environment, and logs; any optional convenience copy on the operator's workstation is encrypted with a `0600` key and scoped per administrator.
+- **Per-fleet SSH key pair** — SSH-managed hosts are authenticated with a key the controller generates and owns, not a shared or stored password.
+- **SSH host-key verification (trust-on-first-use)** — the controller records each SSH host's key on first contact and verifies it on every later connection; a *changed* key — a possible man-in-the-middle, or a rebuilt box — is refused rather than silently re-trusted. All SSH paths (command exec, the interactive terminal, and file transfer) share one controller-side `known_hosts`, and removing a host forgets its pinned key so a legitimate rebuild can re-enroll.
+- **Single-use enrollment tokens** — each downloaded agent bundle carries its own one-time token, bound to the first host that claims it, so a bundle can't be silently reused to enroll an unintended host. A token is valid for **30 days by default** (tunable via `SYSIBLE_ENROLL_TOKEN_VALID_DAYS`) so a leaked-but-unused bundle can't enroll a rogue host indefinitely.
+- **File transfer respects the run-as model** — transfers to an **agent host go through the agent as your own account**; transfers to a **pure-SSH host** use the shared controller SSH key (the SSH login user, often root) and are therefore **restricted to superusers**. Every SSH transfer is recorded in the activity feed.
+- **Credentials at rest are owner-only** — the controller's SQLite database (administrator password hashes, agent secrets, live tokens), the admin API key, the TLS private key, and the SSH keys live under `/opt/sysible` with `0600`/`0700` permissions. The service systemd units also ship with a baseline of kernel-tampering and privilege-restriction hardening directives.
+- **Separate password policies** — one policy governs logins to the controller's own dashboard; a separate Environmental Policy governs OS-level accounts on managed hosts.
+- **Audit & activity logs** — every login attempt and administrator account change is recorded; a superuser-only activity feed additionally records **who did what across the fleet**, attributed to the administrator's validated token (never a client-supplied name). The activity log is retained to a configurable depth (`SYSIBLE_ACTIVITY_LOG_MAX_ROWS`, ~500k rows by default; `0` hands retention to an external SIEM) — for durable, tamper-evident retention, forward it to your log aggregator, since the local store is not a system of record.
+
+For the full trust model, controls, and deployment guidance (firewalling the controller's port to a trusted subnet or VPN), see [`SECURITY.md`](SECURITY.md).
+
+![Live Activity & Logs — a superuser-only feed of fleet actions and the controller log](docs/screenshots/screenshot_live_activity.png)
+
+> Live Activity & Logs (Superuser only): a live, human-readable feed of who did what across the fleet, alongside a tail of the controller's own service log.
+
+## Requirements
+
+- A Linux controller host running **Debian/Ubuntu**, **RHEL/CentOS/Fedora**, or **openSUSE/SLES**, with root access for installation.
+- Python 3, provisioned automatically by the installer along with the rest of the system package list.
+- **For the web console:** Node.js 18+ to build the front end — the installer installs it from your distro (`apt`/`dnf`/`zypper`); it's **build-time only**, so once `webgui/frontend/dist/` exists no Node is needed at run time. Plus any modern browser on a machine that can reach the controller. No desktop environment is needed on the controller itself. (On a distro with no suitable Node package, install Node 18+ from [NodeSource](https://github.com/nodesource/distributions), then `sudo sysible_controller webgui restart` to build.)
+- Managed hosts need either outbound network access for the Sysible agent, or SSH access for the SSH-managed path. The host agent itself only depends on the `requests` library.
+- **Or skip all of the above and run it in Docker** — the only requirement is a working Docker Engine + Compose on the controller host. See [Run as a container](#run-as-a-container-docker) / [`DOCKER.md`](DOCKER.md).
+
+## Installation
+
+```bash
+# from the folder containing the project files
+sudo ./install_sysible.sh
+sudo sysible_controller start          # the controller backend (systemd: sysible-backend)
+sudo sysible_controller webgui start   # the browser console  (systemd: sysible-webgui)
+```
+
+The installer detects your package manager, deploys the project to `/opt/sysible`, sets up a Python virtual environment, generates a self-signed TLS certificate and admin API key, and installs two systemd services — the API backend as **`sysible-backend`** (HTTPS on port 9000) and the browser console as **`sysible-webgui`** (HTTPS on port 8800). It also installs the `sysible_controller` CLI, and installs Node.js/npm and builds the web console front end.
+
+The backend and the web console are **separate, independently started** pieces: `sysible_controller start` brings up only the backend, and `sysible_controller webgui start` brings up the browser console.
+
+When it detects an active firewall (firewalld or ufw) the installer opens ports 9000 and 8800 to everyone so a fresh install is reachable. On an internet-exposed controller you usually want them reachable **only from your management network** — pass `--restrict-firewall` with the source CIDR(s) to scope the rules instead:
+
+```bash
+sudo ./install_sysible.sh --restrict-firewall \
+     --agent-cidr=10.0.0.0/8 \            # who may reach the agent API :9000
+     --admin-cidr=10.0.5.0/24             # who may reach the console  :8800
+```
+
+Both CIDR flags accept a comma-separated list and IPv4 or IPv6. A port whose CIDR list is empty in restrict mode is left open (with a warning) rather than silently locked down, so you can never fence yourself out of the console.
+
+That runs **at install time, and only if a firewall was already active**. Turning a firewall on *afterwards* from **Firewall Administration** preserves the same access, and the rule written differs by role because the traffic does:
+
+- **On the controller** — `9000` and `8800` are kept open **inbound**, and this holds even if the service happens to be stopped at that moment, so a container that was down during the change cannot leave the fleet locked out.
+- **On a managed host** — the agent dials **out** to the controller and nothing ever dials in, so no inbound port is opened. What is preserved is the outbound path to the controller's address, which matters because `ufw` can be set to deny outgoing; every address in a comma-separated `SYSIBLE_CONTROLLER` candidate list is allowed.
+
+sshd's port is kept open on both, asked of `sshd` rather than assumed to be 22. A host that runs no agent gets neither rule.
+
+### Updating
+
+The controller runs out of `/opt/sysible`, which the installer **syncs** from your source checkout — so a bare `git pull` in the checkout doesn't change what's running. To pull the latest code and redeploy in one step:
+
+```bash
+sudo sysible_controller update
+```
+
+This pulls your recorded source checkout (`git pull --ff-only`), re-syncs it into `/opt/sysible` while **preserving your database, admin API key, TLS certificates, host records, SSH keys, and sessions**, refreshes dependencies, rebuilds the web-console front end, and restarts the services. (Re-running `sudo ./install_sysible.sh` from the checkout does the same thing.)
+
+**From the web console (no shell needed).** A superuser can do the same two steps from **Settings → Controller → Software updates**:
+
+- **Update controller** runs the redeploy above in the background (its own transient systemd unit, so it survives restarting the services it's updating) and restarts the backend and web console — you'll be signed out for ~30–60 s, then hard-refresh and sign back in.
+- **Update agents** then pushes the controller's current agent to **every managed host over its existing check-in channel** — no SSH, no re-enrollment. Each host applies it on its next check-in (~1 minute) and restarts its own agent; offline hosts update when they reconnect.
+
+The order matters: *Update controller* first (so the controller holds the new agent), then *Update agents*. You only need *Update agents* when the agent itself changed (e.g. to pick up a new health signal or an agent fix); re-running it otherwise is harmless.
+
+## Run as a container (Docker)
+
+Prefer containers to the native systemd install? The repo ships a **Dockerfile**
+and **`docker compose`** setup that runs the whole controller — the backend API
+and the web console — as one image, with all state on a persistent volume. Full
+details are in **[`DOCKER.md`](DOCKER.md)**; the short version:
+
+```bash
+# Cover the DNS name(s)/IP(s) agents & browsers use to reach this host in the
+# auto-generated TLS cert (agents pin it):
+export SYSIBLE_CONTROLLER_HOSTNAMES="controller.example.com,10.0.0.5"
+
+docker compose up -d --build
+docker compose logs -f          # first run prints the seeded admin password ONCE
+```
+
+Then open **`https://<host>:8800`** and sign in as `admin` with the password
+from the logs (you'll be required to change it). Agents enroll against
+**`https://<host>:9000`**.
+
+- **One image, two services.** `supervisord` runs the backend (`:9000`) and the
+  web console (`:8800`); no Node is needed at run time (the front end is built
+  into the image).
+- **Persistent `/data` volume.** Holds the SQLite database, TLS certs (the
+  pinned cert is generated once and never rotated on restart), the API key, the
+  cookie secret, and portal files — so rebuilding or upgrading the image never
+  loses enrollments. Back it up as a unit (see `DOCKER.md`).
+- **Set your own first password** with `SYSIBLE_ADMIN_PASSWORD` (and
+  `SYSIBLE_ADMIN_USERNAME`) instead of using the generated one.
+- **Regenerate/rotate the cert** later from **Settings → Regenerate
+  certificate** — in a container that restarts the backend via `supervisorctl`,
+  no systemd needed.
+- **Upgrades** are "pull the new image and `docker compose up -d`", not the
+  console's in-place *Update controller* button (that native git-redeploy flow
+  doesn't apply to the immutable image).
+- **Enterprise/Postgres:** point the backend at your database with
+  `SYSIBLE_DB_URL` and it won't use the on-volume SQLite file.
+
+## First launch — your administrator account
+
+The installer **seeds a default superuser** named `admin` on a fresh install (only when no administrator exists yet) with a randomly generated one-time password. That password is printed **once, in red, at the end of the install output** — copy it then. Log in to the web console at `https://<controller>:8800/` as `admin` with that password. Because it's a temporary password, the console **requires you to set a new one before it lets you in** — you'll land on a "set a new password" screen at that first login. If administrators already existed at install time, no default is seeded; create or reset a login with `sudo sysible_controller reset-admin` (see CLI reference), which prints a fresh temporary password the same way (and likewise forces a change at next login).
+
+The first account is a **Superuser** — it can manage other administrators and see the live activity/controller logs. When a superuser later adds another administrator from Sysible Controller Settings, they pick that account's **role** (Superuser, Sysadmin, or read-only Auditor); the new account gets a temporary password and is required to set its own on first login. A superuser can also **reset another administrator's password** from Settings → Administrators (no need to know the old one); that account is then required to change it at next login.
+
+## Logging out
+
+The **web console** header shows who's signed in and a **Log Out** button; it revokes the current session's login token on the controller, clears the browser's session cookie, and returns to the login page — all without affecting the backend or the `sysible-webgui` service, so another administrator can sign straight in. Sessions also expire on their own after a configurable lifetime (12 hours by default).
+
+## CLI reference
+
+```
+sysible_controller {start|stop|restart|update|status|logs|webgui|reset-admin|destroy}
+```
+
+| Command | Root? | What it does |
+|---|---|---|
+| `start` | Yes | Starts the **backend** service and confirms the API is reachable. (The web console is separate — start it on its own.) |
+| `stop` | Yes | Stops the web console, the backend, the portal, and anything still bound to the backend's port. |
+| `restart` | Yes | `stop` then `start`. |
+| `update` | Yes | Pulls the recorded source checkout (`git pull --ff-only`), re-syncs it into `/opt/sysible` (preserving the database, API key, TLS certs, host records, SSH keys, and sessions), refreshes dependencies, rebuilds the web-console front end, and restarts the services. Same as re-running the installer. |
+| `status` | No | Backend systemd status plus web console state. |
+| `logs` | No | Tails the backend's live log stream. |
+| `webgui {start\|stop\|restart\|status\|logs}` | Yes (start/stop/restart) | Controls the browser console's `sysible-webgui` service independently of the backend. `start` builds the front end if needed and serves it over HTTPS on port 8800; `restart` stops then starts it (picking up new code); `status`/`logs` report on it. |
+| `reset-admin [username] [password]` | Yes | Sets (or creates) a web-console administrator's password and prints it once in red. Use when the install-time default was skipped (admins already existed) or a password was lost. Username defaults to `admin`; the password is generated if omitted. The account must change it at next login. |
+| `destroy [--purge]` | Yes | Irreversible uninstall. Requires typing `destroy` to confirm; stops and disables both the `sysible-backend` and `sysible-webgui` services, backs up the database to `/tmp` first, and never touches already-enrolled hosts. `--purge` additionally removes the leftover `/tmp` database backups and the source checkout the installer was run from. |
+
+## Documentation
+
+This **README** and [`SECURITY.md`](SECURITY.md) are the maintained, canonical docs — start here. A bundled HTML reference, [`Sysible_Controller_Documentation.html`](Sysible_Controller_Documentation.html) (with a condensed [`Sysible_Controller_Quickstart.html`](Sysible_Controller_Quickstart.html)), ships alongside them for offline reading; console-specific configuration (environment variables, reverse-proxy/TLS, architecture) lives in [`webgui/README.md`](webgui/README.md). Running the controller in Docker is covered in [`DOCKER.md`](DOCKER.md). Release notes are in [`CHANGELOG.md`](CHANGELOG.md); the API test-suite and how to run it are documented in [`tests/README.md`](tests/README.md) (`pip install -r requirements.txt -r requirements-dev.txt && pytest`).
+
+## Project structure
+
+```
+backend/        FastAPI service: routes, models, services, the SQLite layer (db.py), and the Webserver Portal app
+client/         Shared command-builder + dispatch library (api.py, _api_*.py) reused by the web console
+webgui/         Browser web console — a BFF (server.py) that builds commands via client.*,
+                an action registry (actions.py), a scheduler + alerting, and a React single-page app (frontend/)
+host_agent/     The lightweight agent installed on managed hosts (bundled separately, requests-only)
+tests/          API test-suite (pytest) — auth, RBAC, input validation, injection, rate limiting
+tools/          Standalone maintenance scripts
+install_sysible.sh   Installer (sets up the sysible-backend and sysible-webgui services)
+start_webgui.sh      Web console launcher used by the sysible-webgui service (builds the SPA, enables TLS)
+sysible_controller   The CLI entry point
+version.py      Single source of truth for the installed version
+```
+
+## License & version
+
+Sysible Controller is part of the Sysible Enterprise Software suite. The installed version is read from a single project-root `version.py`, so the web console's **Settings → License & Version** section is always accurate.

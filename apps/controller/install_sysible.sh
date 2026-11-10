@@ -1,0 +1,695 @@
+#!/bin/bash
+set -e
+
+echo "Installing Sysible Controller..."
+
+BASE="/opt/sysible"
+VENV="$BASE/venv"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Run as root"
+  exit 1
+fi
+
+# =========================================================
+# COMMAND-LINE FLAGS
+# By default the installer opens the controller's ports to everyone once it
+# detects an active firewall (see the firewall section near the end). That is
+# the safe-to-reach default, but on an internet-exposed box you usually want
+# the agent API (:9000) and the console (:8800) reachable ONLY from your
+# management network. --restrict-firewall switches to scoped rules for that.
+#
+#   --restrict-firewall          Scope the opened ports to the CIDRs below
+#                                instead of opening them to the whole world.
+#   --agent-cidr=<cidr[,cidr]>   Source(s) allowed to reach the agent API :9000
+#   --admin-cidr=<cidr[,cidr]>   Source(s) allowed to reach the console :8800
+#
+# Opt-in only: without --restrict-firewall the behaviour is unchanged. A port
+# whose CIDR list is empty in restrict mode is left OPEN (with a warning) rather
+# than silently locked down, so you can never fence yourself out of the console.
+# =========================================================
+RESTRICT_FIREWALL=0
+AGENT_CIDR=""
+ADMIN_CIDR=""
+# Optional mutual-TLS (client-certificate auth) on the controller API :9000.
+# OFF by default; enabled with --mtls (or SYSIBLE_MTLS_ENABLED=1). Requires a CA
+# that signed the client certs the BFF/CLI will present.
+MTLS_ENABLED="${SYSIBLE_MTLS_ENABLED:-0}"
+MTLS_CA="${SYSIBLE_MTLS_CA:-}"
+MTLS_MODE="${SYSIBLE_MTLS_MODE:-required}"   # required|optional
+for arg in "$@"; do
+  case "$arg" in
+    --restrict-firewall) RESTRICT_FIREWALL=1 ;;
+    --agent-cidr=*)      AGENT_CIDR="${arg#*=}" ;;
+    --admin-cidr=*)      ADMIN_CIDR="${arg#*=}" ;;
+    --mtls)              MTLS_ENABLED=1 ;;
+    --mtls-ca=*)         MTLS_CA="${arg#*=}"; MTLS_ENABLED=1 ;;
+    --mtls-mode=*)       MTLS_MODE="${arg#*=}" ;;
+    -h|--help)
+      echo "Usage: $0 [--restrict-firewall --agent-cidr=CIDR[,CIDR] --admin-cidr=CIDR[,CIDR]]"
+      echo "          [--mtls --mtls-ca=/path/to/client-ca.crt [--mtls-mode=required|optional]]"
+      echo "  --restrict-firewall  scope opened ports to the given CIDRs (default: open to all)"
+      echo "  --agent-cidr=CIDR    source(s) allowed to reach the agent API on :9000"
+      echo "  --admin-cidr=CIDR    source(s) allowed to reach the web console on :8800"
+      echo "  --mtls               require client certificates on the controller API :9000"
+      echo "  --mtls-ca=PATH       CA that signed the client certs (required with --mtls)"
+      echo "  --mtls-mode=MODE     required (default) rejects certless clients; optional logs only"
+      exit 0 ;;
+    *) echo "WARNING: ignoring unknown argument '$arg'" ;;
+  esac
+done
+case "$MTLS_ENABLED" in 1|true|yes|on|TRUE|Yes|On) MTLS_ENABLED=1 ;; *) MTLS_ENABLED=0 ;; esac
+if [[ "$RESTRICT_FIREWALL" == "1" && -z "$AGENT_CIDR" && -z "$ADMIN_CIDR" ]]; then
+  echo "WARNING: --restrict-firewall given without --agent-cidr/--admin-cidr;"
+  echo "         nothing to scope, so ports will be opened to all as usual."
+  RESTRICT_FIREWALL=0
+fi
+
+# =========================================================
+# DETECT PACKAGE MANAGER / OS FAMILY
+# Sysible Controller itself (this installer's own dependencies)
+# now supports RHEL/CentOS/Fedora (dnf, falling back to yum on
+# older releases), openSUSE/SLES (zypper), and Debian/Ubuntu
+# (apt) - the same dnf > yum > zypper > apt-get detection order
+# used at runtime for managed-host package commands (see
+# client/api.py's _pkgmgr_detect_fragment()), so "which package
+# manager does this machine use" is answered the same way
+# whether it's the controller host or a host the controller
+# manages. Package names differ slightly across the three
+# families (e.g. python3-devel vs python3-dev, and Debian/Ubuntu
+# splits venv into its own python3-venv package while Fedora/
+# RHEL/SUSE bundle it into python3 already), so each branch has
+# its own explicit list.
+# =========================================================
+if command -v dnf >/dev/null 2>&1; then
+  PKGMGR=dnf
+elif command -v yum >/dev/null 2>&1; then
+  PKGMGR=yum
+elif command -v zypper >/dev/null 2>&1; then
+  PKGMGR=zypper
+elif command -v apt-get >/dev/null 2>&1; then
+  PKGMGR=apt-get
+else
+  echo "No supported package manager found (looked for dnf, yum, zypper, apt-get)."
+  exit 1
+fi
+
+echo "Detected package manager: $PKGMGR"
+
+case "$PKGMGR" in
+  dnf|yum)
+    "$PKGMGR" install -y \
+      python3 \
+      python3-pip \
+      python3-devel \
+      gcc \
+      passwd \
+      util-linux \
+      systemd \
+      procps-ng \
+      curl \
+      sqlite \
+      libffi-devel \
+      rsync \
+      lsof \
+      openssl
+    ;;
+  zypper)
+    zypper --non-interactive refresh
+    # --non-interactive already auto-confirms; do NOT add -y (an apt/dnf
+    # idiom). -y is only a zypper alias since the 1.14 line (SLE/Leap 15),
+    # so on older zypper it errors and, under `set -e`, aborts the install.
+    zypper --non-interactive install \
+      python3 \
+      python3-pip \
+      python3-devel \
+      gcc \
+      passwd \
+      util-linux \
+      systemd \
+      procps \
+      curl \
+      sqlite3 \
+      libffi-devel \
+      rsync \
+      lsof \
+      openssl
+    ;;
+  apt-get)
+    apt update
+
+    apt install -y \
+      python3 \
+      python3-pip \
+      python3-venv \
+      python3-dev \
+      gcc \
+      passwd \
+      util-linux \
+      systemd \
+      procps \
+      curl \
+      sqlite3 \
+      libffi-dev \
+      rsync \
+      lsof \
+      openssl
+    ;;
+esac
+
+# =========================================================
+# NODE.JS / npm for building the web console front end.
+# The React console ships as source and is compiled to webgui/frontend/dist at
+# install time (and rebuilt on update). Without npm the build step below is
+# skipped and the web console only serves a "frontend not built" placeholder -
+# which is exactly what bit headless boxes like a Raspberry Pi. Install it here.
+# Best-effort (package names vary; under `set -e` a missing package must not
+# abort the install) - the controller backend works regardless, and Node 18+
+# is needed for the Vite build.
+# =========================================================
+echo "Installing Node.js/npm for the web console front end..."
+if ! command -v npm >/dev/null 2>&1; then
+  case "$PKGMGR" in
+    dnf|yum)  "$PKGMGR" install -y nodejs npm || true ;;
+    zypper)   zypper --non-interactive install nodejs npm \
+                || zypper --non-interactive install nodejs20 npm20 \
+                || zypper --non-interactive install nodejs18 npm18 || true ;;
+    apt-get)  apt install -y nodejs npm || true ;;
+  esac
+fi
+if command -v npm >/dev/null 2>&1; then
+  echo "Node.js $(node --version 2>/dev/null) / npm $(npm --version 2>/dev/null) available - the web console will be built."
+else
+  echo "NOTE: Node.js/npm not installed (no distro package found) - the web console"
+  echo "      front end can't be built here. Install Node 18+ (e.g. via NodeSource:"
+  echo "      https://github.com/nodesource/distributions), then run"
+  echo "      'sudo sysible_controller webgui restart' to build and start it."
+fi
+
+# =========================================================
+# DEPLOY PROJECT FILES TO BASE
+# Sysible Controller always runs out of $BASE - the sysible CLI
+# hardcodes it. This installer can be run
+# from anywhere (e.g. a freshly transferred ~/Documents/sysible_v2
+# folder); if it's not already sitting at $BASE, sync it there.
+# --delete keeps re-installs (code updates) from leaving stale
+# files behind, but the excludes protect anything already
+# running: the venv, the live database, the admin API key, logs.
+# =========================================================
+mkdir -p "$BASE"
+
+if [[ "$SRC_DIR" != "$BASE" ]]; then
+  echo "Copying project files from $SRC_DIR to $BASE..."
+  rsync -a --delete \
+    --exclude venv \
+    --exclude run \
+    --exclude logs \
+    --exclude '*.db' \
+    --exclude api_key.txt \
+    --exclude hosts.json \
+    --exclude remote_keys \
+    --exclude agent_state.json \
+    --exclude certs \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.git' \
+    --exclude node_modules \
+    "$SRC_DIR"/ "$BASE"/
+fi
+
+# Record the source checkout path so `destroy --purge` can remove it too.
+if [[ "$SRC_DIR" != "$BASE" ]]; then
+  echo "$SRC_DIR" > "$BASE/.install_src" 2>/dev/null || true
+fi
+
+cd "$BASE"
+
+python3 -m venv "$VENV"
+source "$VENV/bin/activate"
+
+pip install --upgrade pip
+pip install -r "$BASE/requirements.txt"
+
+# =========================================================
+# WEB CONSOLE (browser-based, headless-friendly)
+# Extra Python deps the BFF needs, plus a production build of the React
+# front end so 'sysible_controller start' can serve it immediately.
+# Best-effort: if Node isn't present the controller is unaffected - the
+# web console self-heals (builds) on its first start instead.
+# =========================================================
+if [[ -f "$BASE/webgui/requirements.txt" ]]; then
+  echo "Installing web console Python dependencies..."
+  pip install -r "$BASE/webgui/requirements.txt"
+fi
+if [[ -d "$BASE/webgui/frontend" ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "Building web console front end (npm)..."
+    ( cd "$BASE/webgui/frontend" && npm install --no-audit --no-fund && npm run build ) \
+      || echo "WARNING: web console front-end build failed - it will be retried on first 'sysible_controller webgui start'."
+  else
+    echo "NOTE: Node.js/npm not found - skipping web console front-end build."
+    echo "      Install Node 18+, then run 'sysible_controller webgui start' to build it."
+  fi
+fi
+
+chmod +x "$BASE/sysible_controller"
+
+# =========================================================
+# PROVISION THE TLS CERTIFICATE
+# The API used to be plain HTTP, which put the admin API key,
+# SSH enrollment passwords, and password hashes on the wire in
+# the clear. sysible_controller now requires a cert/key pair to
+# launch uvicorn with TLS. There's no public domain on a LAN
+# deployment, so a CA-signed cert isn't an option - generate a
+# self-signed one instead, scoped to localhost/127.0.0.1 plus
+# whatever LAN IP and hostname this machine currently has.
+#
+# Only generated if missing, so re-running the installer (e.g.
+# a code redeploy) never rotates - and breaks - a cert that's
+# already been copied out to agents for pinning.
+# =========================================================
+CERT_DIR="$BASE/certs"
+CERT_FILE="$CERT_DIR/server.crt"
+KEY_FILE="$CERT_DIR/server.key"
+
+if [[ ! -f "$CERT_FILE" || ! -f "$KEY_FILE" ]]; then
+  echo "Generating self-signed TLS certificate..."
+  mkdir -p "$CERT_DIR"
+
+  # Every IP `hostname -I` reports, not just the first - Controller
+  # Configuration's "All Detected IPs (failover)" address mode can ship
+  # an agent bundle pointed at any of this machine's NICs, and TLS
+  # hostname/SAN verification (requests' verify=<ca file>) checks
+  # whichever address is actually in the request URL, so the cert has
+  # to cover every one of them up front or failover to a non-first NIC
+  # would otherwise fail verification.
+  SAN="DNS:localhost,IP:127.0.0.1,DNS:$(hostname)"
+  for ip in $(hostname -I 2>/dev/null); do
+    SAN="$SAN,IP:$ip"
+  done
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEY_FILE" \
+    -out "$CERT_FILE" \
+    -days 3650 \
+    -subj "/CN=sysible-controller" \
+    -addext "subjectAltName=$SAN"
+
+  chmod 600 "$KEY_FILE"
+  chmod 644 "$CERT_FILE"
+else
+  echo "TLS certificate already present, leaving it in place."
+fi
+
+# trust.crt is the trust anchor copied out to agents for
+# pinning (see backend/tls_manager.py) - distinct from CERT_FILE once an
+# externally-issued PKI cert is installed via Sysible Settings, since a
+# PKI leaf does not verify against itself the way a self-signed one
+# does. For the default self-signed case above, the leaf IS its own
+# valid anchor, so just seed trust.crt as a copy of it. Only done if
+# missing, same as the cert itself - never clobbers an already-installed
+# PKI trust.crt on a redeploy.
+TRUST_FILE="$CERT_DIR/trust.crt"
+if [[ -f "$CERT_FILE" && ! -f "$TRUST_FILE" ]]; then
+  cp -f "$CERT_FILE" "$TRUST_FILE"
+  chmod 644 "$TRUST_FILE"
+fi
+
+# =========================================================
+# OPTIONAL MUTUAL TLS (client-certificate auth) on the API :9000
+# The systemd unit sources $BASE/mtls.env at runtime and passes
+# $SYSIBLE_MTLS_ARGS to uvicorn. We only WRITE that file when --mtls is
+# requested (never delete it on a plain redeploy, so an operator's manual
+# mTLS config survives), and we validate the CA first so a fresh install can't
+# be left unable to start. Turn mTLS OFF by emptying/removing mtls.env and
+# restarting. The clients that call the API (BFF/CLI) must present a cert signed
+# by this CA — set SYSIBLE_CLIENT_CERT / SYSIBLE_CLIENT_KEY for them (see
+# client/api.py and SECURITY.md).
+# =========================================================
+MTLS_ENV_FILE="$BASE/mtls.env"
+if [[ "$MTLS_ENABLED" == "1" ]]; then
+  if [[ -z "$MTLS_CA" || ! -f "$MTLS_CA" ]]; then
+    if [[ "$MTLS_MODE" == "optional" ]]; then
+      echo "WARNING: --mtls (optional) requested but --mtls-ca is missing or unreadable"
+      echo "         ('$MTLS_CA'). Skipping mTLS setup; re-run with a valid"
+      echo "         --mtls-ca=/path/to/client-ca.crt to enable it."
+    else
+      # FAIL CLOSED: the operator explicitly asked for REQUIRED client-cert auth.
+      # Silently continuing without it would leave them believing mTLS is on when
+      # it is not, so refuse rather than start server-auth-only.
+      echo "ERROR: --mtls (required) needs a readable --mtls-ca, but '$MTLS_CA' is" >&2
+      echo "       missing or unreadable. Refusing to continue WITHOUT the client-cert" >&2
+      echo "       auth you asked for. Provide the CA and re-run, or use" >&2
+      echo "       --mtls-mode=optional for a staged rollout that logs but still admits" >&2
+      echo "       certless clients." >&2
+      exit 1
+    fi
+  else
+    case "$MTLS_MODE" in
+      optional) _REQS=1 ;;
+      required|*) _REQS=2 ;;
+    esac
+    # Copy the CA into the cert dir (0644) so it lives with the other TLS material
+    # and survives the source checkout going away.
+    MTLS_CA_DEST="$CERT_DIR/mtls_ca.crt"
+    cp -f "$MTLS_CA" "$MTLS_CA_DEST"
+    chmod 644 "$MTLS_CA_DEST"
+    printf '%s\n' \
+      "# Sysible controller mutual-TLS args for uvicorn (managed by install_sysible.sh --mtls)." \
+      "# Empty this file (or remove it) and restart to turn mTLS OFF." \
+      "SYSIBLE_MTLS_ARGS=--ssl-cert-reqs $_REQS --ssl-ca-certs $MTLS_CA_DEST" \
+      > "$MTLS_ENV_FILE"
+    chmod 600 "$MTLS_ENV_FILE"
+    echo "Mutual TLS ENABLED (mode=$MTLS_MODE): clients must present a cert signed by"
+    echo "  $MTLS_CA_DEST. Configure SYSIBLE_CLIENT_CERT/SYSIBLE_CLIENT_KEY on the console"
+    echo "  and any CLI/agent that calls the API, then restart the backend."
+  fi
+fi
+
+# =========================================================
+# PROVISION THE ADMIN API KEY
+# Every admin/API endpoint requires this key (X-API-Key header).
+# Generate it now (mode 600) so it exists with the right
+# permissions before the service is ever started; the backend
+# will also auto-generate it on first run if it's missing.
+# =========================================================
+export PYTHONPATH="$BASE"
+
+python3 -c "from backend.auth import get_or_create_api_key; get_or_create_api_key()"
+
+# =========================================================
+# INSTALL THE BACKEND AS A SYSTEMD SERVICE
+# Running the API from a foreground script meant it died with
+# whatever terminal/session launched it, and didn't come back on its
+# own after a crash or reboot. This mirrors the same pattern already
+# used for managed hosts' agent (sysible-agent, see
+# backend/agent_bundle.py's _systemd_unit()): a real systemd unit,
+# restarted automatically, logs to the journal instead of a shell.
+#
+# Only (re)written if missing or different, so a redeploy never
+# clobbers an admin's local edits to the unit file. Enabled but not
+# started here - bringing it up is a separate step, via
+# `sysible_controller start`.
+# =========================================================
+SERVICE_FILE="/etc/systemd/system/sysible-backend.service"
+
+NEW_UNIT="[Unit]
+Description=Sysible Controller backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BASE
+Environment=PYTHONPATH=$BASE
+# Optional mutual-TLS args, sourced at RUNTIME from mtls.env if present (the '-'
+# makes a missing file a no-op). Empty/absent => mTLS OFF (server-auth TLS only).
+# Managed by 'install_sysible.sh --mtls'; see SECURITY.md. Single-\$ so systemd
+# splits it into separate uvicorn args on whitespace.
+EnvironmentFile=-$BASE/mtls.env
+# Bind address for the controller API. Defaults to 0.0.0.0 because remote agents
+# connect here — but this port also carries the admin/console surface (behind the
+# root-only API key). HARDENING: set SYSIBLE_CONTROLLER_BIND to a specific NIC IP
+# before install to bind only that interface, and firewall :9000 to your management
+# + agent networks. (Resolved at install time; edit this ExecStart to change later.)
+ExecStart=$VENV/bin/uvicorn backend.app:app --host ${SYSIBLE_CONTROLLER_BIND:-0.0.0.0} --port 9000 --ssl-keyfile $KEY_FILE --ssl-certfile $CERT_FILE \$SYSIBLE_MTLS_ARGS --log-level info
+Restart=always
+RestartSec=5
+User=root
+# Baseline systemd hardening. These directives don't restrict the file
+# writes, process exec (systemctl/systemd-run), or networking this service
+# needs, so they're safe to ship on by default. Fuller confinement
+# (NoNewPrivileges, ProtectSystem=strict, SystemCallFilter, a locked-down
+# CapabilityBoundingSet) is recommended but must be validated per-site since
+# the controller execs privileged host tooling — see SECURITY.md.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+"
+
+if [[ ! -f "$SERVICE_FILE" ]] || [[ "$(cat "$SERVICE_FILE")" != "$NEW_UNIT" ]]; then
+  echo "Installing systemd service (sysible-backend)..."
+  echo "$NEW_UNIT" > "$SERVICE_FILE"
+  systemctl daemon-reload
+  systemctl enable sysible-backend.service
+else
+  echo "systemd service already up to date."
+fi
+
+# =========================================================
+# DEFAULT WEB-CONSOLE ADMIN
+# On a fresh install there's no first-run wizard to create the first
+# administrator, so the browser console would have nothing to log in with.
+# Seed a default superuser (only when NO administrators exist yet) with a
+# random password, flagged must-change. Printed once at the end of install.
+# =========================================================
+DEFAULT_ADMIN_USER="admin"
+DEFAULT_ADMIN_PASS=""
+# Seed the default superuser. Everything DB-touching (count, password-policy read,
+# insert) lives in ONE Python call that catches errors and prints an explicit
+# "dberror" instead of dying silently — a silent miss used to be misreported below as
+# "admins already exist", which would hide a fresh install left with no console login.
+# The password is generated inside that call (with a DB-free fallback) and returned on
+# stdout line 2, so it never touches argv (/proc/<pid>/cmdline is world-readable).
+SEEDED_ADMIN="dberror"
+# First-run admin is created in the BROWSER: on an empty database the console
+# shows a "create your administrator" screen (/admin/setup), so the operator
+# picks their own username + password. We ONLY pre-seed here for UNATTENDED
+# installs, when SYSIBLE_ADMIN_PASSWORD is set; otherwise skip seeding and let the
+# browser setup wizard own first-run. The password is read from the environment
+# (never argv — /proc/<pid>/cmdline is world-readable).
+if [[ -z "${SYSIBLE_ADMIN_PASSWORD:-}" ]]; then
+  SEEDED_ADMIN="wizard"
+else
+for _try in $(seq 1 15); do
+  _seed_out="$($VENV/bin/python - "$DEFAULT_ADMIN_USER" <<'PY'
+import os, sys
+try:
+    from backend.db import count_administrators, add_administrator
+    from backend import portal_auth
+    if count_administrators() != 0:
+        print("exists"); sys.exit(0)
+    pw = os.environ.get("SYSIBLE_ADMIN_PASSWORD") or ""
+    salt, h = portal_auth.hash_password(pw)
+    # Operator-chosen password => no forced change (they picked it deliberately).
+    add_administrator(sys.argv[1], h, salt, must_change_password=0,
+                      created_by="installer", role="superuser")
+    print("created")
+except Exception as e:
+    sys.stderr.write("admin seed: %s\n" % e)
+    print("dberror")
+PY
+)"
+  _seed_status="$(printf '%s\n' "$_seed_out" | sed -n 1p)"
+  if [[ "$_seed_status" == "created" ]]; then
+    SEEDED_ADMIN="created"
+    break
+  elif [[ "$_seed_status" == "exists" ]]; then
+    SEEDED_ADMIN="exists"
+    break
+  fi
+  sleep 2   # datastore not reachable yet — wait and retry
+done
+fi
+
+# =========================================================
+# INSTALL THE WEB CONSOLE AS ITS OWN SYSTEMD SERVICE
+# Separate from the backend, with its own start/stop
+# (sysible_controller webgui start|stop). Runs start_webgui.sh, which handles
+# the cookie secret, TLS, and a first-run front-end build.
+# =========================================================
+WEBGUI_SERVICE_FILE="/etc/systemd/system/sysible-webgui.service"
+WEBGUI_UNIT="[Unit]
+Description=Sysible Web Console
+After=network-online.target sysible-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BASE
+Environment=PYTHON=$VENV/bin/python
+ExecStart=$BASE/start_webgui.sh
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"
+if [[ ! -f "$WEBGUI_SERVICE_FILE" ]] || [[ "$(cat "$WEBGUI_SERVICE_FILE")" != "$WEBGUI_UNIT" ]]; then
+  echo "Installing systemd service (sysible-webgui)..."
+  echo "$WEBGUI_UNIT" > "$WEBGUI_SERVICE_FILE"
+  systemctl daemon-reload
+fi
+# Enable the web console unit at install (like the backend), so it comes back on
+# reboot even if the admin only ever ran `sysible_controller start`. Enabled, not
+# started -- bringing it up stays a separate `sysible_controller webgui start`.
+systemctl enable sysible-webgui.service 2>/dev/null || true
+chmod +x "$BASE/start_webgui.sh" 2>/dev/null || true
+
+# =========================================================
+# INSTALL THE `sysible_controller` CLI
+# Single global command (start/stop/restart/status/logs/webgui/destroy)
+# - see ./sysible_controller. Named after the product (Sysible
+# Controller, one product under the Sysible Enterprise Software
+# suite).
+# =========================================================
+echo "Installing sysible_controller CLI to /usr/local/bin/sysible_controller..."
+cp -f "$BASE/sysible_controller" /usr/local/bin/sysible_controller
+# Explicit 755, not `chmod +x`: under a hardened root umask (e.g. 077) the freshly
+# copied file is 600 and a bare `+x` only adds OWNER execute (the other bits are
+# masked out), leaving the command root-only (rwx------). That makes it undiscoverable
+# to non-root users, who then see "Permission denied"/"command not found" instead of
+# the usage banner. The CLI itself gates every privileged subcommand with _require_root,
+# and its source ships in the repo, so world-readable/executable is correct here.
+chmod 755 /usr/local/bin/sysible_controller
+
+# =========================================================
+# RUNTIME DIR (portal.pid, last_update.{json,log}, web-console secret)
+# $BASE is root-owned from this installer running as root; every
+# process that writes here - the backend, the web console, and the
+# portal - runs as root under systemd, so a plain root-owned run dir
+# is all that's needed.
+# =========================================================
+mkdir -p "$BASE/run"
+chmod 750 "$BASE/run"
+
+# Owner-only on the whole install tree. Everything under $BASE (the SQLite DB
+# with admin hashes/agent secrets/live tokens, the API key, TLS private key,
+# SSH keys, sudo-store key) is read only by the root-run services, so no other
+# local account should be able to traverse in and read them.
+chmod 700 "$BASE"
+
+# =========================================================
+# OPEN THE CONTROLLER'S OWN FIREWALL PORTS
+# The agent API (9000) and the web console (8800) must be reachable, but on
+# RHEL/Rocky/SLES firewalld is enabled by default and blocks them, so a fresh
+# install was silently unreachable until the admin opened the ports by hand.
+# Open them here when a firewall is active. Best-effort (never abort the install
+# under `set -e`); if no supported firewall is managing the host, just print the
+# commands so the admin can open them on whatever they run.
+# =========================================================
+BACKEND_PORT=9000
+CONSOLE_PORT=8800
+
+# firewalld: scope a port to a comma-separated CIDR list via rich rules, or -
+# when the list is empty - open it to all with --add-port. A rich rule with a
+# source+port accept only admits that source; the port is NOT globally open
+# unless we also --add-port, so restrict mode deliberately skips --add-port.
+_fwd_port() {  # $1=port  $2=comma-separated CIDRs (may be empty)
+  local port="$1" cidrs="$2"
+  if [[ -z "$cidrs" ]]; then
+    echo "  firewalld: opening ${port}/tcp to all"
+    firewall-cmd --permanent --add-port=${port}/tcp >/dev/null 2>&1 || true
+    return
+  fi
+  local IFS=','; local c fam
+  for c in $cidrs; do
+    [[ -z "$c" ]] && continue
+    fam=ipv4; [[ "$c" == *:* ]] && fam=ipv6
+    echo "  firewalld: allowing ${c} -> ${port}/tcp"
+    firewall-cmd --permanent --add-rich-rule="rule family=${fam} source address=${c} port port=${port} protocol=tcp accept" >/dev/null 2>&1 || true
+  done
+}
+_ufw_port() {  # $1=port  $2=comma-separated CIDRs (may be empty)
+  local port="$1" cidrs="$2"
+  if [[ -z "$cidrs" ]]; then
+    echo "  ufw: opening ${port}/tcp to all"
+    ufw allow ${port}/tcp >/dev/null 2>&1 || true
+    return
+  fi
+  local IFS=','; local c
+  for c in $cidrs; do
+    [[ -z "$c" ]] && continue
+    echo "  ufw: allowing ${c} -> ${port}/tcp"
+    ufw allow from "$c" to any port ${port} proto tcp >/dev/null 2>&1 || true
+  done
+}
+
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  if [[ "$RESTRICT_FIREWALL" == "1" ]]; then
+    echo "Scoping firewalld ports (restrict mode)..."
+    _fwd_port "$BACKEND_PORT" "$AGENT_CIDR"
+    _fwd_port "$CONSOLE_PORT" "$ADMIN_CIDR"
+  else
+    echo "Opening firewalld ports ${BACKEND_PORT}/tcp and ${CONSOLE_PORT}/tcp..."
+    _fwd_port "$BACKEND_PORT" ""
+    _fwd_port "$CONSOLE_PORT" ""
+  fi
+  firewall-cmd --reload >/dev/null 2>&1 || true
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+  if [[ "$RESTRICT_FIREWALL" == "1" ]]; then
+    echo "Scoping ufw ports (restrict mode)..."
+    _ufw_port "$BACKEND_PORT" "$AGENT_CIDR"
+    _ufw_port "$CONSOLE_PORT" "$ADMIN_CIDR"
+  else
+    echo "Opening ufw ports ${BACKEND_PORT}/tcp and ${CONSOLE_PORT}/tcp..."
+    _ufw_port "$BACKEND_PORT" ""
+    _ufw_port "$CONSOLE_PORT" ""
+  fi
+else
+  echo "NOTE: no active firewalld/ufw detected. If a firewall is in front of this host,"
+  if [[ "$RESTRICT_FIREWALL" == "1" ]]; then
+    echo "      scope TCP ${BACKEND_PORT} (agent API) to ${AGENT_CIDR:-<your agents>} and"
+    echo "      TCP ${CONSOLE_PORT} (web console) to ${ADMIN_CIDR:-<your admins>} manually."
+  else
+    echo "      open TCP ${BACKEND_PORT} (agent API) and ${CONSOLE_PORT} (web console) manually."
+  fi
+fi
+
+echo ""
+echo "Installation complete"
+echo "Installed to: $BASE"
+echo "Admin API key: $BASE/api_key.txt (mode 600, root-only)"
+echo "TLS certificate: $CERT_FILE"
+echo ""
+echo "Sysible Controller now serves HTTPS only. Copy $CERT_FILE (not server.key) to:"
+echo "  - every host you run host_agent/agent.py on"
+echo "and point them at it with the SYSIBLE_CA_CERT env var so they can"
+echo "verify this controller instead of trusting it blindly."
+echo ""
+echo "==================================================================="
+echo " SERVICES (each started separately):"
+echo "   Controller backend : sudo sysible_controller start"
+echo "   Web console        : sudo sysible_controller webgui start   ->  https://<this-host>:8800/"
+echo "==================================================================="
+if [[ "$SEEDED_ADMIN" == "created" ]]; then
+  echo ""
+  echo " WEB CONSOLE LOGIN: administrator '$DEFAULT_ADMIN_USER' was pre-seeded from"
+  echo " SYSIBLE_ADMIN_PASSWORD. Sign in at https://<this-host>:8800/ and change it"
+  echo " in Settings -> My Account."
+  echo ""
+elif [[ "$SEEDED_ADMIN" == "wizard" ]]; then
+  echo ""
+  echo " WEB CONSOLE FIRST-RUN: open https://<this-host>:8800/ — the console will"
+  echo " prompt you to create your administrator account (you choose the password)."
+  echo ""
+elif [[ "$SEEDED_ADMIN" == "exists" ]]; then
+  echo ""
+  echo " Administrators already exist, so no default was created. To set a web"
+  echo " console login password, run:  sudo sysible_controller reset-admin"
+  echo ""
+else
+  # DB was unreachable while seeding — do NOT claim admins already exist (that would
+  # hide a fresh install left with no console login). Tell the operator plainly.
+  R='\033[1;91m'; Z='\033[0m'
+  echo ""
+  echo -e "${R} WARNING: could not create the default web-console admin — the database${Z}"
+  echo -e "${R} was not reachable during install. No console login exists yet. Check that${Z}"
+  echo -e "${R} the datastore is up and the controller can reach it, then run:${Z}"
+  echo -e "${R}     sudo sysible_controller reset-admin${Z}"
+  echo ""
+fi
+echo "Run: sudo sysible_controller start  &&  sudo sysible_controller webgui start"
+echo ""
+echo "On first start the controller enrolls ITSELF as a managed host (a privileged"
+echo "local agent), so it appears in the fleet like any other box. Opt out with"
+echo "SYSIBLE_NO_SELF_ENROLL=1, or add it later with: sudo sysible_controller self-enroll"

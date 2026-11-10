@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Push a vendored app out to its standalone repository.
+
+The three apps under apps/ are developed HERE. Their standalone repositories are
+publish targets: when a change is finished, this sends it there as one commit.
+
+    tools/publish-app --status             what has drifted, in both directions
+    tools/publish-app controller           publish one app
+    tools/publish-app --all                publish every app that has changed
+    tools/publish-app connect --dry-run    say what would go; change nothing
+
+What it does, for one app:
+
+  1. clones the target repo into a temporary directory (shallow, its branch only)
+  2. replaces its tracked files with this tree's apps/<key>/ contents
+  3. commits, if anything differs, and pushes
+  4. records the new commit in apps/VENDORED.json
+
+Step 2 is a REPLACE, not a merge. That is the whole point of the layout and the
+reason it is spelled out here: a change made directly in the standalone repo and
+not brought back here is overwritten by the next publish. `--status` is what
+tells you that has happened BEFORE this does it -- it refuses to publish over a
+target whose commit is not the one VENDORED.json recorded, unless you pass
+--force.
+
+Nothing here needs to run on the platform host. It is a developer tool.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANIFEST = os.path.join(REPO, "apps", "VENDORED.json")
+
+
+def _load() -> dict:
+    with open(MANIFEST, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save(doc: dict) -> None:
+    with open(MANIFEST, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
+def _run(argv, cwd=None, check=True, quiet=False):
+    if not quiet:
+        print("   $", " ".join(argv))
+    return subprocess.run(argv, cwd=cwd, check=check, text=True,
+                          capture_output=True)
+
+
+def _remote_head(url: str, branch: str) -> str | None:
+    """The target branch's current commit, without cloning."""
+    try:
+        out = _run(["git", "ls-remote", url, f"refs/heads/{branch}"],
+                   quiet=True).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"   ! could not reach {url}: {e.stderr.strip().splitlines()[-1:]}")
+        return None
+    return out.split()[0] if out else None
+
+
+def _copy_tree(src: str, dst: str) -> None:
+    """Replace dst's working tree with src's, keeping .git.
+
+    Deleting first is deliberate: a file REMOVED here has to disappear there
+    too, and a copy-over-the-top would leave it behind forever.
+    """
+    for name in os.listdir(dst):
+        if name == ".git":
+            continue
+        path = os.path.join(dst, name)
+        shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+    for name in os.listdir(src):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        shutil.copytree(s, d) if os.path.isdir(s) else shutil.copy2(s, d)
+
+
+def status(doc: dict, keys: list[str]) -> int:
+    worst = 0
+    for key in keys:
+        app = doc["apps"][key]
+        here = os.path.join(REPO, "apps", key)
+        if not os.path.isdir(here):
+            print(f"{key}: MISSING -- apps/{key} is not in this tree")
+            worst = 2
+            continue
+        head = _remote_head(app["repo"], app["branch"])
+        known = app["commit"]
+        if head is None:
+            print(f"{key}: could not reach its repo")
+            worst = max(worst, 2)
+        elif head.startswith(known) or known.startswith(head[:len(known)]):
+            print(f"{key}: target at {head[:12]}, as recorded")
+        else:
+            print(f"{key}: DRIFTED -- target is at {head[:12]}, this tree was "
+                  f"last synced with {known}. Someone pushed to the standalone "
+                  f"repo. Publishing would overwrite it; look at it first.")
+            worst = max(worst, 1)
+    return worst
+
+
+def publish(doc: dict, key: str, dry_run: bool, force: bool, message: str) -> int:
+    app = doc["apps"][key]
+    here = os.path.join(REPO, "apps", key)
+    if not os.path.isdir(here):
+        print(f"{key}: apps/{key} is not in this tree")
+        return 2
+    print(f"== {key} -> {app['repo']} ({app['branch']})")
+    head = _remote_head(app["repo"], app["branch"])
+    if head and not (head.startswith(app["commit"])
+                     or app["commit"].startswith(head[:len(app["commit"])])):
+        print(f"   target is at {head[:12]}; last synced {app['commit']}")
+        if not force:
+            print("   REFUSED: the standalone repo moved since this tree last "
+                  "synced with it, and publishing REPLACES its tree. Look at "
+                  "what changed there, bring it in here, then publish. "
+                  "--force overrides.")
+            return 1
+        print("   --force given; its commit stays in history, its files do not")
+    tmp = tempfile.mkdtemp(prefix=f"publish-{key}-")
+    try:
+        clone = os.path.join(tmp, "repo")
+        _run(["git", "clone", "--depth", "1", "--branch", app["branch"],
+              app["repo"], clone])
+        _copy_tree(here, clone)
+        _run(["git", "add", "-A"], cwd=clone)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=clone)
+        if diff.returncode == 0:
+            print("   nothing to publish -- the target already matches")
+            return 0
+        changed = _run(["git", "diff", "--cached", "--stat"], cwd=clone,
+                       quiet=True).stdout.strip().splitlines()
+        for line in changed[-12:]:
+            print("   ", line)
+        if dry_run:
+            print("   --dry-run: not committing, not pushing")
+            return 0
+        _run(["git", "commit", "-m", message], cwd=clone)
+        _run(["git", "push", "origin", app["branch"]], cwd=clone)
+        new = _run(["git", "rev-parse", "HEAD"], cwd=clone, quiet=True).stdout.strip()
+        app["commit"] = new[:12]
+        _save(doc)
+        print(f"   published; apps/VENDORED.json now records {new[:12]}")
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"   FAILED: {' '.join(e.cmd)}\n{e.stderr.strip()}")
+        return 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main() -> int:
+    doc = _load()
+    known = sorted(doc["apps"])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("app", nargs="?", choices=known,
+                    help="which app to publish")
+    ap.add_argument("--all", action="store_true", help="every app")
+    ap.add_argument("--status", action="store_true",
+                    help="report drift and change nothing")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="say what would be published; push nothing")
+    ap.add_argument("--force", action="store_true",
+                    help="publish over a target that moved since the last sync")
+    ap.add_argument("-m", "--message", default=None,
+                    help="commit message for the published commit")
+    args = ap.parse_args()
+
+    keys = known if (args.all or args.status and not args.app) else (
+        [args.app] if args.app else [])
+    if not keys:
+        ap.error("name an app, or pass --all / --status")
+
+    if args.status:
+        return status(doc, keys)
+
+    rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO,
+                         text=True, capture_output=True).stdout.strip() or "unknown"
+    message = args.message or (
+        f"Sync from the Sysible platform tree at {rev}\n\n"
+        "Published with tools/publish-app. The platform repository is the "
+        "source of truth for this app; changes made directly here are "
+        "overwritten by the next publish.")
+    worst = 0
+    for key in keys:
+        worst = max(worst, publish(doc, key, args.dry_run, args.force, message))
+    return worst
+
+
+if __name__ == "__main__":
+    sys.exit(main())

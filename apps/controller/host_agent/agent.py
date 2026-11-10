@@ -1,0 +1,2583 @@
+"""
+Sysible host agent.
+
+Runs on a managed host, enrolls itself with the controller using a
+one-time token (generated in the GUI's Host Enrollment page), then
+polls for queued commands and reports results back.
+
+Configuration (env vars, all optional except the token on first run):
+  SYSIBLE_CONTROLLER       Base URL of the controller, or a comma-separated list of
+                           candidate URLs to fail over between - e.g. when the
+                           controller's "All Detected IPs (failover)" address mode
+                           bundled every address it found on itself - tried in order
+                           until one connects (default https://127.0.0.1:9000)
+  SYSIBLE_ENROLL_TOKEN     One-time enrollment token (required only the first time)
+  SYSIBLE_AGENT_STATE      Where to persist host_id/agent_secret (default /var/lib/sysible/agent_state.json)
+  SYSIBLE_POLL_INTERVAL    Seconds between heartbeats/command polls when idle (default 1.5) -
+                           a queued command is picked up on the very next poll, so this is
+                           the main knob on "how long after I click Run does the agent notice"
+  SYSIBLE_CA_CERT          Path to the controller's TLS cert, copied from its
+                           $BASE/certs/server.crt, for pinned verification
+                           (default /etc/sysible/controller.crt)
+
+The token may also be passed as the first CLI argument, e.g.:
+  python3 agent.py <token>
+"""
+
+import base64
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import errno
+import ipaddress
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+
+import requests
+
+# Agent integrity (Tier 1): self-measurement shipped alongside agent.py. Guarded
+# so the agent still runs if the module isn't present (e.g. an older bundle) — it
+# just won't report measurements and the controller won't seal a flashback for it.
+try:
+    import agent_integrity
+    _HAVE_INTEGRITY = True
+except Exception:
+    _HAVE_INTEGRITY = False
+
+# Short identity of THIS agent build: a hash of our own source. Reported on
+# every heartbeat so the controller (and the web console's Update-agents
+# progress bar) can tell which hosts are already running the current agent.
+# Matches the controller's hash of host_agent/agent.py (sha256 of the same
+# bytes). Best-effort - never let it break startup.
+# The enrollment bundle bakes the resolved controller URL into the
+# os.getenv("SYSIBLE_CONTROLLER", "...") default further down, so hashing the raw
+# file made EVERY enrolled agent's version differ from the controller's (which
+# hashes the unpatched source) — the fleet looked permanently "outdated". Reset
+# that one default to its canonical placeholder before hashing so a patched-but-
+# current agent matches; the controller normalizes identically
+# (backend/app.py:_current_agent_version).
+_CONTROLLER_DEFAULT_RE = re.compile(r'os\.getenv\("SYSIBLE_CONTROLLER",\s*"[^"]*"\)')
+_CONTROLLER_DEFAULT_CANON = 'os.getenv("SYSIBLE_CONTROLLER", "https://127.0.0.1:9000")'
+
+
+def _source_version(path):
+    """12-char build hash of an agent source file, with the baked controller-URL
+    default normalized out. Matches backend/app.py:_current_agent_version, so an
+    enrolled (URL-patched) agent reads as current against the controller."""
+    src = open(path, "r", encoding="utf-8").read()
+    src = _CONTROLLER_DEFAULT_RE.sub(lambda _m: _CONTROLLER_DEFAULT_CANON, src)
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:12]
+
+
+try:
+    AGENT_VERSION = _source_version(os.path.abspath(__file__))
+except Exception:
+    AGENT_VERSION = ""
+
+
+# Make the agent's own output actually reach the journal.
+#
+# Under systemd, stdout is a PIPE, so Python block-buffers it (4-8 KB). The agent
+# prints a line or two per task, so those blocks take hours or days to fill: the
+# unit promises "its output goes to the journal (journalctl -u sysible-agent)"
+# and in practice `journalctl -u sysible-agent` showed nothing but systemd's own
+# start/stop lines for a whole day of running. That is not a cosmetic problem —
+# it is why a host with a silently failing terminal could not be diagnosed at all,
+# by its operator or by us.
+#
+# Line buffering fixes it for every ALREADY-INSTALLED agent, because this file is
+# what the self-update ships; the unit template also sets PYTHONUNBUFFERED=1 now,
+# which is the right fix for new installs but never reaches an existing one.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except Exception:      # pre-3.7, or a stream that can't be reconfigured
+        pass
+
+# Say which build is running, at every start and after every self-update re-exec.
+# Without it the only way to answer "does this host's agent support terminals?"
+# is to read the source on the box.
+print(f"[agent] sysible agent build {AGENT_VERSION or 'unknown'} starting "
+      f"(python {sys.version.split()[0]})")
+
+
+# A self-update task rewrites this file on disk and asks systemd to restart us.
+# When that external restart doesn't take (a wedged transient unit, systemd-run
+# missing, a restart that races the task), the process keeps running the OLD
+# bytes and reporting the OLD build forever — so the console shows the host stuck
+# "updating" even though agent.py on disk is already current. Re-exec into the
+# new build ourselves instead of depending on the restart. Throttled; only acts
+# when the on-disk source both DIFFERS from what we're running and compiles (so a
+# truncated/corrupt write can't spin us in a crash-reexec loop — systemd stays
+# the backstop for that).
+_last_reexec_check = 0.0
+
+
+def _reexec_if_source_changed():
+    global _last_reexec_check
+    now = time.time()
+    if now - _last_reexec_check < 10:
+        return
+    _last_reexec_check = now
+    if not AGENT_VERSION:
+        return
+    path = os.path.abspath(__file__)
+    try:
+        if _source_version(path) == AGENT_VERSION:
+            return
+    except Exception:
+        return
+    try:
+        import py_compile
+        py_compile.compile(path, doraise=True)
+    except Exception as e:
+        print(f"[agent] agent.py changed on disk but won't compile ({e}); "
+              "staying on the running build.")
+        return
+    print(f"[agent] agent.py updated on disk (was {AGENT_VERSION}); re-executing to load the new build.")
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os.execv(sys.executable, [sys.executable, path] + sys.argv[1:])
+
+# Cap on stdout/stderr bytes kept from a single command - a runaway
+# command (e.g. `cat` on a huge file, a noisy build log) shouldn't be
+# able to balloon this process's memory or the JSON payload sent back
+# to the controller. Output is truncated, not the command's actual
+# execution - capture_output still has to buffer it all in memory
+# either way, but this bounds what we hold onto and ship afterward.
+MAX_OUTPUT_BYTES = 200_000
+
+# May be a single URL or a comma-separated list of candidate URLs (see
+# the module docstring above) - CONTROLLER itself stays mutable after
+# this point, since _request() below switches it to whichever candidate
+# most recently answered, so the startup print and the TLS check just
+# below always reflect "the one that's currently working" rather than
+# frozen at whatever was first in the list.
+_CONTROLLER_CANDIDATES = [
+    c.strip() for c in os.getenv("SYSIBLE_CONTROLLER", "https://127.0.0.1:9000").split(",") if c.strip()
+] or ["https://127.0.0.1:9000"]
+CONTROLLER = _CONTROLLER_CANDIDATES[0]
+STATE_FILE = os.getenv("SYSIBLE_AGENT_STATE", "/var/lib/sysible/agent_state.json")
+
+# Was 5s - that meant a freshly queued command could sit for up to 5
+# full seconds before this agent even noticed it, on top of however
+# long the command itself takes and the GUI's own poll interval on the
+# way back. 1.5s matches the GUI's AGENT_CMD_POLL_MS (remote_administration_page.py)
+# so neither side is the bottleneck. loop() below also skips this
+# sleep entirely right after handling a task, so a burst of several
+# queued commands (e.g. System Health & Logs running a few checks
+# back to back) doesn't pay this delay between each one either.
+POLL_INTERVAL = float(os.getenv("SYSIBLE_POLL_INTERVAL", "1.5"))
+
+# Reconnect backoff. When the controller is UNREACHABLE (e.g. it was renumbered
+# onto a new IP, or a network/firewall change cut this host off), retrying every
+# POLL_INTERVAL forever just spams the log and burns CPU/network. Instead the poll
+# and heartbeat loops back off exponentially from POLL_INTERVAL up to
+# CONN_BACKOFF_MAX, and snap back to POLL_INTERVAL the instant a request succeeds.
+CONN_BACKOFF_MAX = float(os.getenv("SYSIBLE_CONN_BACKOFF_MAX", "60"))
+_conn_fail_count = 0
+
+
+# ---- saying WHY the controller is unreachable ------------------------------
+# All three loops (tasks, heartbeat, config backup) used to print the raw
+# requests exception, which is a wall of urllib3 text whose only useful part —
+# the errno, or the words "certificate verify failed" — sits at the very end.
+# journalctl truncates the line at terminal width, so an operator reading the
+# journal saw `HTTPSConnectionPool(host=...` and nothing else, identically for
+# three completely different problems:
+#
+#   * the controller moved address, or is down          (refused / no route)
+#   * a firewall is swallowing the connection           (timed out)
+#   * the PINNED cert no longer matches the controller  (certificate verify failed)
+#
+# That last one is easy to land in: renumber the controller, regenerate its cert
+# for the new address, and every agent's pinned copy is stale. requests models
+# SSLError as a subclass of ConnectionError, so it reads exactly like "host is
+# down" unless something looks closer.
+# {pin} is filled in at call time, not here: _CA_CERT_FILE is defined further
+# down this file, so building these strings at import time is a NameError.
+_CONN_HINTS = (
+    ("certificate verify failed",
+     "TLS verification failed against the pinned controller cert at {pin}"
+     " - the controller's certificate has changed, or does not cover this address. "
+     "Re-copy certs/server.crt from the controller to that path."),
+    ("hostname mismatch",
+     "the controller's certificate does not name this address. Dial the controller "
+     "by a name/IP its cert covers, or re-issue the cert for it."),
+    ("name or service not known",
+     "that name does not resolve from this host."),
+    ("temporary failure in name resolution",
+     "DNS is not answering on this host."),
+    ("connection refused",
+     "nothing is listening there - the controller is down, or on a different port."),
+    ("no route to host",
+     "no route from this host - the controller has probably changed address."),
+    ("network is unreachable",
+     "this host has no route to that network."),
+    # Deliberately does NOT name a single cause. A silent drop is a firewall
+    # dropping rather than rejecting, OR the controller host not answering at
+    # all - wedged, still booting, or its VM paused. Written the other way round
+    # once ("usually a firewall"), which sent an operator looking at firewall
+    # rules while the real answer was that the VM needed a reboot.
+    ("timed out",
+     "the connection timed out - nothing answered. Either something between here "
+     "and the controller is dropping (not rejecting) the packets, or the "
+     "controller host is not answering at all: wedged, rebooting, or powered off. "
+     "A host that is up with the port closed would refuse the connection, not "
+     "time out."),
+    # Something answered and then dropped the connection: a proxy in the way, a
+    # firewall that resets rather than drops, or the controller restarting
+    # mid-request. Distinct from "nothing is listening".
+    ("connection reset",
+     "something accepted the connection and then dropped it - a proxy or firewall "
+     "in the path, or the controller restarting."),
+)
+
+
+def _why_unreachable(exc) -> str:
+    """One short, actionable sentence for a failed controller call."""
+    text = " ".join(str(a) for a in (exc,) + tuple(getattr(exc, "args", ()))).lower()
+    for needle, why in _CONN_HINTS:
+        if needle in text:
+            return why.format(pin=_CA_CERT_FILE)
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"the TLS handshake failed against the pinned cert at {_CA_CERT_FILE}."
+    return "the connection failed: " + str(exc)[:200]
+
+
+# How long to stay quiet about an unchanged, ongoing outage before saying it
+# again. The loops retry every few seconds, and three threads hit the same dead
+# controller, so without this the journal is three identical lines a minute for
+# as long as the outage lasts - which is what buries the one line that mattered.
+CONN_REPEAT_S = float(os.getenv("SYSIBLE_CONN_REPEAT_S", "600"))
+_conn_report_lock = threading.Lock()
+_conn_report = {"why": None, "at": 0.0, "suppressed": 0}
+
+
+def _report_unreachable(exc):
+    """Report an unreachable controller once, not once per loop per cycle. Says it
+    again when the REASON changes (that is news) or every CONN_REPEAT_S."""
+    why = _why_unreachable(exc)
+    tried = (CONTROLLER if len(_CONTROLLER_CANDIDATES) == 1
+             else f"{len(_CONTROLLER_CANDIDATES)} candidates, last {CONTROLLER}")
+    now = time.monotonic()
+    with _conn_report_lock:
+        changed = why != _conn_report["why"]
+        due = (now - _conn_report["at"]) >= CONN_REPEAT_S
+        if not (changed or due):
+            _conn_report["suppressed"] += 1
+            return
+        n = _conn_report["suppressed"]
+        _conn_report.update(why=why, at=now, suppressed=0)
+    again = f" [{n} identical since the last line]" if n and not changed else ""
+    # Guarded: this is a nicety attached to the message that reports an outage,
+    # and a nicety must never be able to take out the report. Anything it raises
+    # costs the extra sentence and nothing else.
+    try:
+        where = _route_note(CONTROLLER)
+    except Exception:
+        where = ""
+    print(f"[agent] cannot reach the controller ({tried}): {why}{where}{again}",
+          flush=True)
+
+
+def _report_reachable():
+    with _conn_report_lock:
+        if _conn_report["why"] is None:
+            return
+        n = _conn_report["suppressed"]
+        _conn_report.update(why=None, at=0.0, suppressed=0)
+    print(f"[agent] controller reachable again at {CONTROLLER}"
+          + (f" (suppressed {n} repeat(s) while it was down)" if n else ""), flush=True)
+
+
+def _note_conn_result(ok):
+    """Record whether a controller request actually reached the controller, so the
+    poll/heartbeat loops can back off while it's unreachable and recover instantly."""
+    global _conn_fail_count
+    _conn_fail_count = 0 if ok else min(_conn_fail_count + 1, 20)
+
+
+def _current_poll_delay():
+    """POLL_INTERVAL when healthy; exponentially longer (capped at CONN_BACKOFF_MAX)
+    while every controller candidate is unreachable."""
+    if _conn_fail_count <= 0:
+        return POLL_INTERVAL
+    return min(POLL_INTERVAL * (2 ** min(_conn_fail_count, 8)), CONN_BACKOFF_MAX)
+
+# How often the agent samples and reports performance metrics (load, memory,
+# worst-disk %). Deliberately decoupled from POLL_INTERVAL: heartbeats fire
+# every ~1.5s, but a metrics row only needs to land roughly once a minute -
+# that keeps the controller's time-series table small while still giving the
+# Performance graphs usable resolution. Set <=0 to disable reporting entirely.
+METRICS_INTERVAL = float(os.getenv("SYSIBLE_METRICS_INTERVAL", "60"))
+
+# ---- config backup (Sysible Flashback) -------------------------------------
+# These are read under SYSIBLE_FLASHBACK_* and, failing that, SYSIBLE_D3LOREAN_*.
+#
+# D3lorean is what this feature's product was called TWO names ago — it became
+# Sysible Flashback, and Flashback is now Sysible Flashback. The first rename
+# changed the product name and left the variables alone, which is why an agent
+# shipping today still answers to a name no documentation has mentioned for
+# years. The names move this time; the old ones keep working, because an agent
+# reads its environment from /etc/sysible/agent.env on a host that may not have
+# been touched since it was enrolled, and an operator who narrowed the captured
+# paths to keep a snapshot under the cap would silently get /etc back in full.
+def _fb_env(suffix: str, default: str) -> str:
+    for name in (f"SYSIBLE_FLASHBACK_{suffix}", f"SYSIBLE_D3LOREAN_{suffix}"):
+        val = os.getenv(name)
+        if val is not None:
+            return val
+    return default
+
+
+# The staged-restore helper, bundled alongside this file. Guarded exactly like
+# the integrity module: an agent whose bundle predates restore points must keep
+# doing everything else rather than failing to start.
+try:
+    import flashback_restore as _fbrestore
+except Exception:                                       # pragma: no cover
+    _fbrestore = None
+
+# Where staged restores live. Named here as well as in the helper so the
+# capture walk can exclude it — a restore point that captured the staging tree
+# of a previous restore would double in size every time.
+_FB_STAGE_PARENT = "/var/lib/sysible/flashback"
+
+# Seconds between config snapshots; 0 disables capture entirely on this host.
+FB_INTERVAL = float(_fb_env("INTERVAL", "3600"))
+# Roots to track. Colon-separated, files or directories.
+FB_PATHS = _fb_env("PATHS", "/etc:/boot/grub/grub.cfg:/var/spool/cron")
+# How often to look for a restore an operator queued in the console. Restores
+# should land promptly, so this is much shorter than the capture interval.
+FB_RESTORE_POLL = float(_fb_env("RESTORE_POLL", "60"))
+FB_MAX_FILE = int(_fb_env("MAX_FILE_BYTES", str(256 * 1024)))
+# Below the controller's per-snapshot cap (12 MiB), which is itself below its
+# global 16 MiB request ceiling — so a host that outgrows this trims itself and
+# says so, rather than being cut off by a middleware with a generic message.
+FB_MAX_TOTAL = int(_fb_env("MAX_TOTAL_BYTES", str(8 * 1024 * 1024)))
+# Paths NEVER captured, even under a tracked root. Config backup is not a secret
+# store: these are credentials and private keys, and copying them into a
+# fleet-wide version store — readable by anyone with console access, kept for 50
+# versions — would turn a config-history feature into a credential archive.
+# fnmatch patterns against the absolute path; override to extend or replace.
+FB_EXCLUDE = _fb_env("EXCLUDE", ":".join([
+    "/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-",
+    "/etc/ssh/ssh_host_*_key", "/etc/ssl/private/*", "/etc/ssl/private/**",
+    "/etc/sysible/*secret*", "/etc/sysible/api_key.txt",
+    "*/.git/*", "*.gpg", "*.kbx", "/etc/pki/**/private/*",
+]))
+
+# =========================================================
+# TLS
+# The controller's cert is self-signed (LAN-only, no public domain),
+# so verification means pinning that specific cert rather than
+# trusting any CA - or, worse, disabling verification entirely. Copy
+# the controller's $BASE/certs/server.crt to this host once (e.g. via
+# scp, the same one-time step as distributing the enrollment token)
+# and either leave it at the default path below or point
+# SYSIBLE_CA_CERT at wherever it landed.
+# =========================================================
+_CA_CERT_FILE = os.getenv("SYSIBLE_CA_CERT", "/etc/sysible/controller.crt")
+
+# TLS trust is PINNED to the controller's cert (shipped in the enrollment bundle):
+# the agent verifies against that exact cert, not the system trust store. If the
+# pin file is missing on an https:// controller we FAIL CLOSED — falling back to
+# system-CA verification (the old behavior) silently removes pinning, so on a
+# PKI-cert deployment any cert from any CA in the store could MITM the channel.
+# An operator who *intends* to rely on the public trust store can opt in explicitly
+# with SYSIBLE_ALLOW_SYSTEM_CA=1.
+_ALLOW_SYSTEM_CA = os.getenv("SYSIBLE_ALLOW_SYSTEM_CA", "0").strip().lower() in ("1", "true", "yes", "on")
+if CONTROLLER.startswith("https://") and os.path.exists(_CA_CERT_FILE):
+    _VERIFY = _CA_CERT_FILE
+elif CONTROLLER.startswith("https://") and _ALLOW_SYSTEM_CA:
+    print(
+        f"[agent] warning: no pinned CA cert at {_CA_CERT_FILE}; "
+        "SYSIBLE_ALLOW_SYSTEM_CA=1 set, so verifying against the SYSTEM trust "
+        "store (NOT pinned). Any CA in the store can authenticate the controller."
+    )
+    _VERIFY = True
+elif CONTROLLER.startswith("https://"):
+    # FAIL CLOSED: point verify at the (missing) pin path so requests refuses to
+    # connect rather than silently falling back to system-CA verification, which
+    # would drop pinning and let any CA in the store MITM the channel. The agent
+    # keeps retrying, so it recovers as soon as the cert is delivered (bundle/scp).
+    print(
+        f"[agent] no pinned controller cert at {_CA_CERT_FILE} - refusing to connect "
+        "without pinning. Copy the controller's certs/server.crt there (it ships in "
+        "the enrollment bundle) or set SYSIBLE_CA_CERT; set SYSIBLE_ALLOW_SYSTEM_CA=1 "
+        "only if you deliberately trust the system CA store."
+    )
+    _VERIFY = _CA_CERT_FILE
+else:
+    _VERIFY = True
+
+SESSION = requests.Session()
+SESSION.verify = _VERIFY
+
+
+def _request(method, path, **kwargs):
+    """All controller calls below go through this instead of
+    SESSION.<verb> directly. Tries the current CONTROLLER first; on a
+    connection failure (refused/unreachable/DNS - i.e. nothing answered
+    at all) rotates through the rest of _CONTROLLER_CANDIDATES until one
+    responds. Whichever candidate succeeds becomes the new CONTROLLER,
+    so the next call tries it first instead of re-walking the whole
+    list every time - once one NIC/IP proves reachable it's very likely
+    to stay that way.
+
+    Deliberately does NOT fail over on an ordinary HTTP error response
+    (404, 500, etc.) - only on requests.ConnectionError/Timeout. An HTTP
+    error means the controller WAS reached, just didn't like the
+    request, and trying a different IP for the exact same controller
+    process would only get the same answer. Re-raises the last
+    connection error if every candidate fails, same as a plain
+    SESSION.<verb> call would raise on the one URL it knew about
+    before - callers' existing `except requests.RequestException`
+    handling around fetch_tasks/send_result/heartbeat needs no changes."""
+    global CONTROLLER
+
+    candidates = _CONTROLLER_CANDIDATES
+    start = candidates.index(CONTROLLER) if CONTROLLER in candidates else 0
+
+    last_exc = None
+    for offset in range(len(candidates)):
+        candidate = candidates[(start + offset) % len(candidates)]
+        try:
+            r = SESSION.request(method, f"{candidate}{path}", **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            continue
+
+        if candidate != CONTROLLER:
+            print(f"[agent] switched to controller candidate: {candidate}")
+            CONTROLLER = candidate
+
+        _note_conn_result(True)   # a candidate answered — reset reconnect backoff
+        _report_reachable()
+        return r
+
+    _note_conn_result(False)      # every candidate was unreachable — back off
+    # Reported HERE, at the one place that knows every candidate failed, rather
+    # than in each caller: the three loops hit the same dead controller and would
+    # each print the same thing.
+    _report_unreachable(last_exc)
+    raise last_exc
+
+
+def _route_note(url: str) -> str:
+    """Which local address this host would use to reach the controller, or that
+    it has no route to it at all.
+
+    This is the line that ends an argument. A fleet lost three hosts for days
+    because the controller was at 192.168.8.139 and those hosts were on
+    192.168.100.44 — a different network, no route between them — while the other
+    thirteen hosts reached it fine. Every log line named only the address being
+    dialled, so the mismatch was invisible from the host that had the problem.
+    Printing BOTH makes it obvious at a glance.
+
+    A UDP connect() sends no packets; it only asks the routing table which source
+    address would be used, so this costs nothing and works with no network up."""
+    host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return ""          # a name, not an address — DNS owns that failure
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((host, 9))
+        return " This host would reach it from " + s.getsockname()[0] + "."
+    except OSError as e:
+        if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+            mine = _local_ip() or "an unknown address"
+            return (" This host has NO ROUTE to " + host + " - it is on " + mine
+                    + ", and nothing routes from there to " + host + ".")
+        return ""
+    finally:
+        s.close()
+
+
+def _local_ip():
+    """Best-effort local (LAN-facing) IP for this host, shown in the
+    Address column of Remote Administration instead of the opaque
+    host_id. Opens a UDP socket "connected" to an arbitrary external
+    address and reads back the outbound interface IP - no packets are
+    actually sent (UDP connect() just picks a route), so this works
+    without internet access and without parsing ifconfig/ip output,
+    which varies a lot across platforms. Falls back to "" (not None,
+    so it's at least JSON-serializable) if nothing usable comes back -
+    e.g. no network interfaces are up at all."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return ""
+    finally:
+        s.close()
+
+
+class UnknownHostError(Exception):
+    """Raised when the controller responds 404 "Unknown host_id" - this
+    agent's enrollment no longer exists on the controller (disenrolled
+    via the GUI, or the controller's database was reset/recreated)
+    even though this host still has a cached, now-stale state file.
+
+    Deliberately NOT a requests.RequestException subclass: heartbeat(),
+    fetch_tasks(), and send_result() below each catch
+    `requests.RequestException` broadly (for ordinary network blips) and
+    swallow it with just a printed warning - if this were one of those,
+    "unknown host" would loop silently forever. Keeping it a plain
+    Exception lets it fall through those catches untouched and surface
+    all the way up to loop(), which is the only place that should react
+    to it."""
+
+
+# =========================================================
+# STATE
+# =========================================================
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+    try:
+        os.chmod(STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _stable_host_id():
+    """A host_id that stays the SAME across restarts even when the agent's state
+    file can't be persisted (a read-only or ephemeral state dir, a non-root agent
+    that can't write STATE_FILE, a wiped tmpfs). It is derived from the machine's
+    own stable identity, so a crash-looping agent that lost its state re-enrolls
+    onto the SAME inventory row rather than minting a fresh uuid every cycle — the
+    'runaway enrollment' that fills the console with <uuid> hosts. Falls back to a
+    random uuid only when no stable machine identifier is readable at all."""
+    seed = None
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id",
+                 "/sys/class/dmi/id/product_uuid"):
+        try:
+            with open(path, "r") as f:
+                v = (f.read() or "").strip()
+            if v:
+                seed = v
+                break
+        except OSError:
+            pass
+    if not seed:
+        # Hostname is stable on most hosts; only when even that is empty do we
+        # give up and mint a random id (the pre-fix behaviour, flood-prone).
+        seed = socket.gethostname() or str(uuid.uuid4())
+    # Namespaced UUIDv5: a well-formed, deterministic id that doesn't leak the
+    # raw machine-id into the inventory.
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, "sysible-agent:" + seed))
+
+
+def _hostname():
+    """A stable, NON-EMPTY hostname for enrollment. socket.gethostname() comes back
+    empty on some minimal/container/bastion-enrolled hosts, and an empty hostname
+    breaks the controller's same-box dedup (it keys re-enroll adoption on
+    hostname+IP) — so the box spawns a DUPLICATE inventory row instead of adopting
+    its own record. Fall back through the FQDN, /etc/hostname, then a machine-id
+    label so the same box always reports the SAME name."""
+    for getter in (socket.gethostname, socket.getfqdn):
+        try:
+            v = (getter() or "").strip()
+        except Exception:
+            v = ""
+        if v and v.lower() not in ("localhost", "localhost.localdomain", "(none)"):
+            return v
+    try:
+        with open("/etc/hostname", "r") as f:
+            v = (f.read() or "").strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    # Last resort: a label derived from the stable machine id, so it's at least
+    # consistent across re-enrolls of this box rather than empty.
+    return "host-" + _stable_host_id().split("-")[0]
+
+
+def clear_state():
+    """Wipe the cached host_id/agent_secret so the next run looks like
+    a fresh install and goes through register() again instead of
+    reusing a state the controller no longer recognizes. Note this
+    does NOT get the agent re-enrolled by itself: register() still
+    needs a *fresh* SYSIBLE_ENROLL_TOKEN, since the one baked into this
+    host's original bundle was already consumed on first enrollment
+    and the controller will reject it a second time."""
+    try:
+        os.remove(STATE_FILE)
+    except OSError:
+        pass
+
+
+def get_enroll_token():
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+
+    return os.getenv("SYSIBLE_ENROLL_TOKEN")
+
+
+# =========================================================
+# REGISTER
+# =========================================================
+def register():
+    token = get_enroll_token()
+
+    if not token:
+        print(
+            "[agent] no enrollment token found - set SYSIBLE_ENROLL_TOKEN "
+            "or pass it as the first argument"
+        )
+        sys.exit(1)
+
+    state = load_state() or {}
+    # A machine-derived, deterministic id when we have no persisted one, so a
+    # host that can't save its state re-enrolls onto the SAME row instead of a
+    # new uuid every restart (runaway enrollment).
+    host_id = state.get("host_id") or _stable_host_id()
+
+    payload = {
+        "token": token,
+        "host_id": host_id,
+        "hostname": _hostname(),
+        "platform": platform.system(),
+        "kernel": platform.release(),
+        "ip": _local_ip(),
+    }
+
+    # Proof of possession: if we still hold a saved agent_secret for this host, send
+    # it so the controller can confirm we ARE the incumbent agent and let us re-enroll
+    # onto our own row. A host that legitimately lost its secret (reimaged) omits this
+    # and instead uses an admin-issued reissue token. (A brand-new host has no secret
+    # and lands on a fresh host_id, so this is simply absent there.)
+    if state.get("agent_secret") and state.get("host_id"):
+        payload["prev_agent_secret"] = state["agent_secret"]
+
+    r = _request("POST", "/agents/enroll", json=payload, timeout=15)
+    _raise_with_detail(r)
+    data = r.json()
+
+    state = {
+        "host_id": data["host_id"],
+        "agent_secret": data["agent_secret"],
+    }
+
+    # A persist failure must NOT crash the process (which, under systemd
+    # Restart=always, becomes the crash-loop that drives runaway re-enrollment).
+    # The identity is now machine-derived, so re-enrolling with an unwritable
+    # state dir is idempotent on host_id — we only lose secret continuity across
+    # restarts. Log it loudly so the operator fixes the state dir.
+    try:
+        save_state(state)
+    except OSError as e:
+        print("[agent] WARNING: could not persist state to", STATE_FILE, "-", e,
+              "- the agent will keep running, but its secret will rotate on every "
+              "restart until the state dir is writable.", file=sys.stderr)
+
+    print("[agent] enrolled:", state["host_id"])
+
+    return state
+
+
+# =========================================================
+# COMMANDS
+# =========================================================
+def _raise_with_detail(r):
+    """r.raise_for_status() alone only ever says e.g. "404 Client Error:
+    Not Found for url: ..." - it throws away the FastAPI {"detail": ...}
+    body, which is exactly what distinguishes "this host_id was never
+    enrolled" (controller is up, just doesn't know this agent) from "the
+    route doesn't exist" (stale controller code) or a bad agent_secret.
+    Surface it instead of leaving that to guesswork."""
+    if r.ok:
+        return
+
+    detail = None
+    try:
+        detail = r.json().get("detail")
+    except (ValueError, AttributeError):
+        pass
+
+    if r.status_code == 404 and detail == "Unknown host_id":
+        raise UnknownHostError(detail)
+
+    raise requests.exceptions.HTTPError(
+        f"{r.status_code} {detail or r.reason}", response=r
+    )
+
+
+def fetch_tasks(state):
+    try:
+        # Send the secret in a header, not the query string, so it can't land
+        # in access/proxy logs. (The controller still accepts the legacy query
+        # param for older agents.)
+        r = _request(
+            "GET",
+            f"/agents/{state['host_id']}/tasks",
+            headers={"X-Agent-Secret": state["agent_secret"]},
+            timeout=10,
+        )
+        _raise_with_detail(r)
+        return r.json().get("tasks", [])
+    except requests.RequestException as e:
+        # A connection failure has already been reported, with a reason, by
+        # _request(). Anything else (an HTTP 4xx/5xx from _raise_with_detail) is
+        # a different problem and still worth a line of its own.
+        if not isinstance(e, (requests.ConnectionError, requests.Timeout)):
+            print("[agent] could not fetch tasks:", e)
+        return []
+
+
+def _truncate(s):
+    if s is None or len(s) <= MAX_OUTPUT_BYTES:
+        return s
+
+    return s[:MAX_OUTPUT_BYTES] + f"\n...[truncated, {len(s) - MAX_OUTPUT_BYTES} more bytes]"
+
+
+_PRIV_ERROR_HINTS = (
+    "permission denied", "operation not permitted", "must be root",
+    "must be run as root", "are not allowed", "not permitted", "only root",
+    "you need to be root", "eperm", "eacces",
+    "a password is required", "a terminal is required", "sudo:", "root privileges",
+    "access denied", "not authorized", "requires root",
+    # dnf/yum AND zypper print this verbatim when run as a non-root user:
+    # "This command has to be run with superuser privileges ...".
+    "superuser privileges", "run with superuser",
+    # pacman (Arch) has its own phrasing that matches none of the above:
+    # "error: you cannot perform this operation unless you are root." Without
+    # this, an unprivileged agent never retries pacman under sudo, so every
+    # package op on Arch fails with a bare not-root error.
+    "unless you are root",
+    # polkit / D-Bus (systemctl, hostnamectl, timedatectl, etc. run as a
+    # non-root user answer this instead of a plain permission error):
+    "interactive authentication required", "authentication is required",
+    "authentication required", "not privileged", "rejected send message",
+)
+
+
+def _looks_like_privilege_error(stderr):
+    s = (stderr or "").lower()
+    return any(h in s for h in _PRIV_ERROR_HINTS)
+
+
+def _local_user_exists(user):
+    try:
+        import pwd
+        pwd.getpwnam(user)
+        return True
+    except (KeyError, ImportError):
+        return False
+
+
+# Hard cap on a single task command. It must comfortably exceed a real package
+# upgrade on a months-behind host (dnf/apt/zypper transactions routinely run many
+# minutes) — the old 300s (5 min) SIGKILLed those mid-transaction, so patching
+# "failed" for exactly the hosts most in need and could leave a half-configured
+# rpm/dpkg state. The controller's fleet-install poll uses a matching window.
+# Overridable for unusually slow mirrors / huge transactions.
+_CMD_TIMEOUT = int(os.getenv("SYSIBLE_AGENT_CMD_TIMEOUT", "1800"))
+
+
+def _exec(argv, shell=False, input_data=None, timeout=None):
+    try:
+        proc = subprocess.run(argv, shell=shell,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True,
+                              timeout=timeout or _CMD_TIMEOUT, input=input_data)
+        return {
+            "stdout": _truncate(proc.stdout),
+            "stderr": _truncate(proc.stderr),
+            "returncode": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": "command timed out", "returncode": -1}
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "returncode": -1}
+
+
+def _run_as_user(user, cmd, become_password=None, want_root=False):
+    """RBAC: run `cmd` as local user `user`. Tried as that user first, so
+    read-only commands work even for a user with no sudo; on a privilege
+    error it's retried under that user's own sudo. Elevation uses `sudo -n`
+    (passwordless) unless a `become_password` was supplied for this task, in
+    which case it uses `sudo -S` and feeds the password on STDIN (never on
+    argv/env), for hosts that forbid NOPASSWD. runuser needs root; if the
+    agent isn't root it prefixes its own sudo.
+
+    want_root inverts the order, and exists because "escalate if it looks like
+    it failed" cannot work for a script somebody else wrote. The escalation
+    test is `returncode != 0 and the output looks like a privilege error`, and
+    an operator's script routinely satisfies neither while still having had
+    every privileged line inside it refused: it captures its own failures into
+    variables, prints them, and exits 0. The console's "Run a script" box says
+    "runs as root on each checked host"; it ran as the operator, came back
+    exit 0, and the output looked authoritative. That is how a firewall audit
+    reported "Not Authorized" on every host and was read as a finding about the
+    hosts rather than about the probe.
+
+    So when root is PROMISED, go to root first — still via this user's own
+    sudo, so the host's policy decides exactly as before, and with no second
+    execution of a script that may not be idempotent. If that user genuinely
+    cannot sudo here, fall back to running unprivileged rather than refusing
+    (a read-only script from a no-sudo operator still works) and say so loudly
+    in the output, because the one outcome that must not happen is unprivileged
+    results presented as if they were root's."""
+    if not _local_user_exists(user):
+        return {
+            "stdout": "",
+            "stderr": (f"RBAC: local user '{user}' does not exist on this host, so the "
+                       f"command cannot be run as that role. Create the user (with the "
+                       f"sudo policy you want) on this host."),
+            "returncode": 126,
+        }
+
+    root = os.geteuid() == 0
+    plain = (["runuser", "-u", user, "--", "bash", "-c", cmd] if root
+             else ["sudo", "-n", "runuser", "-u", user, "--", "bash", "-c", cmd])
+
+    # Escalated form. With a become-password use `sudo -S` (read password from
+    # stdin, empty prompt); otherwise `sudo -n` (passwordless).
+    if become_password:
+        inner = ["sudo", "-S", "-p", "", "bash", "-c", cmd]
+        stdin = become_password + "\n"
+    else:
+        inner = ["sudo", "-n", "bash", "-c", cmd]
+        stdin = None
+    elevated = (["runuser", "-u", user, "--"] + inner if root
+                else ["sudo", "-n", "runuser", "-u", user, "--"] + inner)
+
+    if want_root:
+        res = _exec(elevated, input_data=stdin)
+        if res["returncode"] == 0:
+            return res
+        # Only a SUDO POLICY refusal justifies dropping back; a script that ran
+        # as root and failed on its own merits must report its own failure, not
+        # be silently re-run with fewer privileges.
+        low = (res["stderr"] or "").lower()
+        policy = any(h in low for h in (
+            "password is required", "a terminal is required", "no tty present",
+            "not allowed to execute", "not in the sudoers", "incorrect password",
+            "sorry, try again", "authentication failure"))
+        if not policy:
+            return res
+        fallback = _exec(plain)
+        note = (f"\n[sysible] NOT RUN AS ROOT. '{user}' cannot sudo on this host, so "
+                f"this ran unprivileged and anything needing root inside it will have "
+                f"been refused — read the output with that in mind. Grant '{user}' "
+                f"sudo here, or mark this host as 'password sudo' and supply the "
+                f"password, to run it as root.")
+        fallback["stderr"] = (fallback["stderr"] or "").rstrip() + note
+        return fallback
+
+    first = _exec(plain)
+    # Look for the privilege error in BOTH streams: some commands redirect
+    # their stderr into stdout (e.g. `... 2>&1`), which would otherwise hide a
+    # "Permission denied" from this check and stop us from escalating.
+    combined = (first["stderr"] or "") + "\n" + (first["stdout"] or "")
+    if first["returncode"] == 0 or not _looks_like_privilege_error(combined):
+        return first
+
+    res = _exec(elevated, input_data=stdin)
+
+    if res["returncode"] != 0:
+        low = (res["stderr"] or "").lower()
+        if become_password and ("try again" in low or "incorrect password" in low
+                                or "sorry" in low):
+            hint = f"\n[sysible] sudo rejected the password for '{user}' on this host."
+            # openSUSE/SLES ship `Defaults targetpw` in /etc/sudoers, so sudo asks
+            # for the TARGET user's (root's) password, NOT the invoking user's -
+            # the #1 reason a correct user password is still rejected here. Detect
+            # SUSE and spell out the fix, since the raw "Sorry, try again." is
+            # otherwise baffling.
+            try:
+                with open("/etc/os-release") as _f:
+                    _osr = _f.read().lower()
+                if "suse" in _osr:
+                    hint += (
+                        " NOTE: openSUSE/SLES default sudo to 'targetpw', so it "
+                        "expects this host's ROOT password here, not your user "
+                        "password. Fix: store the host's ROOT password as its sudo "
+                        "password, or add a sudoers rule for the user "
+                        f"('Defaults:{user} !targetpw' plus NOPASSWD)."
+                    )
+            except OSError:
+                pass
+            res["stderr"] = res["stderr"].rstrip() + hint
+        elif not become_password and (
+                "password is required" in low or "a terminal is required" in low
+                or "no tty present" in low or "not allowed to execute" in low
+                or "not in the sudoers" in low):
+            res["stderr"] = (res["stderr"].rstrip() + (
+                f"\n[sysible] This action needs root, but '{user}' can't run it via "
+                f"passwordless sudo here. Either grant '{user}' NOPASSWD sudo for it, or "
+                f"mark this host as 'password sudo' so Sysible supplies your sudo password."))
+    return res
+
+
+def run_command(cmd, run_as=None, become_password=None, want_root=False):
+    # RBAC path: a task tagged with an initiating admin username runs as the
+    # matching local user, gated by that host's sudo policy (see
+    # _run_as_user). Without run_as it's an internal/controller task: a root
+    # agent runs it directly; an unprivileged agent escalates via sudo -n
+    # (the pre-RBAC behaviour, unchanged).
+    if run_as:
+        return _run_as_user(run_as, cmd, become_password=become_password,
+                            want_root=want_root)
+    if os.geteuid() != 0:
+        cmd = "sudo -n bash -c " + shlex.quote(cmd)
+    return _exec(cmd, shell=True)
+
+
+def send_result(state, task_id, result):
+    try:
+        r = _request(
+            "POST",
+            f"/agents/{state['host_id']}/tasks/result",
+            json={
+                "host_id": state["host_id"],
+                "agent_secret": state["agent_secret"],
+                "task_id": task_id,
+                "result": json.dumps(result),
+            },
+            timeout=10,
+        )
+        _raise_with_detail(r)
+    except requests.RequestException as e:
+        print("[agent] could not send result:", e)
+
+
+# =========================================================
+# LOOP
+# =========================================================
+# Skip pseudo / virtual / image-backed filesystems when scoring disk use, so
+# a 100%-full read-only squashfs or a tmpfs doesn't masquerade as a failing
+# disk. Mirrors the mountpoint/fstype filtering in cmd_metrics_snapshot.
+_DISK_SKIP_FSTYPES = {
+    "tmpfs", "devtmpfs", "overlay", "squashfs", "iso9660", "udf",
+    "proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "debugfs",
+    "tracefs", "securityfs", "pstore", "bpf", "configfs", "fusectl",
+    "autofs", "binfmt_misc", "hugetlbfs", "ramfs", "nsfs", "efivarfs",
+}
+_DISK_SKIP_PREFIXES = ("/proc", "/sys", "/run", "/dev", "/snap", "/media",
+                       "/run/media", "/cdrom")
+
+
+def _disk_detail():
+    """(worst_used_pct, [{mount, pct, used_gb, total_gb}, ...]) across real,
+    writable local filesystems (df-style: used / (used + available)); worst is
+    an int 0-100 or None. Also returns the per-mount breakdown for the
+    snapshot."""
+    worst = None
+    mounts = []
+    try:
+        with open("/proc/mounts") as f:
+            lines = f.readlines()
+    except OSError:
+        return None, mounts
+    seen = set()
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt, fstype = parts[1], parts[2]
+        if fstype in _DISK_SKIP_FSTYPES:
+            continue
+        if any(mnt == p or mnt.startswith(p + "/") for p in _DISK_SKIP_PREFIXES):
+            continue
+        if mnt in seen:
+            continue
+        seen.add(mnt)
+        try:
+            st = os.statvfs(mnt)
+        except OSError:
+            continue
+        used = st.f_blocks - st.f_bfree
+        avail = st.f_bavail
+        denom = used + avail
+        if denom <= 0:
+            continue
+        pct = int(round(used * 100.0 / denom))
+        total_b = st.f_blocks * st.f_frsize
+        used_b = used * st.f_frsize
+        mounts.append({
+            "mount": mnt, "pct": pct,
+            "used_gb": round(used_b / 1073741824.0, 1),
+            "total_gb": round(total_b / 1073741824.0, 1),
+        })
+        if worst is None or pct > worst:
+            worst = pct
+    mounts.sort(key=lambda m: m["pct"], reverse=True)
+    return worst, mounts
+
+
+def _read_cpu_times():
+    """/proc/stat -> (total, busy, {core_index: (total, busy)}). Busy excludes
+    idle+iowait. Returns (None, None, {}) on failure."""
+    try:
+        agg = (None, None)
+        per = {}
+        with open("/proc/stat") as f:
+            for line in f:
+                if not line.startswith("cpu"):
+                    break
+                parts = line.split()
+                name = parts[0]
+                vals = [int(x) for x in parts[1:]]
+                if len(vals) < 4:
+                    continue
+                idle = vals[3] + (vals[4] if len(vals) > 4 else 0)  # idle + iowait
+                total = sum(vals)
+                busy = total - idle
+                if name == "cpu":
+                    agg = (total, busy)
+                else:
+                    try:
+                        per[int(name[3:])] = (total, busy)
+                    except ValueError:
+                        pass
+        return agg[0], agg[1], per
+    except (OSError, ValueError, IndexError):
+        return None, None, {}
+
+
+def _read_meminfo():
+    info = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, rest = line.partition(":")
+                try:
+                    info[k.strip()] = int(rest.split()[0])  # kB
+                except (IndexError, ValueError):
+                    pass
+    except OSError:
+        pass
+    return info
+
+
+_NET_SKIP_PREFIXES = (
+    "lo", "veth", "docker", "br-", "virbr", "tap", "tun", "cni", "flannel",
+    # Kernel tunnel / virtual pseudo-interfaces that are usually present but idle.
+    "gre", "gretap", "erspan", "sit", "ip6tnl", "ip_vti", "ip6_vti", "ip6gre",
+    "bond", "dummy", "ifb", "teql",
+)
+
+
+def _read_net_dev():
+    """{iface: {rx, tx, rx_err, tx_err, rx_drop, tx_drop}} in bytes/packets,
+    skipping loopback and virtual/container interfaces."""
+    out = {}
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f.readlines()[2:]:
+                name, _, data = line.partition(":")
+                name = name.strip()
+                if not name or name.startswith(_NET_SKIP_PREFIXES):
+                    continue
+                v = data.split()
+                if len(v) < 16:
+                    continue
+                out[name] = {
+                    "rx": int(v[0]), "rx_err": int(v[2]), "rx_drop": int(v[3]),
+                    "tx": int(v[8]), "tx_err": int(v[10]), "tx_drop": int(v[11]),
+                }
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _read_diskio():
+    """Aggregate (read_bytes, write_bytes) across physical disks from
+    /proc/diskstats (sectors * 512). Skips partitions, loop, ram, dm/md."""
+    rb = wb = 0
+    found = False
+    try:
+        with open("/proc/diskstats") as f:
+            for line in f:
+                p = line.split()
+                if len(p) < 14:
+                    continue
+                name = p[2]
+                if name.startswith(("loop", "ram", "dm-", "md", "sr", "fd")):
+                    continue
+                # Skip partitions: a trailing digit on sd*/vd*/hd* names, or pN on nvme.
+                if name[:2] in ("sd", "vd", "hd", "xv") and name[-1].isdigit():
+                    continue
+                if name.startswith("nvme") and "p" in name:
+                    continue
+                rb += int(p[5]) * 512   # sectors read
+                wb += int(p[9]) * 512   # sectors written
+                found = True
+    except (OSError, ValueError, IndexError):
+        return None, None
+    return (rb, wb) if found else (None, None)
+
+
+def _read_top_procs(prev_pids, total_delta):
+    """Scan /proc once: return (top_cpu, top_mem, proc_count, threads_total,
+    new_pids). top_* are lists of {pid, name, cpu, mem_mb, mem_pct}. CPU% is the
+    process's jiffies delta over the aggregate CPU jiffies delta (0-100 of the
+    whole machine); needs prev_pids from the last sample (empty -> cpu 0)."""
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError):
+        page = 4096
+    memtotal_kb = _read_meminfo().get("MemTotal", 0) or 0
+    procs = []
+    new_pids = {}
+    count = 0
+    threads = 0
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        count += 1
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                raw = f.read()
+            rp = raw.rfind(")")
+            rest = raw[rp + 2:].split()
+            utime, stime = int(rest[11]), int(rest[12])
+            nthreads = int(rest[17])
+            jiff = utime + stime
+            new_pids[pid] = jiff
+            threads += nthreads
+            with open(f"/proc/{pid}/statm") as f:
+                rss_pages = int(f.read().split()[1])
+            rss_mb = rss_pages * page / 1048576.0
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    name = f.read().strip()
+            except OSError:
+                name = raw[raw.find("(") + 1:rp]
+            prev = prev_pids.get(pid)
+            cpu = 0.0
+            if prev is not None and total_delta and total_delta > 0:
+                cpu = max(0.0, (jiff - prev) / float(total_delta) * 100.0)
+            procs.append({
+                "pid": int(pid), "name": name[:32],
+                "cpu": round(cpu, 1), "mem_mb": round(rss_mb, 1),
+                "mem_pct": round(rss_mb * 1024 / memtotal_kb * 100, 1) if memtotal_kb else None,
+            })
+        except (OSError, ValueError, IndexError):
+            continue
+    top_cpu = sorted(procs, key=lambda p: p["cpu"], reverse=True)[:5]
+    top_mem = sorted(procs, key=lambda p: p["mem_mb"], reverse=True)[:5]
+    return top_cpu, top_mem, count, threads, new_pids
+
+
+# Previous reading, so CPU%, network throughput and disk I/O can be computed as
+# deltas between successive samples (the agent samples once per METRICS_INTERVAL).
+_prev_sample = {}
+
+
+_UNIT_SUFFIXES = (".service", ".socket", ".mount", ".timer", ".target",
+                  ".path", ".scope", ".automount", ".swap", ".slice")
+
+
+def _collect_health_signals(mounts):
+    """Best-effort systemd + OOM health signals, gathered on the metrics tick so the
+    controller can render the dashboard fleet-health verdict straight from the
+    heartbeat instead of dispatching a live probe to every host. Mirrors exactly
+    the signals cmd_metrics_snapshot() computes — failed-unit names/count, overall
+    systemd state, OOM-kill count, and the worst-disk mount. Non-systemd or
+    restricted hosts degrade gracefully (sysd=None), and the controller then falls
+    back to a live probe for that host, so this never makes health WRONG."""
+    def _run(argv):
+        try:
+            # universal_newlines (not text=) so this stays Python 3.6-safe for SLES.
+            return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  timeout=8, universal_newlines=True).stdout or ""
+        except Exception:
+            return ""
+
+    # Failed units: the first real-unit-looking token per line (robust across
+    # systemd versions and the '●' bullet), same scan the shell snapshot uses.
+    units = []
+    for line in _run(["systemctl", "--failed", "--no-legend", "--plain"]).splitlines():
+        for tok in line.split():
+            if tok.endswith(_UNIT_SUFFIXES):
+                units.append(tok)
+                break
+    # `is-system-running` is the authority for whether systemd exists here; if it
+    # yields nothing, treat this as a non-systemd/unknown host → sysd=None so the
+    # controller live-probes rather than trusting a partial reading.
+    sysd = _run(["systemctl", "is-system-running"]).strip() or None
+    oom = 0
+    if sysd is not None:
+        for line in _run(["dmesg", "-t"]).splitlines():
+            low = line.lower()
+            if "out of memory" in low or "killed process" in low or "oom-killer" in low:
+                oom += 1
+    # Worst-disk mount name (pairs with the scalar `disk` %) from the per-mount detail.
+    mount, worst = None, -1
+    for m in (mounts or []):
+        try:
+            pct = int(m.get("pct"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if pct > worst:
+            worst, mount = pct, m.get("mount")
+    return {"failed": len(units), "units": units[:4], "sysd": sysd, "oom": oom, "mount": mount}
+
+
+def _qemu_guest_name(pid):
+    """The libvirt/qemu domain name from a qemu process's cmdline, e.g.
+    '-name guest=arch-01,debug-threads=on' -> 'arch-01' (or a bare '-name arch-01').
+    Dependency-free (/proc only). Returns '' when no name is present."""
+    try:
+        with open("/proc/" + pid + "/cmdline", "rb") as f:
+            args = f.read().split(b"\0")
+    except OSError:
+        return ""
+    for i, a in enumerate(args):
+        if a == b"-name" and i + 1 < len(args):
+            val = args[i + 1].decode("utf-8", "replace")
+        elif a.startswith(b"-name=") and len(a) > 6:
+            val = a[6:].decode("utf-8", "replace")
+        else:
+            continue
+        # 'guest=arch-01,debug-threads=on' -> arch-01; 'arch-01' -> arch-01.
+        for part in val.split(","):
+            if part.startswith("guest="):
+                return part[6:].strip()
+        return val.split(",")[0].strip()
+    return ""
+
+
+def _detect_hypervisor():
+    """Best-effort: is THIS host a hypervisor running guest VMs (a VM HOST), as
+    opposed to a plain server or a guest itself? Cheap, dependency-free /proc +
+    sysfs checks — no virsh/xl/VBoxManage calls. Returns (role, vm_count, vm_names):
+
+      role      short label — "proxmox" / "kvm" / "xen-dom0" / "virtualbox" /
+                "vmware" — or None if this doesn't look like a VM host.
+      vm_count  number of RUNNING guests we could count (one qemu-system /
+                VBoxHeadless / vmware-vmx process per running VM). 0 is valid for
+                a configured-but-idle hypervisor.
+      vm_names  domain names of running qemu/KVM guests, parsed from their
+                cmdlines, so the console can map guests to their host records
+                (topology nesting). Empty for backends we can't name cheaply.
+
+    The point is the reboot warning: taking a VM host down interrupts every guest
+    on it, so the console flags that before an operator reboots/powers it off."""
+    role, vms = None, 0
+    vm_names = []
+    try:
+        if os.path.isdir("/etc/pve"):
+            role = "proxmox"                       # Proxmox VE
+        try:
+            with open("/proc/xen/capabilities") as f:
+                if "control_d" in f.read():
+                    role = role or "xen-dom0"      # Xen control domain, not a guest
+        except OSError:
+            pass
+        kvm = os.path.exists("/dev/kvm")
+        qemu = vbox = vmware = 0
+        # One /proc scan for guest processes. `comm` is truncated to 15 chars, so
+        # qemu-system-x86_64 shows as "qemu-system-x86" — startswith covers it.
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open("/proc/" + pid + "/comm") as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            if comm.startswith("qemu-system") or comm == "qemu-kvm":
+                qemu += 1
+                _nm = _qemu_guest_name(pid)
+                if _nm:
+                    vm_names.append(_nm)
+            elif comm in ("VBoxHeadless", "VirtualBox"):
+                vbox += 1
+            elif comm == "vmware-vmx":
+                vmware += 1
+        if qemu:
+            role = role or ("kvm" if kvm else "qemu"); vms += qemu
+        if vbox:
+            role = role or "virtualbox"; vms += vbox
+        if vmware:
+            role = role or "vmware"; vms += vmware
+        # KVM-capable host with libvirt present but no guests currently running:
+        # still a hypervisor (rebooting it is still disruptive to its inventory).
+        if role is None and kvm and (os.path.isdir("/etc/libvirt") or os.path.exists("/run/libvirt")):
+            role = "kvm"
+    except Exception:
+        return (None, 0, [])
+    return (role, vms, sorted(set(vm_names)))
+
+
+def _collect_metrics():
+    """Build the heartbeat's performance payload: scalar time-series metrics
+    plus a rich detail snapshot. Best-effort throughout - any single failure is
+    swallowed so a metrics hiccup never disturbs the heartbeat. Returns
+    {"metrics": {...}, "snapshot": {...}} or None if nothing scoreable."""
+    global _prev_sample
+    now = time.time()
+    prev = _prev_sample
+    dt = (now - prev["t"]) if prev.get("t") else None
+    cores = os.cpu_count() or 1
+
+    # Load averages.
+    load1 = load5 = load15 = None
+    try:
+        with open("/proc/loadavg") as f:
+            la = f.read().split()
+        load1, load5, load15 = float(la[0]), float(la[1]), float(la[2])
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # CPU (overall + per-core %), needs a delta against the previous reading.
+    cpu_total, cpu_busy, percpu = _read_cpu_times()
+    cpu_pct = None
+    percpu_pct = []
+    total_delta = None
+    if cpu_total is not None and prev.get("cpu_total") is not None:
+        total_delta = cpu_total - prev["cpu_total"]
+        busy_delta = cpu_busy - prev["cpu_busy"]
+        if total_delta > 0:
+            cpu_pct = round(max(0.0, min(100.0, busy_delta / total_delta * 100.0)), 1)
+        pp = prev.get("percpu") or {}
+        for idx in sorted(percpu):
+            t, b = percpu[idx]
+            if idx in pp:
+                td = t - pp[idx][0]
+                bd = b - pp[idx][1]
+                if td > 0:
+                    percpu_pct.append(round(max(0.0, min(100.0, bd / td * 100.0)), 1))
+
+    # Memory + swap.
+    mi = _read_meminfo()
+    mem = swap = None
+    memtotal = mi.get("MemTotal")
+    memavail = mi.get("MemAvailable")
+    if memtotal and memavail is not None and memtotal > 0:
+        mem = int(round((memtotal - memavail) * 100.0 / memtotal))
+    swaptotal = mi.get("SwapTotal")
+    swapfree = mi.get("SwapFree")
+    if swaptotal and swapfree is not None and swaptotal > 0:
+        swap = int(round((swaptotal - swapfree) * 100.0 / swaptotal))
+
+    # Disk usage (worst + per-mount) and disk I/O throughput (delta).
+    disk, mounts = _disk_detail()
+    io_r = io_w = None
+    cur_io = _read_diskio()
+    if cur_io[0] is not None and prev.get("io") and dt and dt > 0:
+        io_r = max(0.0, (cur_io[0] - prev["io"][0]) / dt)
+        io_w = max(0.0, (cur_io[1] - prev["io"][1]) / dt)
+
+    # Network throughput (aggregate + per-interface), delta over dt.
+    cur_net = _read_net_dev()
+    net_rx = net_tx = None
+    net_ifaces = []
+    if prev.get("net") and dt and dt > 0:
+        agg_rx = agg_tx = 0.0
+        for name, c in cur_net.items():
+            p = prev["net"].get(name)
+            if not p:
+                continue
+            rxs = max(0.0, (c["rx"] - p["rx"]) / dt)
+            txs = max(0.0, (c["tx"] - p["tx"]) / dt)
+            agg_rx += rxs
+            agg_tx += txs
+            net_ifaces.append({
+                "name": name, "rx_bps": round(rxs), "tx_bps": round(txs),
+                "rx_err": c["rx_err"], "tx_err": c["tx_err"],
+                "rx_drop": c["rx_drop"], "tx_drop": c["tx_drop"],
+            })
+        net_rx, net_tx = round(agg_rx), round(agg_tx)
+    net_ifaces.sort(key=lambda i: i["rx_bps"] + i["tx_bps"], reverse=True)
+
+    # Top processes + counts (single /proc scan; CPU% needs prev per-pid jiffies).
+    top_cpu, top_mem, proc_count, threads, new_pids = _read_top_procs(
+        prev.get("pids") or {}, total_delta)
+
+    # Stash this reading for next time's deltas.
+    _prev_sample = {
+        "t": now, "cpu_total": cpu_total, "cpu_busy": cpu_busy, "percpu": percpu,
+        "net": cur_net, "io": cur_io if cur_io[0] is not None else prev.get("io"),
+        "pids": new_pids,
+    }
+
+    if load1 is None and mem is None and disk is None and cpu_pct is None:
+        return None
+
+    # System uptime (seconds) — parity with the live snapshot's `uptime`.
+    uptime = None
+    try:
+        with open("/proc/uptime") as f:
+            uptime = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # systemd / OOM health signals, so the controller can serve the fleet-health
+    # verdict from this heartbeat instead of live-probing every host each load.
+    health = _collect_health_signals(mounts)
+
+    # Hypervisor role + running-guest count, so the console can warn before a
+    # reboot/power-off takes a VM host (and all its guests) down.
+    hyp_role, hyp_vms, hyp_vm_names = _detect_hypervisor()
+
+    metrics = {
+        "load1": load1, "load5": load5, "load15": load15, "cores": cores,
+        "cpu": cpu_pct, "mem": mem, "swap": swap, "disk": disk,
+        "net_rx": net_rx, "net_tx": net_tx, "io_r": io_r, "io_w": io_w,
+        "procs": proc_count, "uptime": uptime,
+        # Fleet-health signals (see _collect_health_signals): failed-unit count +
+        # names, overall systemd state, OOM-kills, worst-disk mount.
+        "failed": health["failed"], "units": health["units"],
+        "sysd": health["sysd"], "oom": health["oom"], "mount": health["mount"],
+        # Hypervisor role (None if not a VM host) + running-guest count + the
+        # guest domain names (so the console can nest VMs under their host).
+        "hyp": hyp_role, "vms": hyp_vms, "vm_names": hyp_vm_names,
+    }
+    snapshot = {
+        "percpu": percpu_pct,
+        "mem": {
+            "total_mb": round(memtotal / 1024) if memtotal else None,
+            "available_mb": round(memavail / 1024) if memavail is not None else None,
+            "free_mb": round(mi["MemFree"] / 1024) if "MemFree" in mi else None,
+            "buffers_mb": round(mi["Buffers"] / 1024) if "Buffers" in mi else None,
+            "cached_mb": round(mi["Cached"] / 1024) if "Cached" in mi else None,
+            "swap_total_mb": round(swaptotal / 1024) if swaptotal else None,
+            "swap_used_mb": round((swaptotal - swapfree) / 1024)
+            if (swaptotal and swapfree is not None) else None,
+        },
+        "net": net_ifaces[:8],
+        "mounts": mounts[:12],
+        "top_cpu": top_cpu,
+        "top_mem": top_mem,
+        "procs": proc_count,
+        "threads": threads,
+    }
+    return {"metrics": metrics, "snapshot": snapshot}
+
+
+# Latest performance sample, produced by the dedicated metrics thread
+# (_metrics_loop) and attached to the next heartbeat by the heartbeat thread.
+# Collection is heavy (a full /proc walk for top processes, plus statvfs on
+# every real mount, which can be slow or momentarily stall on a sluggish/stale
+# filesystem) and used to run INLINE on the heartbeat thread, so a slow gather
+# delayed the 1.5s pulse and could make the host lag/flicker offline. Publishing
+# from a separate thread takes it off the heartbeat critical path entirely.
+_metrics_lock = threading.Lock()
+_pending_metrics = None   # {"metrics": {...}, "snapshot": {...}} awaiting send, or None
+
+
+def _metrics_loop(state):
+    """Collect performance metrics on a dedicated thread, on their own cadence,
+    fully off the heartbeat critical path. Publishes the newest sample for the
+    heartbeat thread to attach on its next tick; however long a collection takes
+    (big /proc scan, a slow statvfs), it can never stall the heartbeat pulse that
+    keeps last_seen fresh. The delta metrics (CPU%, net, I/O rates) keep their
+    previous-sample state in-process here, so they're computed over a clean
+    METRICS_INTERVAL window. Best-effort: any error is logged and retried."""
+    global _pending_metrics
+    if METRICS_INTERVAL <= 0:
+        return
+    while True:
+        try:
+            collected = _collect_metrics()
+            if collected is not None:
+                with _metrics_lock:
+                    _pending_metrics = collected
+        except Exception as e:
+            print("[agent] metrics thread:", e)
+        time.sleep(METRICS_INTERVAL)
+
+
+def heartbeat(state):
+    body = {
+        "host_id": state["host_id"],
+        "agent_secret": state["agent_secret"],
+        # Re-sent on every heartbeat, not just enroll, so a
+        # DHCP-reassigned IP keeps the controller's Address
+        # column accurate without needing a full re-enroll.
+        "ip": _local_ip(),
+        # Likewise re-read each heartbeat so a hostname change
+        # (e.g. via Set Hostname) shows up in the inventory
+        # without re-enrolling. gethostname() reflects the new
+        # name immediately after hostnamectl set-hostname.
+        "hostname": socket.gethostname(),
+        # Lets the controller track which hosts run the current agent build.
+        "agent_version": AGENT_VERSION,
+    }
+
+    # Agent integrity (Tier 1): self-measurement manifest the controller compares
+    # to this host's sealed flashback. Omitted entirely if the module isn't
+    # present, so it stays non-breaking for older bundles.
+    if _HAVE_INTEGRITY:
+        try:
+            body["measurements"] = agent_integrity.measure()
+        except Exception:
+            pass
+
+    # Attach the newest sample the metrics thread has published, if any. This is
+    # non-blocking (no collection here) — the gather happens on _metrics_loop, so
+    # a slow sample never delays this heartbeat. Draining it (set back to None)
+    # means each collected sample lands on exactly one heartbeat, so the
+    # controller's time-series table still grows at ~one row per host per
+    # METRICS_INTERVAL rather than per 1.5s heartbeat.
+    global _pending_metrics
+    with _metrics_lock:
+        pending = _pending_metrics
+        _pending_metrics = None
+    if pending is not None:
+        body["metrics"] = pending["metrics"]
+        body["snapshot"] = pending["snapshot"]
+
+    try:
+        r = _request("POST", "/agents/heartbeat", json=body, timeout=10)
+        _raise_with_detail(r)
+    except requests.RequestException as e:
+        if not isinstance(e, (requests.ConnectionError, requests.Timeout)):
+            print("[agent] heartbeat failed:", e)
+
+
+def _heartbeat_loop(state):
+    """Send the heartbeat (and periodic metrics sample) on a DEDICATED thread, on
+    its own steady cadence, independent of task execution.
+
+    Previously heartbeat + task execution shared one thread: while the agent was
+    busy running a long command (applying updates, a slow posture gather), it
+    couldn't get back to the top of the loop to heartbeat — so `last_seen` went
+    stale and the console showed the host OFFLINE mid-operation (e.g. "patched a
+    VM and now it says it's offline"). Running heartbeats here means the host
+    keeps reporting in no matter how long a task takes.
+
+    Best-effort: any error is logged and retried on the next tick. The task loop
+    remains the single authority for enrollment/exit (UnknownHostError), so this
+    thread just swallows everything and keeps the pulse going."""
+    while True:
+        try:
+            heartbeat(state)
+        except Exception as e:               # incl. UnknownHostError — the task loop handles exit
+            print("[agent] heartbeat thread:", e)
+        time.sleep(_current_poll_delay())
+
+
+# =========================================================
+# CONFIG BACKUP (Sysible Flashback): snapshot the tracked config paths on a
+# schedule, and apply restores an operator queued in the console.
+#
+# Everything goes through the CONTROLLER, not Flashback directly. The controller
+# authenticates this agent and stamps our host_id downstream, so no host holds
+# Flashback's token and no host can read or write another host's backups. It also
+# means this works on an outbound-only host exactly like every other agent call.
+# =========================================================
+def _fb_excluded(path, patterns):
+    import fnmatch
+    return any(fnmatch.fnmatch(path, pat) for pat in patterns if pat)
+
+
+def _fb_collect():
+    """Read the tracked config files. Returns (files, skipped, truncated).
+
+    Best-effort by design: an unreadable file, a dangling symlink or a path that
+    vanished mid-walk is skipped, never fatal — a snapshot of most of /etc beats
+    no snapshot because one file was busy."""
+    import base64
+    import stat as statmod
+
+    patterns = [p for p in FB_EXCLUDE.split(":") if p]
+    roots = [p for p in FB_PATHS.split(":") if p]
+    files, skipped, total = [], 0, 0
+    truncated = False
+
+    def add(fp):
+        nonlocal total, skipped, truncated
+        if truncated or _fb_excluded(fp, patterns):
+            return
+        try:
+            st = os.stat(fp)                     # follows symlinks on purpose:
+            if not statmod.S_ISREG(st.st_mode):  # /etc/resolv.conf is often one
+                return
+            if st.st_size > FB_MAX_FILE:
+                skipped += 1
+                return
+            with open(fp, "rb") as fh:
+                data = fh.read(FB_MAX_FILE + 1)
+        except OSError:
+            skipped += 1
+            return
+        if len(data) > FB_MAX_FILE:
+            skipped += 1
+            return
+        b64 = base64.b64encode(data).decode("ascii")
+        if total + len(b64) > FB_MAX_TOTAL:
+            truncated = True
+            return
+        total += len(b64)
+        files.append({"path": fp, "content_b64": b64})
+
+    for root in roots:
+        if os.path.isfile(root):
+            add(root)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            # Prune whole excluded subtrees rather than walking into them.
+            dirnames[:] = [d for d in dirnames
+                           if not _fb_excluded(os.path.join(dirpath, d) + "/", patterns)]
+            for name in filenames:
+                add(os.path.join(dirpath, name))
+            if truncated:
+                break
+    return files, skipped, truncated
+
+
+# =========================================================
+# Restore points — a whole machine, captured here and put back offline
+# =========================================================
+# Config capture above keeps a history of a short list of config files. A
+# RESTORE POINT is the machine: every file, symlink and directory under the
+# captured roots, with its mode and ownership. It exists so that a host which
+# has gone wrong can be put back to a state it was actually in, on bare metal
+# and in any cloud alike — which is why it is taken from inside the operating
+# system and not from a hypervisor that may not exist.
+#
+# The protocol is manifest-first: describe everything, be told which hashes
+# this fleet has never seen, upload only those. On a second capture of an
+# unchanged host, or the tenth identical VM, that is nothing at all.
+RP_INTERVAL = float(_fb_env("RESTORE_POINT_INTERVAL", "0"))      # 0 = manual only
+RP_ROOTS = _fb_env("RESTORE_POINT_ROOTS", "/etc:/usr/local:/opt:/srv")
+# Never captured, whatever the roots say: kernel and device interfaces that are
+# not files, volatile state, and caches. Capturing /proc is not a backup, it is
+# a way to fill a disk with a snapshot of the kernel's imagination.
+RP_NEVER = _fb_env(
+    "RESTORE_POINT_EXCLUDE",
+    "/proc:/sys:/dev:/run:/tmp:/var/tmp:/var/cache:/var/lib/docker:"
+    "/var/lib/containers:/swapfile:/lost+found:" + _FB_STAGE_PARENT)
+RP_MAX_FILE = int(_fb_env("RESTORE_POINT_MAX_FILE_BYTES", str(64 * 1024 * 1024)))
+RP_MANIFEST_CHUNK = int(_fb_env("RESTORE_POINT_MANIFEST_CHUNK", "2000"))
+RP_BLOB_BATCH_BYTES = int(_fb_env("RESTORE_POINT_BLOB_BATCH_BYTES",
+                                  str(4 * 1024 * 1024)))
+
+
+def _rp_excluded(path):
+    for pref in [p for p in RP_NEVER.split(":") if p]:
+        if path == pref or path.startswith(pref.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _rp_walk(roots):
+    """Every entry under `roots`, as manifest dicts. Never follows a symlink
+    out of the tree: the link itself is what was there, and following it would
+    capture the target twice and the link not at all."""
+    import stat as _stat
+    out = []
+    for root in [r for r in roots.split(":") if r]:
+        if _rp_excluded(root) or not os.path.exists(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+            if _rp_excluded(dirpath):
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames
+                           if not _rp_excluded(os.path.join(dirpath, d))]
+            try:
+                st = os.lstat(dirpath)
+                out.append({"path": dirpath, "kind": "d",
+                            "mode": _stat.S_IMODE(st.st_mode),
+                            "uid": st.st_uid, "gid": st.st_gid})
+            except OSError:
+                continue
+            for name in filenames:
+                full = os.path.join(dirpath, name)
+                if _rp_excluded(full):
+                    continue
+                try:
+                    st = os.lstat(full)
+                except OSError:
+                    continue
+                if _stat.S_ISLNK(st.st_mode):
+                    try:
+                        out.append({"path": full, "kind": "l", "mode": 0o777,
+                                    "uid": st.st_uid, "gid": st.st_gid,
+                                    "target": os.readlink(full)})
+                    except OSError:
+                        pass
+                    continue
+                # Sockets, fifos and devices are not content and cannot be
+                # restored by writing bytes; recording them as files would
+                # produce a manifest that can never be satisfied.
+                if not _stat.S_ISREG(st.st_mode):
+                    continue
+                if st.st_size > RP_MAX_FILE:
+                    continue
+                try:
+                    h = hashlib.sha256()
+                    with open(full, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                except OSError:
+                    continue
+                out.append({"path": full, "kind": "f",
+                            "mode": _stat.S_IMODE(st.st_mode),
+                            "uid": st.st_uid, "gid": st.st_gid,
+                            "size": st.st_size, "sha256": h.hexdigest()})
+    return out
+
+
+def _rp_capture(state, label=""):
+    """Take one restore point. Returns a short summary for the log."""
+    host = state["host_id"]
+    entries = _rp_walk(RP_ROOTS)
+    if not entries:
+        return "nothing to capture"
+    r = _request("POST", f"/agents/{host}/restore-point/open",
+                 headers={"X-Agent-Secret": state["agent_secret"]},
+                 json={"label": label or time.strftime("%Y-%m-%d %H:%M"),
+                       "roots": RP_ROOTS}, timeout=60)
+    if r.status_code >= 400:
+        return f"refused (HTTP {r.status_code})"
+    point_id = (r.json() or {}).get("point_id")
+    by_path = {e["path"]: e for e in entries}
+
+    missing = []
+    for i in range(0, len(entries), RP_MANIFEST_CHUNK):
+        chunk = entries[i:i + RP_MANIFEST_CHUNK]
+        rr = _request("POST", f"/agents/{host}/restore-point/manifest",
+                      headers={"X-Agent-Secret": state["agent_secret"]},
+                      json={"point_id": point_id, "entries": chunk}, timeout=120)
+        if rr.status_code >= 400:
+            return f"manifest refused (HTTP {rr.status_code})"
+        missing += (rr.json() or {}).get("missing") or []
+
+    # Only the content this whole fleet has never seen. Batched by BYTES, not
+    # by count: one 40 MB file and four thousand 2 KB ones need very different
+    # batch sizes and the relay caps the request either way.
+    want = {}
+    for e in entries:
+        if e.get("kind") == "f" and e.get("sha256") in set(missing):
+            want.setdefault(e["sha256"], e["path"])
+    batch, size, sent = [], 0, 0
+    def _flush():
+        nonlocal batch, size, sent
+        if not batch:
+            return None
+        rr = _request("POST", f"/agents/{host}/restore-point/blobs",
+                      headers={"X-Agent-Secret": state["agent_secret"]},
+                      json={"point_id": point_id, "blobs": batch}, timeout=300)
+        batch, size = [], 0
+        if rr.status_code >= 400:
+            return f"content refused (HTTP {rr.status_code})"
+        sent += (rr.json() or {}).get("stored") or 0
+        return None
+    for sha, path in want.items():
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            continue
+        enc = base64.b64encode(body).decode()
+        if size + len(enc) > RP_BLOB_BATCH_BYTES:
+            err = _flush()
+            if err:
+                return err
+        batch.append({"sha256": sha, "content_b64": enc})
+        size += len(enc)
+    err = _flush()
+    if err:
+        return err
+
+    rr = _request("POST", f"/agents/{host}/restore-point/seal",
+                  headers={"X-Agent-Secret": state["agent_secret"]},
+                  json={"point_id": point_id}, timeout=120)
+    if rr.status_code >= 400:
+        try:
+            why = (rr.json() or {}).get("detail") or rr.text[:200]
+        except Exception:
+            why = rr.text[:200]
+        return f"could not seal: {why}"
+    return (f"restore point #{point_id}: {len(entries)} entries, "
+            f"{sent} new file(s) uploaded")
+
+
+def _rp_poll(state):
+    """Stage and arm a restore an operator queued, then reboot into it.
+
+    NOTHING IS WRITTEN TO THE LIVE FILESYSTEM HERE. Staging builds the new tree
+    beside the old one and verifies every digest; the swap happens from
+    systemd's offline-update target, where almost nothing from this filesystem
+    is running. See host_agent/flashback_restore.py.
+
+    IT REFUSES RATHER THAN FALLING BACK. If the offline apply cannot be armed
+    on this host, the restore does not happen — writing a filesystem under live
+    processes is the thing this design exists to avoid, and doing it anyway
+    because the safe path was unavailable would be the worst possible moment to
+    take that risk.
+    """
+    if _fbrestore is None:
+        return
+    host = state["host_id"]
+    r = _request("GET", f"/agents/{host}/restore-point/pending",
+                 headers={"X-Agent-Secret": state["agent_secret"]}, timeout=30)
+    if r.status_code >= 400:
+        return
+    job = (r.json() or {}).get("job")
+    if not job:
+        return
+    jid, pid = job["id"], job["point_id"]
+    if _fbrestore.is_ready(jid):
+        return                      # already staged; waiting on the reboot
+    print(f"[agent] restore point #{pid} requested — staging (nothing is "
+          f"changed until the reboot)")
+    _request("POST", f"/agents/{host}/restore-point/start",
+             headers={"X-Agent-Secret": state["agent_secret"]},
+             json={"job_id": jid}, timeout=30)
+
+    def _fetch(sha):
+        rr = _request("GET", f"/agents/{host}/restore-point/blob",
+                      headers={"X-Agent-Secret": state["agent_secret"]},
+                      params={"sha256": sha}, timeout=300)
+        if rr.status_code >= 400:
+            raise OSError(f"blob {sha[:12]}… unavailable (HTTP {rr.status_code})")
+        return rr.content
+
+    try:
+        entries, off = [], 0
+        while True:
+            rr = _request("GET", f"/agents/{host}/restore-point/manifest",
+                          headers={"X-Agent-Secret": state["agent_secret"]},
+                          params={"point_id": pid, "limit": 2000, "offset": off},
+                          timeout=120)
+            if rr.status_code >= 400:
+                raise OSError(f"manifest unavailable (HTTP {rr.status_code})")
+            page = (rr.json() or {}).get("entries") or []
+            if not page:
+                break
+            entries += page
+            off += len(page)
+        summary = _fbrestore.stage(jid, entries, _fetch)
+        armed, how = _fbrestore.arm(jid)
+        if not armed:
+            raise OSError(how)
+    except Exception as e:
+        _request("POST", f"/agents/{host}/restore-point/finish",
+                 headers={"X-Agent-Secret": state["agent_secret"]},
+                 json={"job_id": jid, "ok": False, "note": str(e)[:400]},
+                 timeout=30)
+        print("[agent] restore could not be staged:", e)
+        return
+    print(f"[agent] staged {summary['files']} file(s) "
+          f"({summary['fetched']} fetched, {summary['reused']} already here); "
+          f"applying via {how} on reboot")
+    if job.get("reboot", True):
+        _rp_reboot()
+
+
+def _rp_reboot():
+    for argv in (["systemctl", "reboot"], ["reboot"], ["shutdown", "-r", "now"]):
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            continue
+    print("[agent] could not reboot — the restore is staged and will apply on "
+          "the next boot")
+
+
+def _rp_report_result(state):
+    """After a reboot: did the offline apply run, and how did it go?
+
+    The agent was not running when it happened, so the apply leaves its result
+    on disk and this is what picks it up. Without it a restore succeeds and the
+    console shows it as still running for ever.
+    """
+    if _fbrestore is None:
+        return
+    host = state["host_id"]
+    try:
+        jobs = sorted(os.listdir(_fbrestore.STAGE_ROOT))
+    except OSError:
+        return
+    for jid in jobs:
+        res = _fbrestore.read_result(jid)
+        if not res:
+            continue
+        note = (f"{res.get('wrote', 0)} written, "
+                f"{res.get('displaced', 0)} displaced")
+        errs = res.get("errors") or []
+        if errs:
+            note += f"; {len(errs)} error(s): " + "; ".join(errs[:3])
+        r = _request("POST", f"/agents/{host}/restore-point/finish",
+                     headers={"X-Agent-Secret": state["agent_secret"]},
+                     json={"job_id": int(jid), "ok": bool(res.get("ok")),
+                           "note": note[:400]}, timeout=30)
+        if r.status_code < 400:
+            try:
+                os.remove(os.path.join(_fbrestore.job_dir(jid),
+                                       _fbrestore.RESULT))
+            except OSError:
+                pass
+            print(f"[agent] reported restore #{jid}: {note}")
+
+
+def _fb_send_snapshot(state):
+    files, skipped, truncated = _fb_collect()
+    if not files:
+        return
+    r = _request(
+        "POST", f"/agents/{state['host_id']}/config-snapshot",
+        headers={"X-Agent-Secret": state["agent_secret"]},
+        json={"files": files},
+        timeout=60,
+    )
+    if r.status_code >= 400:
+        # 503 = this controller has no Flashback configured. Say it once per tick
+        # at most; it is a platform wiring fact, not a per-host fault.
+        detail = ""
+        try:
+            detail = (r.json() or {}).get("detail") or ""
+        except Exception:
+            detail = r.text[:200]
+        print(f"[agent] config snapshot refused (HTTP {r.status_code}): {detail}")
+        return
+    try:
+        out = r.json()
+    except Exception:
+        out = {}
+    note = f"[agent] config snapshot: {len(files)} file(s), {out.get('changed', '?')} changed"
+    if skipped:
+        note += f", {skipped} skipped (unreadable or over {FB_MAX_FILE} bytes)"
+    if truncated:
+        note += f" — TRUNCATED at {FB_MAX_TOTAL} bytes; narrow SYSIBLE_FLASHBACK_PATHS"
+    print(note)
+
+
+def _fb_restorable(path):
+    """(ok, reason) — is this a path a restore may actually be written to?
+
+    THE AGENT RUNS AS ROOT ON THE HOST. Until this existed, a restore wrote
+    whatever absolute path the payload named, and the only check was that it
+    started with "/". A restore is the one operation here that changes a managed
+    machine, so anything able to name the path — a compromised controller, a
+    poisoned row in the version store, a bug in either — could drop a file into
+    /etc/cron.d, /root/.ssh/authorized_keys or a systemd unit directory on every
+    host in the fleet at once, as root, in one poll interval. The agent is the
+    last component that can refuse, and it must not have to trust the thing
+    telling it what to write.
+
+    A restore is only ever a rollback of something THIS host captured, so the
+    rule is the capture rule: inside a tracked root, not on the never-captured
+    exclude list, and not reached through a symlinked parent that leaves the
+    root. The file ITSELF may be a symlink — /etc/resolv.conf usually is — and
+    that is fine: os.replace swaps the link, not what it points at.
+    """
+    import posixpath
+    if not path or not path.startswith("/"):
+        return False, "not an absolute path"
+    norm = posixpath.normpath(path)
+    if norm != path:
+        return False, "path is not in normal form (.. or redundant separators)"
+    if _fb_excluded(norm, [p for p in FB_EXCLUDE.split(":") if p]):
+        return False, "on the never-captured exclude list"
+
+    roots = [r.rstrip("/") or "/" for r in FB_PATHS.split(":") if r]
+    if not roots:
+        return False, "this host tracks no config paths"
+    # Compare against the literal roots AND their resolved forms: a distro where
+    # a tracked root sits under a symlink (/var -> /private/var and friends)
+    # must not have every restore refused as "outside".
+    allowed = set(roots)
+    for r in roots:
+        try:
+            allowed.add(os.path.realpath(r).rstrip("/") or "/")
+        except OSError:
+            pass
+
+    def _inside(cand):
+        return any(cand == root or cand.startswith(root + "/") for root in allowed)
+
+    if not _inside(norm):
+        return False, "outside every tracked config root"
+    try:
+        real_parent = os.path.realpath(os.path.dirname(norm) or "/").rstrip("/") or "/"
+    except OSError:
+        return False, "its directory could not be resolved"
+    if not _inside(posixpath.join(real_parent, posixpath.basename(norm))):
+        return False, f"its directory resolves outside the tracked roots ({real_parent})"
+    return True, ""
+
+
+def _fb_apply_restore(state, item):
+    """Write one queued version back, keeping what it replaced."""
+    import hashlib
+    import shutil
+    rid = item.get("id")
+    r = _request(
+        "GET", f"/agents/{state['host_id']}/config-restores/{rid}/payload",
+        headers={"X-Agent-Secret": state["agent_secret"]}, timeout=60,
+    )
+    if r.status_code >= 400:
+        print(f"[agent] restore {rid}: controller returned HTTP {r.status_code}")
+        return
+    # X-Flashback-* is the only spelling needed: the Controller has always
+    # relayed it, including during the two days the product was called Baseline
+    # (when it sent both). An agent that reads this name talks to any build.
+    path = r.headers.get("X-Flashback-Path") or item.get("path") or ""
+    want = (r.headers.get("X-Flashback-Sha256") or "").lower()
+    content = r.content
+    allowed, why = _fb_restorable(path)
+    if not allowed:
+        # Ack as FAILED, not silence: a refusal the console never sees leaves the
+        # restore pending forever and tells nobody the host said no.
+        print(f"[agent] restore {rid}: REFUSING to write {path!r} — {why}")
+        _fb_ack(state, rid, False, path)
+        return
+    got = hashlib.sha256(content).hexdigest()
+    if want and got != want:
+        # Never write bytes that don't match the digest the store recorded. Ack as
+        # FAILED so the console shows it rather than leaving it pending forever.
+        print(f"[agent] restore {rid}: digest mismatch for {path} — not writing")
+        _fb_ack(state, rid, False, path)
+        return
+    ok = True
+    try:
+        d = os.path.dirname(path) or "/"
+        os.makedirs(d, exist_ok=True)
+        # Keep what we replace. A restore is the one thing here that changes the
+        # host, and "I restored the wrong version" needs a way back.
+        if os.path.exists(path):
+            backup = f"{path}.sysible-backup-{int(time.time())}"
+            try:
+                shutil.copy2(path, backup)
+                print(f"[agent] restore {rid}: kept previous {path} as {backup}")
+            except OSError as e:
+                print(f"[agent] restore {rid}: could not back up {path}: {e}")
+        # Write via a temp file in the SAME directory + rename, so a reader never
+        # sees a half-written config and the swap is atomic on the same fs.
+        tmp = f"{path}.sysible-restore.tmp"
+        mode = None
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except OSError:
+            pass
+        with open(tmp, "wb") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        print(f"[agent] restore {rid}: wrote {path} ({len(content)} bytes)")
+    except OSError as e:
+        ok = False
+        print(f"[agent] restore {rid}: FAILED to write {path}: {e}")
+        try:
+            os.unlink(f"{path}.sysible-restore.tmp")
+        except OSError:
+            pass
+    _fb_ack(state, rid, ok, path)
+
+
+def _fb_ack(state, rid, ok, path=""):
+    try:
+        _request("POST", f"/agents/{state['host_id']}/config-restores/{rid}/ack",
+                 headers={"X-Agent-Secret": state["agent_secret"]},
+                 json={"ok": bool(ok), "path": path}, timeout=20)
+    except requests.RequestException as e:
+        print(f"[agent] restore {rid}: could not acknowledge: {e}")
+
+
+_FB_LAST_REFUSAL = [0.0, ""]
+
+
+def _fb_poll_restores(state):
+    r = _request("GET", f"/agents/{state['host_id']}/config-restores",
+                 headers={"X-Agent-Secret": state["agent_secret"]}, timeout=20)
+    if r.status_code >= 400:
+        # Say WHY, or the host's journal is silent about the one thing an
+        # operator staring at "Back up now did nothing" needs to know. A 503 here
+        # means the controller has no Flashback wiring — a platform fact that
+        # would otherwise repeat every poll, so log it once and then only when it
+        # changes or every 10 minutes.
+        detail = ""
+        try:
+            detail = (r.json() or {}).get("detail") or ""
+        except Exception:
+            detail = (r.text or "")[:200]
+        line = f"HTTP {r.status_code}: {detail}"
+        now = time.time()
+        if line != _FB_LAST_REFUSAL[1] or now - _FB_LAST_REFUSAL[0] > 600:
+            _FB_LAST_REFUSAL[0], _FB_LAST_REFUSAL[1] = now, line
+            print(f"[agent] config-backup poll refused ({line})")
+        return
+    _FB_LAST_REFUSAL[1] = ""
+    try:
+        body = r.json() or {}
+    except Exception:
+        return
+    for item in body.get("restores") or []:
+        try:
+            _fb_apply_restore(state, item)
+        except Exception as e:
+            print(f"[agent] restore {item.get('id')}: {e}")
+    # "Back up now" from the console. It rides this poll rather than a new
+    # channel because an agent is outbound-only — nothing can reach in to ask.
+    if body.get("capture_requested"):
+        print("[agent] config snapshot requested from the console — capturing now")
+        try:
+            _fb_send_snapshot(state)
+        except Exception as e:
+            print("[agent] requested snapshot failed:", e)
+    # A whole-machine restore point, asked for from the Flashback console. Rides
+    # this same poll, and is kept separate from the config snapshot above: one is
+    # a few files out of /etc, the other is the machine.
+    if body.get("restore_point_requested"):
+        print("[agent] restore point requested from the console — capturing now")
+        try:
+            # Named so the console can tell a point somebody asked for from
+            # one the schedule took. A list of identical labels is a list an
+            # operator cannot choose from under pressure.
+            print("[agent]", _rp_capture(
+                state, label="on request " + time.strftime("%Y-%m-%d %H:%M")))
+        except Exception as e:
+            print("[agent] requested restore point failed:", e)
+
+
+def _fb_loop(state):
+    """Capture on FB_INTERVAL, check for restores on the shorter FB_RESTORE_POLL.
+    Its own thread, like metrics: a big /etc walk must never delay a heartbeat.
+    Every error is caught and retried — config backup is best-effort and must not
+    be able to stop an agent doing its real work."""
+    if FB_INTERVAL <= 0:
+        print("[agent] config backup disabled (SYSIBLE_FLASHBACK_INTERVAL=0)")
+        return
+    next_capture = 0.0
+    next_point = time.time() + RP_INTERVAL if RP_INTERVAL > 0 else 0.0
+    # FIRST, before anything else this thread does. A restore applied while we
+    # were not running has left its result on disk, and until it is reported
+    # the console shows that host as still restoring — for ever.
+    try:
+        _rp_report_result(state)
+    except Exception as e:                                  # pragma: no cover
+        print("[agent] could not report a finished restore:", e)
+    while True:
+        try:
+            now = time.time()
+            if now >= next_capture:
+                _fb_send_snapshot(state)
+                next_capture = now + FB_INTERVAL
+            if next_point and now >= next_point:
+                print("[agent]", _rp_capture(state))
+                next_point = now + RP_INTERVAL
+            _rp_poll(state)
+            _fb_poll_restores(state)
+        except Exception as e:
+            if not isinstance(e, (requests.ConnectionError, requests.Timeout)):
+                print("[agent] config backup thread:", e)
+        time.sleep(max(5.0, FB_RESTORE_POLL))
+
+
+# =========================================================
+# AGENT-HOSTED PTY (Option B): run the interactive shell locally and stream it
+# to the controller over the agent's own outbound HTTP channel, so terminals
+# work on hosts the controller can't reach inbound (NAT/firewall, no SSH).
+# =========================================================
+def _start_pty_session(state, task):
+    """Spawn a shell on a local PTY and bridge it to the controller on its own
+    threads (so the main task loop keeps polling)."""
+    import json as _json
+    try:
+        cfg = _json.loads(task.get("command") or "{}")
+    except Exception:
+        cfg = {}
+    sid = cfg.get("session_id")
+    if not sid:
+        return
+    user = cfg.get("user") or None
+    cols = int(cfg.get("cols") or 80)
+    rows = int(cfg.get("rows") or 24)
+    threading.Thread(target=_pty_bridge, args=(state, sid, user, cols, rows),
+                     name="sysible-pty", daemon=True).start()
+
+
+def _pty_set_winsize(fd, cols, rows):
+    import fcntl
+    import struct
+    import termios
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except Exception:
+        pass
+
+
+def _pty_post_output(state, sid, data, ended=False):
+    """POST a chunk of shell output up to the controller. Returns True if the
+    browser has closed the session (tells us to stop and kill the shell)."""
+    try:
+        r = _request("POST", f"/agents/{state['host_id']}/pty/{sid}/output",
+                     json={"agent_secret": state["agent_secret"], "data": data, "ended": ended},
+                     timeout=20)
+        try:
+            return bool(r.json().get("closed"))
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _pty_poll_io(state, sid):
+    """Long-poll the controller for queued input/resize/close. Returns
+    (messages, closed)."""
+    try:
+        # Send the secret in a header, NOT a query param: uvicorn's access log
+        # records the full path+query on every ~25s poll, so a query-string secret
+        # would write a live agent credential to the controller logs for the whole
+        # terminal session. Every other agent call already uses this header.
+        r = _request("GET", f"/agents/{state['host_id']}/pty/{sid}/io",
+                     headers={"X-Agent-Secret": state["agent_secret"]}, timeout=35)
+        d = r.json()
+        return d.get("msgs", []), bool(d.get("closed"))
+    except Exception:
+        return [], False
+
+
+def _pty_child_exec(user, info, default_shell):
+    """In the pty.fork() child (which already has the slave as its controlling
+    terminal): drop to the operator's user if we resolved one and we're root,
+    set up their login environment, then exec an interactive shell. `info` is a
+    pre-resolved (uid, gid, home, shell) tuple — resolved in the PARENT so no
+    NSS lookup runs in the forked child."""
+    env = dict(os.environ)
+    env["TERM"] = "xterm"
+    sh = default_shell
+    if info and os.geteuid() == 0 and info[0] != 0:
+        uid, gid, home, ushell = info
+        try:
+            os.setgid(gid)
+            try:
+                os.initgroups(user, gid)   # supplementary groups (needs root)
+            except Exception:
+                pass
+            os.setuid(uid)                 # drop privileges LAST
+        except Exception:
+            pass
+        home = home if (home and os.path.isdir(home)) else "/tmp"
+        env["HOME"] = home
+        env["USER"] = user
+        env["LOGNAME"] = user
+        env["PWD"] = home
+        try:
+            os.chdir(home)
+        except Exception:
+            try:
+                os.chdir("/tmp")
+            except Exception:
+                pass
+        if ushell:
+            sh = ushell
+    elif os.geteuid() == 0:
+        # No operator account was mapped and we're root: present a clean ROOT
+        # login shell rather than inheriting the agent's service context
+        # (WorkingDirectory=/opt/sysible-agent and its env), which otherwise
+        # drops the operator into /opt/sysible-agent looking like the "sysible"
+        # service account instead of a normal root login.
+        env["HOME"] = "/root"
+        env["USER"] = "root"
+        env["LOGNAME"] = "root"
+        env["PWD"] = "/root"
+        # Don't leak the agent's own config into the operator's shell.
+        for _k in list(env):
+            if _k.startswith("SYSIBLE_"):
+                env.pop(_k, None)
+        try:
+            os.chdir("/root")
+        except Exception:
+            try:
+                os.chdir("/")
+            except Exception:
+                pass
+    if not sh or not os.path.exists(sh):
+        sh = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+    # argv[0] with a leading '-' makes it a login shell (sources profile);
+    # the controlling tty (from pty.fork) makes it interactive with job control.
+    argv0 = "-" + os.path.basename(sh)
+    try:
+        os.execve(sh, [argv0], env)
+    except Exception:
+        try:
+            os.execve("/bin/sh", ["-sh"], env)
+        except Exception:
+            pass
+    os._exit(1)
+
+
+def _pty_bridge(state, sid, user, cols, rows):
+    import pty as _pty
+    import select as _select
+    import signal as _signal
+    # Prefer bash for the interactive terminal. Under systemd the agent's own
+    # $SHELL is typically /bin/sh, which would drop the operator into a bare POSIX
+    # shell (no history, no tab-completion) — the /bin/sh people see on
+    # agent/bastion-enrolled hosts. Use $SHELL only if it's a real installed shell;
+    # otherwise bash if present, then /bin/sh as the last resort.
+    shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+    env_shell = os.environ.get("SHELL")
+    if env_shell and env_shell not in ("/bin/sh", "/usr/bin/sh") and os.path.exists(env_shell):
+        shell = env_shell
+
+    # Resolve the operator's account in the PARENT (before fork) so the child
+    # does no NSS lookup. None => run as the agent (root).
+    info = None
+    if user:
+        try:
+            import pwd
+            pw = pwd.getpwnam(user)
+            info = (pw.pw_uid, pw.pw_gid, pw.pw_dir, pw.pw_shell)
+        except Exception:
+            info = None
+        if info is None:
+            # A SPECIFIC operator account was requested (run_as) but does not
+            # exist on this host. Fail CLOSED: _pty_child_exec would otherwise
+            # fall through to a root login shell (the `user is None => root`
+            # path), silently escalating an operator mapped to a missing local
+            # account to root. Refuse instead.
+            _pty_post_output(
+                state, sid,
+                f"[sysible] cannot open a terminal: user '{user}' does not exist "
+                "on this host.\r\n",
+                ended=True,
+            )
+            return
+
+    try:
+        pid, master = _pty.fork()   # child gets the slave as its controlling tty
+    except Exception as e:
+        _pty_post_output(state, sid, f"[sysible] could not allocate a terminal: {e}\r\n", ended=True)
+        return
+    if pid == 0:
+        _pty_child_exec(user, info, shell)   # never returns
+        os._exit(1)
+
+    _pty_set_winsize(master, cols, rows)
+    stop = {"v": False}
+
+    def out_loop():
+        while not stop["v"]:
+            try:
+                r, _, _ = _select.select([master], [], [], 0.2)
+            except Exception:
+                break
+            if master in r:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break            # shell exited / tty closed
+                if not data:
+                    break
+                if _pty_post_output(state, sid, data.decode(errors="replace")):
+                    stop["v"] = True
+                    break
+        stop["v"] = True
+        _pty_post_output(state, sid, "", ended=True)   # tell the browser it ended
+
+    ot = threading.Thread(target=out_loop, name="sysible-pty-out", daemon=True)
+    ot.start()
+
+    # Input loop: long-poll the controller for keystrokes / resize / close.
+    while not stop["v"]:
+        try:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                break
+        except ChildProcessError:
+            break
+        except Exception:
+            pass
+        msgs, closed = _pty_poll_io(state, sid)
+        if closed:
+            break
+        for m in msgs:
+            t = m.get("t")
+            if t == "i":
+                try:
+                    os.write(master, (m.get("d") or "").encode())
+                except OSError:
+                    stop["v"] = True
+                    break
+            elif t == "r":
+                _pty_set_winsize(master, int(m.get("cols") or cols), int(m.get("rows") or rows))
+
+    stop["v"] = True
+    try:
+        os.kill(pid, _signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except Exception:
+        pass
+    try:
+        os.close(master)
+    except Exception:
+        pass
+    _pty_post_output(state, sid, "", ended=True)
+
+
+def loop(state):
+    controller_desc = (
+        CONTROLLER
+        if len(_CONTROLLER_CANDIDATES) == 1
+        else f"{CONTROLLER} (+{len(_CONTROLLER_CANDIDATES) - 1} more candidate(s))"
+    )
+    print("[agent] running:", state["host_id"], "controller:", controller_desc)
+
+    # Pulse on its own thread so a long-running task never makes the host look
+    # offline. Daemon: it dies with the process when the task loop exits.
+    threading.Thread(target=_heartbeat_loop, args=(state,), daemon=True,
+                     name="sysible-heartbeat").start()
+
+    # Gather performance metrics on their own thread too, so a heavy/slow
+    # collection is off the heartbeat critical path (see _metrics_loop). Daemon
+    # for the same reason. No-op when METRICS_INTERVAL <= 0.
+    if METRICS_INTERVAL > 0:
+        threading.Thread(target=_metrics_loop, args=(state,), daemon=True,
+                         name="sysible-metrics").start()
+
+    # Config backup (Flashback): snapshot /etc on its own cadence and apply any
+    # restore queued in the console. Daemon, and entirely best-effort — a host
+    # whose controller has no Flashback configured just logs it and carries on.
+    if FB_INTERVAL > 0:
+        threading.Thread(target=_fb_loop, args=(state,), daemon=True,
+                         name="sysible-config-backup").start()
+
+    while True:
+        # Self-heal: if a self-update replaced agent.py on disk but the external
+        # service restart didn't take, re-exec into the new build so we stop
+        # reporting the stale one (else the console shows this host stuck
+        # "updating" forever). No-op until the on-disk source actually changes.
+        _reexec_if_source_changed()
+
+        ran_task = False
+
+        try:
+            tasks = fetch_tasks(state)
+            ran_task = bool(tasks)
+
+            for task in tasks:
+                # Deliberately no command text here (and run_command's
+                # result is never printed either) - only the task id.
+                # The command itself can carry secrets (passwords, API
+                # keys, tokens passed as args/env), and this print goes
+                # to the agent's own stdout/log on the managed host,
+                # which is a much wider-open place for that to leak
+                # than the controller's already-authenticated DB.
+                task_id = task.get("id")
+                print("[agent] running task", task_id)
+
+                try:
+                    # Agent-hosted terminal: spawn a local shell on a PTY and
+                    # stream it to the controller (no inbound SSH). It runs on
+                    # its own threads; mark the task done so it isn't reclaimed.
+                    if task.get("kind") == "pty_open":
+                        _start_pty_session(state, task)
+                        send_result(state, task_id,
+                                    {"stdout": "pty session started", "stderr": "", "returncode": 0})
+                        continue
+                    # want_root: the controller sets it for actions whose UI
+                    # promises root. Absent on an older controller, which then
+                    # behaves exactly as it did before.
+                    result = run_command(task["command"], task.get("run_as"),
+                                         task.get("become_password"),
+                                         want_root=bool(task.get("want_root")))
+                    send_result(state, task_id, result)
+                except UnknownHostError:
+                    raise
+                except Exception as e:
+                    # One malformed/failing task (e.g. missing
+                    # "command", a send_result network blip that
+                    # somehow raised, etc.) must not take the whole
+                    # agent process down - log it and keep polling.
+                    print(f"[agent] task {task_id} failed: {e}")
+                    # Report the failure back so the controller marks the task
+                    # done NOW instead of leaving it 'dispatched' until the 15-min
+                    # reclaim rewrites it as a fabricated 'timed_out' (which looks
+                    # identical to a real timeout to the operator). Best-effort:
+                    # if this send also fails, the reclaim path is still the
+                    # backstop, so swallow any error here.
+                    if task_id is not None:
+                        try:
+                            send_result(state, task_id,
+                                        {"stdout": "", "stderr": f"agent error: {e}",
+                                         "returncode": 1})
+                        except Exception:
+                            pass
+        except UnknownHostError:
+            print(
+                f"[agent] controller no longer recognizes host_id {state['host_id']} "
+                "- disenrolled, or the controller's database was reset/recreated. "
+                "Clearing local state and exiting. Re-run this agent with a FRESH "
+                "enrollment token (e.g. re-download the agent bundle) - the token "
+                "this host enrolled with originally has already been used and "
+                "won't be accepted again."
+            )
+            clear_state()
+            sys.exit(1)
+        except Exception:
+            # Catch-all so an unexpected error - a heartbeat/fetch
+            # hiccup under heavy load, a transient JSON/parsing error,
+            # anything not already handled above - logs and retries on
+            # the next poll instead of killing the agent process. A
+            # "bogged down" host (high CPU/memory pressure, a flaky
+            # network blip mid-request) is exactly when staying alive
+            # matters most.
+            traceback.print_exc()
+
+        # Skip the idle delay entirely right after handling at least
+        # one task - check again immediately in case another command
+        # was queued in the meantime, instead of always waiting out a
+        # fixed interval between every single task. Only an actually
+        # idle cycle (nothing to do) pays POLL_INTERVAL - the network
+        # round-trip of heartbeat()+fetch_tasks() itself still bounds
+        # how tight this loop can spin either way.
+        if not ran_task:
+            time.sleep(_current_poll_delay())
+
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    state = load_state()
+
+    if not state or "agent_secret" not in state:
+        state = register()
+
+    loop(state)
+
+
+if __name__ == "__main__":
+    main()

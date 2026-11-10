@@ -1,0 +1,55 @@
+# Sysible Linux Engineering Platform — Community Edition.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   open https://localhost:8810  and create your admin on the first-run screen.
+#
+# The console is served over HTTPS by default with a self-signed cert (so the
+# Monaco IDE's clipboard/paste works and traffic is encrypted across the network).
+# Your browser shows a one-time trust warning — expected for a self-signed cert;
+# proceed once. Set SLEP_TLS_HOSTS to your server's IP/hostname to put it in the
+# cert (removes the name-mismatch warning). For a warning-free cert, set SLEP_TLS=0
+# and terminate TLS at a reverse proxy with a real cert (see docs/RUNNING.md).
+#
+# One service, one volume. SQLite + project files + run logs (and the TLS cert)
+# persist in the named `slep-data` volume across rebuilds.
+services:
+  slep:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        # URL prefix the console is served under. "/" standalone; the SLOP
+        # installer sets "/slep/" so the SPA's assets + API base live under the
+        # gateway's /slep/* path on the one shared origin.
+        SYSIBLE_BASE_PATH: "${SYSIBLE_BASE_PATH:-/}"
+    image: sysible-slep:latest
+    container_name: sysible-slep
+    ports:
+      # The web console over HTTPS (API via /api). Defaults to every interface so
+      # a STANDALONE SLEP is unchanged; behind SLOP the installer sets this to the
+      # docker bridge gateway, so the console is reachable from this host and the
+      # Caddy gateway but not from the network. Otherwise the gateway's security
+      # headers and the platform's login throttle can be skipped by going straight
+      # to :8810.
+      - "${SYSIBLE_SLEP_BIND:-0.0.0.0}:8810:8810"
+    volumes:
+      - slep-data:/data
+    environment:
+      SLEP_DATA_DIR: /data
+      SLEP_TLS: "1"                        # "0" to serve plain HTTP (behind a proxy)
+      SLEP_TLS_HOSTS: ${SLEP_TLS_HOSTS:-}  # e.g. 192.168.1.50,slep.lan — names/IPs to put in the cert
+      # Single sign-on behind the SLOP gateway. Both default OFF/empty, so a
+      # standalone SLEP keeps its own login. The SLOP installer sets these so SLEP
+      # trusts the gateway-asserted identity ONLY when the request carries the
+      # matching shared secret (see SLOP docs/SSO.md).
+      SLEP_TRUST_GATEWAY_AUTH: "${SLEP_TRUST_GATEWAY_AUTH:-0}"
+      SYSIBLE_SSO_SHARED_SECRET: "${SYSIBLE_SSO_SHARED_SECRET:-}"
+    restart: unless-stopped
+
+volumes:
+  slep-data:
+
+# --- Enterprise Edition (later) --------------------------------------------
+# EE swaps SQLite for PostgreSQL (the backend/db.py seam). When we build it, a
+# `db:` service lands here and SLEP points at it via a DSN — same shape as
+# sysible-controller-ee. Not wired in CE.

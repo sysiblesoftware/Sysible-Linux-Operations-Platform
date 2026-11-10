@@ -1,0 +1,968 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api.js";
+import { confirmDialog } from "../confirmDialog.js";
+
+// Host Enrollment — agent bundle (download + curl), enrolled hosts grouped by
+// environment with multi-select, environment assignment, sudo policy, AND the
+// full Webserver Portal administration (status/port/credentials/sessions/files),
+// since the portal exists to serve enrollment. One page, mirrors the desktop.
+
+function fmtSeen(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  let d;
+  if (typeof v === "number" || /^\d+(\.\d+)?$/.test(String(v))) {
+    let n = Number(v); if (n < 1e12) n *= 1000; d = new Date(n);
+  } else d = new Date(v);
+  return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+}
+const fmtTime = fmtSeen;
+
+export default function HostEnrollment() {
+  const [agents, setAgents] = useState([]);
+  const [envs, setEnvs] = useState([]);
+  const [sudoDefaults, setSudoDefaults] = useState({});
+  const [edition, setEdition] = useState({});
+  const [portal, setPortal] = useState({});
+  const [cfg, setCfg] = useState({});
+  const [checked, setChecked] = useState([]);
+  const [enrollPaused, setEnrollPaused] = useState(false);
+  const [collapsed, setCollapsed] = useState({});
+  const [assignEnv, setAssignEnv] = useState("");
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");   // in-progress label for host actions
+  const [copied, setCopied] = useState(false);
+  const [copiedAnsible, setCopiedAnsible] = useState(false);
+  const [curlUseIp, setCurlUseIp] = useState(false);   // curl one-liner: address by IP (no DNS) vs hostname
+  // Push enrollment: the Controller reaches OUT to the host. Everything the
+  // backend needs is here — name, address, an account and its password, used
+  // once and never stored.
+  const [push, setPush] = useState({ name: "", ip: "", username: "root", password: "", environment: "" });
+  const [portPort, setPortPort] = useState("");
+  const [portalBusy, setPortalBusy] = useState("");
+  const [tab, setTab] = useState("hosts");
+  const [sudoEnv, setSudoEnv] = useState("");
+  // Portal administration
+  const [history, setHistory] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [uploads, setUploads] = useState([]);
+  const [downloads, setDownloads] = useState([]);
+  const [cur, setCur] = useState(""); const [nu, setNu] = useState("");
+  const [np, setNp] = useState(""); const [np2, setNp2] = useState("");
+
+  function loadPortal() {
+    api.portalStatus().then((s) => {
+      setPortal(s || {});
+      const p = s && (s.configured_port || s.port);
+      if (p) setPortPort(String(p));
+    }).catch(() => {});
+  }
+  function loadHistory() { api.portalLoginHistory().then((d) => setHistory(d.history || [])).catch(() => {}); }
+  function loadSessions() { api.portalSessions().then((d) => setSessions(d.sessions || [])).catch(() => {}); }
+  function loadUploads() { api.portalUploads().then((d) => setUploads(d.files || [])).catch(() => {}); }
+  function loadDownloads() { api.portalDownloads().then((d) => setDownloads(d.files || [])).catch(() => {}); }
+  function load(surfaceErr = false) {
+    // surfaceErr only on the first load: a transient timeout during the
+    // post-action refresh shouldn't paint a red error over an action that
+    // actually succeeded (you'd see the green "done" and a scary timeout at once).
+    api.agents().then((d) => setAgents(d.agents || [])).catch((e) => { if (surfaceErr) setErr(e.message); });
+    api.environments().then((d) => setEnvs(d.environments || [])).catch(() => {});
+    api.envSudoDefaults().then((d) => setSudoDefaults(d || {})).catch(() => {});
+    api.edition().then(setEdition).catch(() => {});
+    api.controllerConfig().then((c) => setCfg(c || {})).catch(() => {});
+    // Portal STATUS is lightweight and the "Enroll a Host" tab shows it, so keep
+    // it here. The heavier portal admin data (login history, sessions, uploads,
+    // downloads) is only shown on the Portal tab — loading it on every host
+    // action piled ~4 extra controller calls onto each refresh, contending with
+    // the essential ones on the single-process controller (which could then
+    // read-timeout). It's loaded lazily when the Portal tab opens instead.
+    loadPortal();
+    api.enrollmentPause().then((d) => setEnrollPaused(!!(d && d.paused))).catch(() => {});
+  }
+  useEffect(() => { load(true); }, []);
+  useEffect(() => {
+    if (tab === "portal") { loadPortal(); loadHistory(); loadSessions(); loadUploads(); loadDownloads(); }
+  }, [tab]);
+
+  async function portalAct(key, fn, okMsg) {
+    setPortalBusy(key); setErr(""); setMsg("");
+    try { await fn(); if (okMsg) setMsg(okMsg); loadPortal(); }
+    catch (e) { setErr(e.message); }
+    finally { setPortalBusy(""); }
+  }
+  async function saveCreds() {
+    setErr(""); setMsg("");
+    if (np !== np2) { setErr("New portal passwords don't match."); return; }
+    setPortalBusy("creds");
+    try {
+      await api.portalSetCreds(nu.trim(), np, cur);
+      setMsg("Portal credentials saved."); setCur(""); setNu(""); setNp(""); setNp2("");
+      loadPortal(); loadHistory(); loadSessions();
+    } catch (e) { setErr(e.message); }
+    finally { setPortalBusy(""); }
+  }
+  async function removeCreds() {
+    if (!(await confirmDialog("Remove portal login access? Nobody can log in until new credentials are saved."))) return;
+    setPortalBusy("remove"); setErr(""); setMsg("");
+    try { await api.portalRemoveCreds(cur); setMsg("Portal login access removed."); setCur(""); loadPortal(); }
+    catch (e) { setErr(e.message); }
+    finally { setPortalBusy(""); }
+  }
+  async function revoke(s) {
+    const id = s.id ?? s.session_id;
+    try { await api.portalRevokeSession(id); loadSessions(); } catch (e) { setErr(e.message); }
+  }
+  async function stageDownload(e) {
+    const file = e.target.files[0]; if (!file) return;
+    setErr(""); try { await api.portalStageDownload(file); loadDownloads(); } catch (e2) { setErr(e2.message); }
+    e.target.value = "";
+  }
+  const fname = (f) => (typeof f === "string" ? f : (f.name || f.filename || ""));
+
+  const groups = useMemo(() => {
+    const m = {};
+    for (const a of agents) (m[a.environment || "Unassigned"] ||= []).push(a);
+    return Object.entries(m).sort(([a], [b]) => a.localeCompare(b));
+  }, [agents]);
+
+  const idOf = (a) => a.host_id || a.id;
+  const toggle = (id) => setChecked((c) => c.includes(id) ? c.filter((x) => x !== id) : [...c, id]);
+
+  async function run(fn, okMsg, busyLabel) {
+    setErr(""); setMsg(""); setBusy(busyLabel || "");
+    try { await fn(); if (okMsg) setMsg(okMsg); }
+    catch (e) { setErr(e.message); }
+    // Refresh regardless of outcome: some actions (e.g. Disenroll) commit the
+    // server-side change and THEN throw to carry a warning (agent teardown not
+    // confirmed). Refreshing only on success left the just-removed hosts sitting
+    // in the list, so a successful disenroll looked like it failed.
+    finally { setBusy(""); load(); }
+  }
+
+
+  async function newEnvironment() {
+    // The single create entry point: make an environment on its own — no hosts need
+    // be checked. Once it exists, pick it in the dropdown and Set Environment to
+    // assign checked hosts to it.
+    const name = (window.prompt("New environment name:") || "").trim();
+    if (!name) return;
+    await run(async () => { await api.createEnvironment(name); setAssignEnv(name); },
+      `Created environment '${name}'.`, "Creating environment…");
+  }
+
+  async function assignEnvironment() {
+    if (checked.length === 0) { setErr("Check one or more hosts first."); return; }
+    const env = assignEnv;
+    await run(async () => { for (const id of checked) await api.setHostEnvironment(id, env); },
+      `Assigned ${checked.length} host(s) to ${env || "(unassigned)"}.`);
+  }
+
+  async function removeEnvironment() {
+    const env = assignEnv;
+    if (!env) { setErr("Pick an environment from the dropdown to remove."); return; }
+    // Don't orphan hosts: an environment with hosts still in it must be emptied
+    // first (reassign them with Set Environment).
+    const inUse = agents.filter((a) => (a.environment || "") === env).length;
+    if (inUse > 0) {
+      setErr(`Can't remove '${env}' — ${inUse} host(s) are still assigned to it. Reassign them (Set Environment) first.`);
+      return;
+    }
+    if (!(await confirmDialog(`Remove the environment '${env}'? It has no hosts assigned.`))) return;
+    await run(async () => { await api.deleteEnvironment(env); setAssignEnv(""); },
+      `Removed environment '${env}'.`);
+  }
+
+  async function setSudo(required) {
+    if (checked.length === 0) { setErr("Check one or more hosts first."); return; }
+    await run(async () => { for (const id of checked) await api.setHostSudo(id, required); },
+      `Set ${checked.length} host(s) to ${required ? "password sudo" : "passwordless (NOPASSWD)"}.`);
+  }
+
+  // Run `op(id)` for every checked host with bounded concurrency, NEVER aborting
+  // the whole batch when one host fails or hangs. Returns the failures so the
+  // caller can report "did N of M". This is what makes bulk actions usable on a
+  // pile of offline zombies — the old for-await loop stopped at the first error,
+  // so one stuck host left the rest untouched (the "buttons don't work" report).
+  async function bulkOp(ids, op, concurrency = 8) {
+    const failures = [];
+    let i = 0;
+    const worker = async () => {
+      while (i < ids.length) {
+        const id = ids[i++];
+        try { await op(id); }
+        catch (e) { failures.push(`${id}: ${e?.message || e}`); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+    return failures;
+  }
+
+  function summarize(ids, failures, verb) {
+    const done = ids.length - failures.length;
+    if (!failures.length) return null;
+    throw new Error(`${verb} ${done} of ${ids.length}. ${failures.length} failed:\n` +
+      failures.slice(0, 12).join("\n") + (failures.length > 12 ? `\n…and ${failures.length - 12} more` : ""));
+  }
+
+  async function disenrollChecked() {
+    if (checked.length === 0) { setErr("Check one or more hosts first."); return; }
+    if (!(await confirmDialog(`Disenroll ${checked.length} host(s)? This removes them from the controller. Each agent keeps running on its host until you stop/uninstall it there (run disenroll_agent.sh on the host), and can re-enroll unless you Force Delete (which purges its enrollment token).\n\nNote: a graceful disenroll waits for each host's agent to tear itself down — for OFFLINE hosts use Force Delete instead, it's immediate.`))) return;
+    const ids = [...checked];
+    await run(async () => {
+      const failures = await bulkOp(ids, (id) => api.removeHost(id));
+      setChecked([]);
+      summarize(ids, failures, "Disenrolled");
+    }, `Disenrolled ${ids.length} host(s).`, `Disenrolling ${ids.length} host(s)…`);
+  }
+
+  async function forceDeleteChecked() {
+    if (checked.length === 0) { setErr("Check one or more hosts first."); return; }
+    if (!(await confirmDialog(
+      `Force-delete ${checked.length} host(s) from the console?\n\n` +
+      "Use this for ZOMBIE agents — a broken build that keeps heartbeating but " +
+      "can't cleanly disenroll. This drops the controller record immediately " +
+      "WITHOUT waiting for the agent to tear itself down, purges its enrollment " +
+      "token, and locks out its secret on the next heartbeat.\n\n" +
+      "The agent process may still be running on the host — stop it there with " +
+      "disenroll_agent.sh (or kill its service) afterwards. Continue?"))) return;
+    const ids = [...checked];
+    await run(async () => {
+      const failures = await bulkOp(ids, (id) => api.removeHost(id, true));
+      setChecked([]);
+      summarize(ids, failures, "Force-deleted");
+    }, `Force-deleted ${ids.length} host(s) from the console.`,
+      `Force-deleting ${ids.length} host(s)…`);
+  }
+
+  async function toggleEnrollPause() {
+    const next = !enrollPaused;
+    if (next && !(await confirmDialog(
+      "Pause ALL new agent enrollment?\n\n" +
+      "No new host can enroll until you resume — this is the emergency brake for a " +
+      "runaway that re-enrolls faster than you can delete it. Existing agents keep " +
+      "running normally. Remember to resume once the source host is fixed."))) return;
+    await run(async () => {
+      const d = await api.setEnrollmentPause(next);
+      setEnrollPaused(!!(d && d.paused));
+    }, next ? "New enrollment PAUSED. Clear the runaway, then resume." : "Enrollment resumed.",
+      next ? "Pausing enrollment…" : "Resuming enrollment…");
+  }
+
+  async function revokeChecked() {
+    if (checked.length === 0) { setErr("Check one or more hosts first."); return; }
+    if (!(await confirmDialog(
+      `Revoke ${checked.length} host(s)?\n\n` +
+      "Each agent is locked out immediately — it can't heartbeat, poll, or report — " +
+      "but the inventory record is KEPT (unlike Force Delete). Use this to stop a " +
+      "runaway/compromised fleet in one click without losing the records; Restore " +
+      "or Force-Delete them afterwards. Continue?"))) return;
+    const ids = [...checked];
+    await run(async () => {
+      const failures = await bulkOp(ids, (id) => api.revokeHost(id));
+      setChecked([]);
+      summarize(ids, failures, "Revoked");
+    }, `Revoked ${ids.length} host(s).`, `Revoking ${ids.length} host(s)…`);
+  }
+
+  async function revokeHost(a, e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const name = a.hostname || a.host_id;
+    if (!(await confirmDialog(`Revoke ${name}? Its agent is locked out — it can't heartbeat, poll, or report — until you re-enroll the host. Use this for a host you believe is compromised or tampered.`))) return;
+    await run(async () => { await api.revokeHost(idOf(a)); }, `Revoked ${name}. Re-enroll the host to restore it.`,
+      `Revoking ${name}…`);
+    load();
+  }
+
+  async function resumeHost(a, e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const name = a.hostname || a.host_id;
+    await run(async () => { await api.resumeHost(idOf(a)); }, `Cleared the integrity quarantine on ${name}; it re-seals on the next heartbeat.`);
+    load();
+  }
+
+  async function restoreHost(a, e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const name = a.hostname || a.host_id;
+    if (!(await confirmDialog(`Restore ${name}? Un-revoke it in place, keeping its existing agent secret so a still-installed agent resumes immediately — no re-enroll needed.`))) return;
+    await run(async () => { await api.restoreHost(idOf(a)); }, `Restored ${name}; its agent resumes on the next heartbeat.`, `Restoring ${name}…`);
+  }
+
+  async function reissueHost(a, e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const name = a.hostname || a.host_id;
+    if (!(await confirmDialog(
+      `Reissue enrollment for ${name}?\n\n` +
+      "Re-enrolling an existing host (after a reinstall that wiped its agent secret) " +
+      "is refused with an ordinary token, so a leaked token can't hijack a host. This " +
+      "mints a single-use token bound to THIS host only. Run the agent with it on the " +
+      "reinstalled machine to reclaim this same record. Continue?"))) return;
+    await run(async () => {
+      const r = await api.reissueToken(idOf(a));
+      const tok = r && (r.token || (r.data && r.data.token));
+      if (tok) {
+        try { await navigator.clipboard.writeText(tok); } catch { /* clipboard optional */ }
+        setMsg(`Reissue token for ${name} (copied): ${tok} — run the agent on the reinstalled host with this token to reclaim its record. Single-use; expires per policy.`);
+      }
+    }, "", `Reissuing ${name}…`);
+  }
+
+  // curl one-liner (built from portal status + controller config).
+  // The controller may be addressed by hostname OR IP. If the console is configured
+  // with a hostname, a target host with no DNS for it can't resolve it — so when an IP
+  // is also known, offer a toggle to build the command against the IP instead (curl
+  // uses -k, so the self-signed cert not covering the IP doesn't matter).
+  const curlHostName = cfg.hostname || (cfg.address_mode !== "ip" ? cfg.address : "") || "";
+  const curlIp = cfg.ip || "";
+  const curlHost = (curlUseIp && curlIp) ? curlIp
+    : (curlHostName || curlIp || "<this machine's address>");
+  const curlPort = portPort || portal.configured_port || portal.port || 8090;
+  const curlUser = portal.credentials_configured ? portal.username : "<username>";
+  const curlCmd =
+    `curl -k -sS -f -u '${curlUser}:<password>' -o sysible-agent-bundle.zip ` +
+    `"https://${curlHost}:${curlPort}/cli/bundle" ` +
+    `&& unzip -o sysible-agent-bundle.zip -d sysible-agent-bundle ` +
+    `&& cd sysible-agent-bundle && chmod +x run_agent.sh && sudo ./run_agent.sh`;
+
+  // Mass enrollment: the same portal-authenticated headless install, wrapped as an
+  // Ansible ad-hoc shell command so an operator can enroll a whole inventory group in
+  // one shot. `--become` supplies privilege (so no inner sudo), and the URL's inner
+  // double-quotes are dropped so the whole script fits inside `-a "…"` without a quote
+  // collision. Each host's own curl pulls its own fresh one-time enrollment token.
+  const ansibleCmd =
+    `ansible <group> -i <inventory> --become -m shell -a ` +
+    `"curl -k -sS -f -u '${curlUser}:<password>' -o /tmp/sysible-agent-bundle.zip ` +
+    `https://${curlHost}:${curlPort}/cli/bundle ` +
+    `&& unzip -o /tmp/sysible-agent-bundle.zip -d /tmp/sysible-agent-bundle ` +
+    `&& cd /tmp/sysible-agent-bundle && chmod +x run_agent.sh && ./run_agent.sh"`;
+
+  const reachable = `https://${cfg.address || "<controller>"}:${curlPort}`;
+
+  const TABS = [["hosts", "Enrolled Hosts"], ["enroll", "Enroll a Host"],
+                ["relay", "Relay / Bastion"], ["portal", "Webserver Portal"]];
+
+  return (
+    <div>
+      {edition.host_limit != null && (
+        <div className="muted" style={{ marginBottom: 12 }}>
+          {(edition.edition || "Community")} edition — {edition.host_count ?? agents.length}/{edition.host_limit} hosts used
+        </div>
+      )}
+
+      <div className="tabs" style={{ marginBottom: 16 }}>
+        {TABS.map(([k, l]) => (
+          <button key={k} className={tab === k ? "active" : ""} onClick={() => setTab(k)}>{l}</button>
+        ))}
+      </div>
+
+      {/* On the Enrolled Hosts tab the status banner is rendered down in the
+          actions column instead (under the buttons that triggered it); other
+          tabs keep it here at the top. */}
+      {tab !== "hosts" && err && <div className="error-box">{err}</div>}
+      {tab !== "hosts" && msg && <div className="ok-text" style={{ marginBottom: 10 }}>{msg}</div>}
+
+      {/* ============================ TAB: ENROLLED HOSTS ============================ */}
+      {tab === "hosts" && (
+      <div className="he-2col">
+        <fieldset className="tool-group-box he-hosts">
+          <legend>Enrolled Hosts (grouped by environment)</legend>
+          <div className="ctl-row" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+            <button className="btn ghost sm" onClick={() => setChecked(agents.map(idOf))}>Select All</button>
+            <button className="btn ghost sm" onClick={() => setChecked([])}>Deselect All</button>
+            <button className="btn ghost sm" onClick={() => setCollapsed(Object.fromEntries(groups.map(([e]) => [e, true])))}>Collapse All</button>
+            <button className="btn ghost sm" onClick={() => setCollapsed({})}>Expand All</button>
+            <button className="btn ghost sm" onClick={load}>Refresh</button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {agents.length === 0 && <div className="faint" style={{ padding: 8 }}>No hosts enrolled yet — use the “Enroll a Host” tab.</div>}
+            {groups.map(([env, list]) => {
+              const open = !collapsed[env];
+              const groupIds = list.map((a) => idOf(a));
+              const allInGroup = groupIds.every((id) => checked.includes(id));
+              return (
+                <div className="env-group" key={env}>
+                  <div className="env-head" onClick={() => setCollapsed((c) => ({ ...c, [env]: open }))}>
+                    <input
+                      type="checkbox"
+                      className="env-check"
+                      title={`Select all in ${env}`}
+                      checked={allInGroup}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        setChecked((c) => allInGroup
+                          ? c.filter((id) => !groupIds.includes(id))
+                          : [...new Set([...c, ...groupIds])]);
+                      }}
+                    />
+                    {open ? "▾" : "▸"} {env}
+                  </div>
+                  {open && list.map((a) => (
+                    <label className="host-row he-host" key={idOf(a)}>
+                      <input type="checkbox" checked={checked.includes(idOf(a))} onChange={() => toggle(idOf(a))} />
+                      <span className={"dot " + (a.online === false ? "bad" : a.online === true ? "ok" : "")}
+                            title={a.online === false ? "Offline" : a.online === true ? "Online" : ""} />
+                      <span className="he-host-body">
+                        <span className="he-host-name">{a.hostname || a.host_id}
+                          {a.is_controller && <span className="badge" style={{ marginLeft: 6, fontSize: 10, background: "var(--accent, #3d7dd8)", color: "#fff" }} title="This host is the Sysible controller itself">controller</span>}
+                          {a.requires_sudo_password && <span className="badge" style={{ marginLeft: 6, fontSize: 10 }}>pw-sudo</span>}
+                          {a.revoked && <span className="badge" style={{ marginLeft: 6, fontSize: 10, background: "var(--red, #e05656)", color: "#fff" }} title="Agent secret revoked — re-enroll to restore">revoked</span>}
+                          {!a.revoked && a.integrity_quarantined && <span className="badge" style={{ marginLeft: 6, fontSize: 10, background: "var(--amber, #e0a93c)", color: "#1a2744" }} title={(a.integrity_detail || []).join("\n") || "Integrity mismatch — dispatch paused"}>⚠ quarantined</span>}
+                        </span>
+                        <span className="he-host-meta">{a.address || a.ip || "—"}
+                          {a.last_seen != null ? ` · seen ${fmtSeen(a.last_seen)}` : ""}</span>
+                      </span>
+                      <span className="he-host-actions" style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                        {a.revoked &&
+                          <button className="btn ghost sm" title="Un-revoke in place, keeping the existing secret — the still-installed agent resumes immediately (no re-enroll)" onClick={(e) => restoreHost(a, e)}>Restore</button>}
+                        {!a.revoked && a.integrity_quarantined &&
+                          <button className="btn ghost sm" title="Rebaseline: clear the quarantine and resume dispatch (use after a legitimate change)" onClick={(e) => resumeHost(a, e)}>Resume</button>}
+                        {!a.revoked &&
+                          <button className="btn ghost sm" title="Mint a single-use token bound to THIS host to re-enroll it after a reinstall that wiped its agent secret (a plain token can't re-bind an existing host)" onClick={(e) => reissueHost(a, e)}>Reissue</button>}
+                        {!a.revoked &&
+                          <button className="btn outline-danger sm" title="Hard lock-out: revoke this agent's secret until re-enrolled" onClick={(e) => revokeHost(a, e)}>Revoke</button>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+          <div className="he-footer">
+            <div className="he-footer-actions">
+              <button className="btn danger sm" onClick={disenrollChecked} disabled={!!busy || checked.length === 0}>Disenroll Host(s)</button>
+              <button className="btn outline-danger sm" onClick={forceDeleteChecked} disabled={!!busy || checked.length === 0}
+                      title="Force-remove a zombie/broken-build host from the console without waiting for its agent to tear down — purges its enroll token too">
+                Force Delete
+              </button>
+              <button className="btn outline-danger sm" onClick={revokeChecked} disabled={!!busy || checked.length === 0}
+                      title="Lock out the checked agents immediately (no heartbeat/poll/report) but KEEP their records — the one-click emergency stop for a runaway or compromised fleet">
+                Revoke Checked
+              </button>
+              <span className="he-checked">{checked.length} checked</span>
+            </div>
+            <button className={"btn sm he-pause " + (enrollPaused ? "" : "outline-danger")} onClick={toggleEnrollPause}
+                    disabled={!!busy}
+                    title="Stop the controller accepting any new enrollments — the emergency brake for a runaway that re-appears faster than you can delete it. Existing agents keep running.">
+              {enrollPaused ? "Resume Enrollment" : "Pause Enrollment"}
+            </button>
+          </div>
+          {enrollPaused && (
+            <div className="error-box" role="status" style={{ marginTop: 8 }}>
+              New agent enrollment is <strong>PAUSED</strong> — no host can enroll until you resume.
+              Clear the runaway rows now (Force Delete / Revoke), fix the source host, then Resume.
+            </div>
+          )}
+          {busy && (
+            <div className="ok-text" role="status" aria-live="polite"
+                 style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="spin" aria-hidden="true" />{busy}
+            </div>
+          )}
+        </fieldset>
+
+        <div className="he-actions">
+          <fieldset className="tool-group-box"><legend>Environment</legend>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              <button className="btn sm" onClick={newEnvironment}
+                      title="Create a new, empty environment (no hosts need be selected)">New Environment</button>
+              <select value={assignEnv} onChange={(e) => setAssignEnv(e.target.value)} style={{ maxWidth: 220 }}>
+                <option value="">(unassigned)</option>
+                {envs.map((e) => <option key={e} value={e}>{e}</option>)}
+              </select>
+              <button className="btn sm" onClick={assignEnvironment}>Set Environment</button>
+              <button className="btn ghost sm" onClick={removeEnvironment}
+                      disabled={!assignEnv}
+                      title="Delete the selected environment (must have no hosts assigned)">Remove environment</button>
+              <span className="faint">Set Environment applies to {checked.length} checked host(s).</span>
+            </div>
+          </fieldset>
+
+          <fieldset className="tool-group-box"><legend>Sudo policy</legend>
+            <div className="section-title" style={{ marginTop: 0 }}>For the checked host(s) — {checked.length} selected</div>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              <button className="btn sm" disabled={checked.length === 0} onClick={() => setSudo(true)}>Requires Password</button>
+              <button className="btn sm" disabled={checked.length === 0} onClick={() => setSudo(false)}>Passwordless (NOPASSWD)</button>
+            </div>
+
+            <div className="section-title">For an entire environment (new hosts inherit this)</div>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <select value={sudoEnv} onChange={(e) => setSudoEnv(e.target.value)} style={{ maxWidth: 200 }}>
+                <option value="">Choose environment…</option>
+                {envs.map((e) => <option key={e} value={e}>{e}</option>)}
+              </select>
+              {sudoEnv && (
+                <span className="faint">
+                  currently {sudoDefaults[sudoEnv] ? "requires password" : "passwordless"}
+                </span>
+              )}
+            </div>
+            {sudoEnv && (
+              <div className="row" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                <button className="btn sm" onClick={() => run(() => api.setEnvSudoDefault(sudoEnv, true),
+                  `Set ${sudoEnv} default to password sudo.`)}>Requires Password</button>
+                <button className="btn sm" onClick={() => run(() => api.setEnvSudoDefault(sudoEnv, false),
+                  `Set ${sudoEnv} default to passwordless.`)}>Passwordless (NOPASSWD)</button>
+              </div>
+            )}
+
+            <p className="faint" style={{ marginTop: 10 }}>
+              For password-sudo hosts, store your own sudo password from the “Sudo Password” button in the header.
+            </p>
+          </fieldset>
+
+          {/* Status for the actions in this column shows here, under the buttons,
+              rather than at the top of the page — easier to notice where you clicked. */}
+          {err && <div className="error-box">{err}</div>}
+          {msg && <div className="ok-text" style={{ marginTop: 4 }}>{msg}</div>}
+        </div>
+      </div>
+      )}
+
+      {/* ============================ TAB: ENROLL A HOST ============================ */}
+      {tab === "enroll" && (
+      <div style={{ maxWidth: 760 }}>
+        {/* PUSH enrollment, first: it is the only path that needs nothing on the
+            target beforehand. Everything below this asks the operator to already
+            have a shell on the machine they are enrolling — which is the thing
+            enrolment is supposed to give them. */}
+        <fieldset className="tool-group-box" style={{ marginTop: 0 }}>
+          <legend>Enroll a host from here</legend>
+          <p className="faint" style={{ marginTop: 0 }}>
+            The Controller connects to the host over SSH, installs its own key, and enrolls the
+            agent. The password is used once to install that key and is never stored — every
+            later connection uses the key.
+          </p>
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            setErr(""); setMsg(""); setBusy("push");
+            try {
+              const r = await api.enrollSsh({
+                name: push.name.trim(), ip: push.ip.trim(),
+                username: push.username.trim(), password: push.password,
+                environment: push.environment,
+              });
+              setMsg(r?.detail || `${push.name.trim()} enrolled.`);
+              // Clear the password even on success: it has done its one job, and
+              // leaving it in a field is leaving a credential on screen.
+              setPush((p) => ({ ...p, name: "", ip: "", password: "" }));
+              load();
+            } catch (e2) {
+              setErr(e2.message || "Enrollment failed.");
+            } finally { setBusy(""); }
+          }}>
+            <div className="group-fields">
+              <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Host name</span>
+                <input value={push.name} required autoComplete="off" placeholder="web-01"
+                       onChange={(e) => setPush({ ...push, name: e.target.value })} /></label></div>
+              <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Address</span>
+                <input value={push.ip} required autoComplete="off"
+                       placeholder="10.0.0.12 or web-01.example.com"
+                       onChange={(e) => setPush({ ...push, ip: e.target.value })} /></label></div>
+            </div>
+            <div className="group-fields">
+              <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>SSH user</span>
+                <input value={push.username} required autoComplete="off"
+                       onChange={(e) => setPush({ ...push, username: e.target.value })} /></label></div>
+              <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Password</span>
+                <input type="password" value={push.password} required autoComplete="new-password"
+                       onChange={(e) => setPush({ ...push, password: e.target.value })} /></label></div>
+            </div>
+            <div className="group-fields">
+              <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Environment</span>
+                <select value={push.environment}
+                        onChange={(e) => setPush({ ...push, environment: e.target.value })}>
+                  <option value="">(unassigned)</option>
+                  {envs.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select></label></div>
+            </div>
+            <div className="row" style={{ marginTop: 10, alignItems: "center", gap: 10 }}>
+              <button className="btn" type="submit" disabled={busy === "push"}>
+                {busy === "push" ? "Enrolling…" : "Enroll host"}
+              </button>
+              <span className="faint" style={{ fontSize: 12 }}>
+                Needs SSH reachable from the Controller, and an account that can write
+                its own <code>~/.ssh/authorized_keys</code>.
+              </span>
+            </div>
+          </form>
+        </fieldset>
+
+        <fieldset className="tool-group-box"><legend>Download the agent bundle</legend>
+          <p className="faint" style={{ marginTop: 0 }}>
+            The ready-to-run bundle, built on demand — each download bakes in a fresh, one-time enrollment token.
+            Copy it to the target host, unzip, and run <code>./run_agent.sh</code>.
+          </p>
+          <button className="btn sm" disabled={busy === "bundle"}
+            onClick={async () => {
+              // POST (not a plain <a href> GET): building the bundle mints a fresh
+              // one-time enrollment token, so it must NOT be triggerable by a
+              // top-level navigation that SameSite=Lax would authorize. Fetch as a
+              // blob and save it, mirroring Settings' "Regenerate agent bundle".
+              setErr(""); setMsg(""); setBusy("bundle");
+              try {
+                const res = await fetch(api.agentBundleUrl(), { method: "POST", credentials: "include" });
+                if (!res.ok) {
+                  let d = ""; try { d = (await res.json()).detail || ""; } catch { /* not JSON */ }
+                  throw new Error(d || `Bundle download failed (HTTP ${res.status}).`);
+                }
+                const blob = await res.blob();
+                const cd = res.headers.get("Content-Disposition") || "";
+                const m = /filename="?([^"]+)"?/.exec(cd);
+                const name = (m && m[1]) || "sysible-agent-bundle.zip";
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = name; document.body.appendChild(a); a.click();
+                a.remove(); URL.revokeObjectURL(url);
+              } catch (e) { setErr(e.message); }
+              finally { setBusy(""); }
+            }}>
+            {busy === "bundle" ? "Building…" : "Download Agent Bundle"}
+          </button>
+        </fieldset>
+
+        <fieldset className="tool-group-box"><legend>Headless install (curl one-liner)</legend>
+          <p className="faint" style={{ marginTop: 0 }}>
+            For terminal-only hosts: downloads, unzips, and runs the installer in one shot, authenticating with the
+            portal login (curl -u). Replace <code>&lt;password&gt;</code> with the real portal password; <code>-k</code> skips
+            the self-signed-cert check; the install step needs sudo.
+          </p>
+          {curlIp && curlHostName && (
+            <label className="faint" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+              <input type="checkbox" checked={curlUseIp} onChange={(e) => setCurlUseIp(e.target.checked)} />
+              Address the controller by IP ({curlIp}) instead of hostname ({curlHostName}) — use this when the
+              target host has no DNS for the hostname.
+            </label>
+          )}
+          <div className="cmd-preview" style={{ whiteSpace: "pre-wrap" }}>{curlCmd}</div>
+          <button className="btn sm ghost" style={{ marginTop: 8 }}
+                  onClick={() => navigator.clipboard?.writeText(curlCmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>
+            {copied ? "Copied ✓" : "Copy to Clipboard"}
+          </button>
+          <p className="faint" style={{ marginTop: 10 }}>
+            The curl download needs the Webserver Portal {portal.running
+              ? <>running (it is) with a login set.</>
+              : <>running — start it and set a login on the <button className="linklike" onClick={() => setTab("portal")}>Webserver Portal</button> tab.</>}
+          </p>
+        </fieldset>
+
+        <fieldset className="tool-group-box"><legend>Mass enrollment (Ansible ad-hoc)</legend>
+          <p className="faint" style={{ marginTop: 0 }}>
+            Enroll a whole inventory group at once — the headless install above, run across every host by Ansible.
+            Replace <code>&lt;group&gt;</code> and <code>&lt;inventory&gt;</code> with your target group and inventory
+            file, and <code>&lt;password&gt;</code> with the real portal password. <code>--become</code> handles privilege
+            escalation (so no <code>sudo</code> in the command); each host pulls its own fresh one-time enrollment token.
+          </p>
+          <div className="cmd-preview" style={{ whiteSpace: "pre-wrap" }}>{ansibleCmd}</div>
+          <button className="btn sm ghost" style={{ marginTop: 8 }}
+                  onClick={() => navigator.clipboard?.writeText(ansibleCmd).then(() => { setCopiedAnsible(true); setTimeout(() => setCopiedAnsible(false), 1500); })}>
+            {copiedAnsible ? "Copied ✓" : "Copy to Clipboard"}
+          </button>
+          <p className="faint" style={{ marginTop: 10 }}>
+            Needs Ansible on the control node with SSH reach to the group, plus the Webserver Portal {portal.running
+              ? <>running (it is) with a login set.</>
+              : <>running with a login set — configure it on the <button className="linklike" onClick={() => setTab("portal")}>Webserver Portal</button> tab.</>}
+            {" "}Add <code>-u</code>/<code>--ask-become-pass</code> or <code>-e</code> vars as your SSH access requires.
+          </p>
+        </fieldset>
+      </div>
+      )}
+
+      {/* ============================ TAB: RELAY / BASTION ============================ */}
+      {/* Administered next to enrollment rather than under Settings: the relay is how
+          a host is REACHED, so it belongs with the rest of "getting hosts managed". */}
+      {tab === "relay" && <RelayConfig />}
+
+      {/* ============================ TAB: WEBSERVER PORTAL ============================ */}
+      {tab === "portal" && (
+      <div>
+        <div className="he-section-head" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+          <h3>Webserver Portal</h3>
+          <button className="btn ghost sm" onClick={() => { loadPortal(); loadHistory(); loadSessions(); loadUploads(); loadDownloads(); }}>Refresh</button>
+        </div>
+        <p className="faint" style={{ marginTop: 0, maxWidth: 880 }}>
+          Host operators sign in with this login to download the agent bundle or exchange files. Run the portal only
+          while provisioning, on a trusted network.
+        </p>
+
+        <fieldset className="tool-group-box" style={{ marginTop: 0 }}><legend>Status &amp; port</legend>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <span className={"badge" + (portal.running ? " green" : "")}>{portal.running ? "Running" : "Stopped"}</span>
+              <button className="btn sm" disabled={portalBusy || portal.running}
+                      onClick={() => portalAct("start", async () => {
+                        const r = await api.portalStart();
+                        if (r && r.running === false) throw new Error(r.error || "The portal failed to start.");
+                        return r;
+                      }, "Portal started.")}>
+                {portalBusy === "start" ? <span className="spin" /> : "Start Portal"}</button>
+              <button className="btn sm ghost" disabled={portalBusy || !portal.running}
+                      onClick={() => portalAct("stop", () => api.portalStop(), "Portal stopped.")}>Stop Portal</button>
+            </div>
+            {/* "Running" only means the portal answered on THIS machine's
+                loopback. In a container that is the container's loopback, so the
+                console used to print an address the network could not reach —
+                nmap said `closed` while the badge said Running, and nothing here
+                explained the gap. When the controller can tell that the address
+                will not answer, it says so instead of printing it. */}
+            {portal.running && (portal.unreachable_reason
+              ? <div className="portal-unreachable">
+                  Running, but not reachable at {reachable} — {portal.unreachable_reason}
+                </div>
+              : <div className="faint" style={{ marginTop: 6 }}>Reachable at: {reachable}</div>)}
+            <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10 }}>
+              <span className="faint">Port</span>
+              <input type="number" style={{ maxWidth: 120 }} value={portPort} onChange={(e) => setPortPort(e.target.value)} />
+              <button className="btn sm" disabled={portalBusy || !portPort}
+                      onClick={() => portalAct("port", () => api.portalSetPort(Number(portPort)),
+                        "Port saved — restart the portal if it's running.")}>Save Port</button>
+            </div>
+          </fieldset>
+
+        <div className="he-portal-grid">
+        <fieldset className="tool-group-box" style={{ marginTop: 0 }}><legend>Portal login</legend>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
+            {portal.credentials_configured
+              ? <>Current user: <strong>{portal.username}</strong> · last login {fmtTime(portal.last_login?.timestamp ?? portal.last_login)}</>
+              : <span className="faint">No portal login set yet.</span>}
+          </div>
+          <div className="group-fields">
+            <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>New username</span>
+              <input value={nu} onChange={(e) => setNu(e.target.value)} /></label></div>
+            <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Current password (if set)</span>
+              <input type="password" value={cur} onChange={(e) => setCur(e.target.value)} /></label></div>
+          </div>
+          <div className="group-fields">
+            <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>New password</span>
+              <input type="password" value={np} onChange={(e) => setNp(e.target.value)} /></label></div>
+            <div className="group-field"><label className="field" style={{ marginTop: 0 }}><span>Confirm new password</span>
+              <input type="password" value={np2} onChange={(e) => setNp2(e.target.value)} /></label></div>
+          </div>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn sm" disabled={portalBusy === "creds" || !nu || !np} onClick={saveCreds}>
+              {portalBusy === "creds" ? <span className="spin" /> : "Save Login"}</button>
+            <button className="btn sm danger" disabled={portalBusy === "remove" || !portal.credentials_configured} onClick={removeCreds}>Remove Login</button>
+          </div>
+        </fieldset>
+
+        <fieldset className="tool-group-box"><legend>Active Sessions</legend>
+          <p className="faint" style={{ marginTop: 0 }}>Operators currently signed in. Revoking one logs that browser out immediately.</p>
+          {sessions.length === 0 ? <div className="empty" style={{ padding: 20 }}>No active sessions.</div> : (
+            <table>
+              <thead><tr><th>Logged In</th><th>IP</th><th></th></tr></thead>
+              <tbody>
+                {sessions.map((s, i) => (
+                  <tr key={s.id ?? s.session_id ?? i}>
+                    <td className="faint mono">{fmtTime(s.created ?? s.created_at ?? s.logged_in ?? s.started_at)}</td>
+                    <td className="faint">{s.ip || s.ip_address || ""}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn ghost sm danger" onClick={() => revoke(s)}>Revoke</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </fieldset>
+      </div>
+
+      <fieldset className="tool-group-box"><legend>Login History</legend>
+        {history.length === 0 ? <div className="empty" style={{ padding: 16 }}>No login history.</div> : (
+          <div style={{ maxHeight: 200, overflowY: "auto" }}>
+            <table>
+              <thead><tr><th>Time</th><th>Event</th><th>Username</th><th>IP</th></tr></thead>
+              <tbody>
+                {history.map((h, i) => (
+                  <tr key={h.id ?? i}>
+                    <td className="faint mono">{fmtTime(h.timestamp ?? h.time ?? h.created_at)}</td>
+                    <td>{h.event}</td><td>{h.username}</td>
+                    <td className="faint">{h.ip || h.ip_address || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </fieldset>
+
+      <div className="he-portal-grid">
+        <fieldset className="tool-group-box"><legend>Files Uploaded By Hosts</legend>
+          {uploads.length === 0 ? <div className="empty" style={{ padding: 16 }}>No uploaded files.</div> : (
+            <table>
+              <tbody>
+                {uploads.map((f, i) => { const n = fname(f); return (
+                  <tr key={n || i}>
+                    <td>{n}</td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <a className="btn ghost sm" href={api.portalUploadUrl(n)}>Save</a>{" "}
+                      <button className="btn ghost sm danger" onClick={async () => { if (!(await confirmDialog(`Delete the uploaded file "${n}"?`))) return; await api.portalUploadDelete(n); loadUploads(); }}>Delete</button>
+                    </td>
+                  </tr>
+                ); })}
+              </tbody>
+            </table>
+          )}
+        </fieldset>
+
+        <fieldset className="tool-group-box"><legend>Files Staged For Download</legend>
+          <div style={{ marginBottom: 8 }}>
+            <label className="btn ghost sm" style={{ cursor: "pointer" }}>
+              Add File…<input type="file" style={{ display: "none" }} onChange={stageDownload} />
+            </label>
+          </div>
+          {downloads.length === 0 ? <div className="empty" style={{ padding: 16 }}>No staged files.</div> : (
+            <table>
+              <tbody>
+                {downloads.map((f, i) => { const n = fname(f); return (
+                  <tr key={n || i}>
+                    <td>{n}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn ghost sm danger" onClick={async () => { if (!(await confirmDialog(`Delete the staged file "${n}"?`))) return; await api.portalDownloadDelete(n); loadDownloads(); }}>Delete</button>
+                    </td>
+                  </tr>
+                ); })}
+              </tbody>
+            </table>
+          )}
+        </fieldset>
+        </div>
+      </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Sysible Relay — the bastion / jump-box transport.
+//
+// Reach hosts the controller can't dial directly: it opens a single-hop SSH
+// ProxyJump to the bastion and the on-bastion relay daemon forwards to permitted
+// internal targets. Blank relay host = off; there is no separate enable switch to
+// get out of sync with it.
+//
+// The controller REFUSES a configuration that can't work rather than storing it,
+// so a rejected save shows the reason here instead of silently reaching hosts
+// around the bastion.
+// ---------------------------------------------------------------------------
+function RelayConfig() {
+  const [cfg, setCfg] = useState(null);        // null = loading
+  const [draft, setDraft] = useState({});
+  const [pubkey, setPubkey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(() => {
+    api.getRelay()
+      .then((d) => { setCfg(d.relay || {}); setPubkey(d.public_key || ""); setDraft({}); })
+      .catch((e) => setErr(e.message));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const val = (k) => (k in draft ? draft[k] : (cfg?.[k] ?? ""));
+  const set = (k, v) => setDraft((m) => ({ ...m, [k]: v }));
+  const dirty = Object.keys(draft).length;
+
+  async function save() {
+    setErr(""); setMsg(""); setBusy(true);
+    try {
+      const d = await api.setRelay(draft);
+      setCfg(d.relay || {}); setPubkey(d.public_key || ""); setDraft({});
+      setMsg((d.relay?.relay_host)
+        ? `Saved — hosts route through ${d.relay.relay_host}.`
+        : "Saved — the relay is off; every host is reached directly.");
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  if (cfg === null) return <div className="empty"><span className="spin" /></div>;
+
+  const scriptUrl = (os) => `/api/relay/bastion-script?os=${os}`;
+
+  return (
+    <div style={{ maxWidth: 760 }}>
+      <div className="he-section-head" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+        <h3>Relay / Bastion</h3>
+        <span className={"badge" + (cfg.relay_host ? " ok" : "")}>
+          {cfg.relay_host ? "Routing through " + cfg.relay_host : "Off"}
+        </span>
+      </div>
+      <p className="faint" style={{ marginTop: 0 }}>
+        The jump box this controller reaches hosts <strong>THROUGH</strong>. Leave the
+        relay host blank to route nothing. A host goes through the relay when it opts
+        in, or when it matches the auto-route allowlist below.
+      </p>
+
+      <fieldset className="tool-group-box"><legend>Relay endpoint</legend>
+        <label className="field"><span>Relay / bastion host</span>
+          <input value={val("relay_host")} placeholder="bastion.example.com"
+                 onChange={(e) => set("relay_host", e.target.value)} /></label>
+        <p className="faint" style={{ fontSize: 12, marginTop: -4 }}>
+          The BASTION — the machine where you ran install-*-bastion. Not this
+          controller's own address.
+        </p>
+        <label className="field"><span>Relay SSH user</span>
+          <input value={val("relay_user")} placeholder="sysible-relay"
+                 onChange={(e) => set("relay_user", e.target.value)} /></label>
+        <label className="field"><span>Relay SSH port</span>
+          <input type="number" value={val("relay_port")} placeholder="22"
+                 onChange={(e) => set("relay_port", e.target.value)} /></label>
+        <label className="field"><span>Relay identity key path (private)</span>
+          <input value={val("relay_identity")} placeholder="/data/relay_keys/relay_ed25519"
+                 onChange={(e) => set("relay_identity", e.target.value)} /></label>
+        <p className="faint" style={{ fontSize: 12, marginTop: -4 }}>
+          The PRIVATE key, not the .pub. It's created for you on first save.
+        </p>
+      </fieldset>
+
+      <fieldset className="tool-group-box"><legend>Which hosts route through it</legend>
+        <label className="field"><span>Auto-route allowlist (CIDRs / domain suffixes)</span>
+          <input value={val("route_allowlist")} placeholder="10.20.0.0/16, .internal.example.com"
+                 onChange={(e) => set("route_allowlist", e.target.value)} /></label>
+        <p className="faint" style={{ fontSize: 12, marginTop: -4 }}>
+          The network(s) <strong>behind</strong> the bastion — normally a different
+          subnet than this controller's own. Don't list the controller's own subnet:
+          those hosts are already reachable directly. Leave blank to require explicit
+          per-host opt-in.
+        </p>
+        <label className="field"><span>Relay OS</span>
+          <select value={val("relay_os") || "auto"} onChange={(e) => set("relay_os", e.target.value)}>
+            <option value="auto">auto</option>
+            <option value="linux">linux</option>
+            <option value="windows">windows</option>
+          </select></label>
+      </fieldset>
+
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <button className="btn" disabled={busy || dirty === 0} onClick={save}>
+          {busy ? <span className="spin" /> : "Save"}</button>
+        {dirty > 0 && <span className="faint" style={{ fontSize: 12 }}>
+          {dirty} unsaved change{dirty === 1 ? "" : "s"}</span>}
+      </div>
+      {msg && <div className="ok-text" style={{ marginTop: 10 }}>{msg}</div>}
+      {err && <div className="error-box" style={{ marginTop: 10 }} role="alert">{err}</div>}
+
+      <fieldset className="tool-group-box" style={{ marginTop: 18 }}>
+        <legend>Set up the bastion</legend>
+        <p className="faint" style={{ marginTop: 0 }}>
+          Run the setup script <strong>on the jump box</strong> — it creates the
+          least-privilege relay account and installs the forwarding daemon. Then
+          authorize the key below so this controller can connect.
+        </p>
+        <div className="row" style={{ gap: 8 }}>
+          <a className="btn ghost sm" href={scriptUrl("linux")}>Linux setup script</a>
+          <a className="btn ghost sm" href={scriptUrl("windows")}>Windows setup script</a>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <span className="faint" style={{ fontSize: 12 }}>
+            This controller's relay public key — add it to the relay account's
+            authorized_keys on the bastion:
+          </span>
+          <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all",
+                                         marginTop: 6 }}>
+            {pubkey || "(no key yet — save a relay host and it is created for you)"}
+          </pre>
+        </div>
+      </fieldset>
+    </div>
+  );
+}

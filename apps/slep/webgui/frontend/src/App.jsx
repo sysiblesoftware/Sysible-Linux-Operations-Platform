@@ -1,0 +1,227 @@
+import React, { useState, useEffect } from 'react'
+import { api, setToken, setRole, isSuperuser, getTheme, applyTheme, apiUrl } from './api.js'
+import { Field, useErr } from './ui.jsx'
+import Logo from './Logo.jsx'
+import Organizations from './views/Organizations.jsx'
+import Projects from './views/Projects.jsx'
+import Ide from './views/Ide.jsx'
+import Inventories from './views/Inventories.jsx'
+import Controllers from './views/Controllers.jsx'
+import Credentials from './views/Credentials.jsx'
+import JumpHosts from './views/JumpHosts.jsx'
+import Vault from './views/Vault.jsx'
+import Users from './views/Users.jsx'
+import Infrastructure from './views/Infrastructure.jsx'
+import { InfraActions } from './views/InfraActions.jsx'
+import Schedules from './views/Schedules.jsx'
+import Activity from './views/Activity.jsx'
+import HealthBanner from './components/HealthBanner.jsx'
+import Runs, { RunLog } from './views/Runs.jsx'
+import Pipelines from './views/Pipelines.jsx'
+import Templates from './views/Templates.jsx'
+import Notifications from './views/Notifications.jsx'
+
+// Left-rail navigation — same shape as the Sysible Controller console.
+// `su: true` items are shown only to superusers.
+const NAV = [
+  { key: 'projects', label: 'Projects', icon: 'folder' },
+  { key: 'inventories', label: 'Inventories', icon: 'server' },
+  { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
+  { key: 'controllers', label: 'Controllers', icon: 'link' },
+  { key: 'credentials', label: 'Credentials', icon: 'key' },
+  { key: 'jumphosts', label: 'Jump Hosts', icon: 'jump' },
+  { key: 'vault', label: 'Variable Vault', icon: 'lock' },
+  { key: 'templates', label: 'Job Templates', icon: 'template' },
+  { key: 'runs', label: 'Runs', icon: 'play' },
+  { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
+  { key: 'schedules', label: 'Schedules', icon: 'clock' },
+  { key: 'notifications', label: 'Notifications', icon: 'bell' },
+  { key: 'organizations', label: 'Organizations', icon: 'org', su: true },
+  { key: 'activity', label: 'Activity', icon: 'activity', su: true },
+  { key: 'users', label: 'Users', icon: 'users', su: true },
+]
+
+// Feather-style line icons (inline SVG paths), matching the Controller's set.
+const ICONS = {
+  folder: <path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
+  server: <><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="17" x2="7.01" y2="17" /></>,
+  link: <><path d="M9 15l6-6" /><path d="M11.5 6.5l1-1a4 4 0 0 1 6 6l-1 1" /><path d="M12.5 17.5l-1 1a4 4 0 0 1-6-6l1-1" /></>,
+  key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2" /></>,
+  lock: <><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>,
+  play: <path d="M7 5l12 7-12 7z" />,
+  pipeline: <><circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="12" r="2.5" /><path d="M7.5 12h9" /></>,
+  users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
+  template: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18" /><path d="M8 13h8M8 16h5" /></>,
+  bell: <><path d="M18 9a6 6 0 1 0-12 0c0 6-2 7-2 7h16s-2-1-2-7" /><path d="M10.5 20a2 2 0 0 0 3 0" /></>,
+  cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
+  jump: <><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><path d="M5 16V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v7" /><path d="M12 6V3M9 5l3-2 3 2" /></>,
+  org: <><rect x="4" y="3" width="7" height="18" rx="1" /><rect x="13" y="8" width="7" height="13" rx="1" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="11" x2="7.01" y2="11" /><line x1="16" y1="12" x2="16.01" y2="12" /></>,
+}
+
+function NavIcon({ name }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{ICONS[name]}</svg>
+  )
+}
+
+export default function App() {
+  const [ready, setReady] = useState(false)
+  const [needSetup, setNeedSetup] = useState(false)
+  const [sso, setSso] = useState(false)
+  const [authed, setAuthed] = useState(false)
+  const [username, setUsername] = useState('')
+  const [roleName, setRoleName] = useState('')
+  const [view, setView] = useState('projects')
+  const [project, setProject] = useState(null)
+  const [runId, setRunId] = useState(null)
+  const [infraBump, setInfraBump] = useState(0)   // bump → the IDE's infra bar refetches (e.g. after "Build Infrastructure")
+  const [theme, setTheme] = useState(getTheme())
+  useEffect(() => { applyTheme(theme) }, [theme])
+
+  useEffect(() => {
+    const onLogout = () => setAuthed(false)
+    window.addEventListener('slep-logout', onLogout)
+    ;(async () => {
+      // Are we already signed in? Probe /me UNCONDITIONALLY — this must run even
+      // with no local token, so a gateway-asserted SSO identity (SLOP front door,
+      // no SLEP bearer) signs us in. A stored bearer token, if any, is attached by
+      // api(). On success we're in; a 401 just falls through to setup/login.
+      try {
+        const me = await api('me')
+        setUsername(me.username); setRole(me.role); setRoleName(me.role); setAuthed(true); setReady(true); return
+      } catch { /* not signed in yet — decide between first-run setup and login */ }
+      try {
+        const h = await fetch(apiUrl('/api/health')).then((r) => r.json())
+        // Which kind of "not signed in" is this? Under SLOP SSO, SLEP has no
+        // login and no first-run setup of its own — both answer 403 — so a form
+        // here strands the operator on a screen whose every answer is refused.
+        // It used to be worse than that: SLEP provisioned no local row for an
+        // SSO user, so admins stayed 0 and this offered "Create the first
+        // administrator" to whoever opened the page, and it worked.
+        if (h.sso) setSso(true)
+        else if (h.admins === 0) setNeedSetup(true)
+      } catch { /* ignore — fall through to the login screen */ }
+      setReady(true)
+    })()
+    return () => window.removeEventListener('slep-logout', onLogout)
+  }, [])
+
+  if (!ready) return <div className="center muted">Loading…</div>
+  if (!authed && sso) return <SsoSignIn />
+  if (!authed) return <Auth needSetup={needSetup} onAuthed={(u, r) => { setNeedSetup(false); setUsername(u); setRoleName(r); setAuthed(true) }} />
+
+  const go = (v) => { setView(v); setProject(null); setRunId(null) }
+  const atNav = (k) => view === k && !project && runId == null
+  const initials = (username || 'AD').slice(0, 2).toUpperCase()
+
+  return (
+    <div className="shell">
+      <aside className="rail">
+        <div className="rail-brand">
+          <Logo size={34} />
+          <div className="name">Sysible Linux<br />Engineering Platform</div>
+        </div>
+        <nav className="rail-nav">
+          {NAV.filter((n) => !n.su || roleName === 'superuser').map((n) => (
+            <button key={n.key} className={'rail-item' + (atNav(n.key) ? ' active' : '')} onClick={() => go(n.key)}>
+              <NavIcon name={n.icon} /> {n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="rail-foot">
+          <div className="ce-badge">Community Edition</div>
+          <div className="account">
+            <span className="avatar">{initials}</span>
+            <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>{roleName || 'operator'}</span></div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="ghost sm" style={{ flex: 1 }} title="Toggle light / dark"
+              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}>{theme === 'light' ? '☾ Dark' : '☀ Light'}</button>
+            <button className="ghost sm" style={{ flex: 1 }} onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setRole(''); setAuthed(false) }}>Sign out</button>
+          </div>
+        </div>
+      </aside>
+      <main className="view">
+        {runId == null && !project && <HealthBanner />}
+        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId}
+          backLabel={project ? project.name : (NAV.find((n) => n.key === view)?.label || 'Runs')} />
+          : project ? <><InfraActions project={project} refreshKey={infraBump} onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} theme={theme} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} onInfraChanged={() => setInfraBump((n) => n + 1)} /></>
+            : view === 'organizations' ? <Organizations />
+            : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
+              : view === 'inventories' ? <Inventories />
+                : view === 'infra' ? <Infrastructure onOpenProject={setProject} />
+                : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
+                : view === 'templates' ? <Templates onOpenRun={setRunId} />
+                : view === 'notifications' ? <Notifications />
+                : view === 'controllers' ? <Controllers />
+                  : view === 'credentials' ? <Credentials />
+                    : view === 'jumphosts' ? <JumpHosts />
+                    : view === 'vault' ? <Vault />
+                      : view === 'schedules' ? <Schedules />
+                        : view === 'activity' ? <Activity />
+                          : view === 'users' ? <Users />
+                            : <Runs onOpen={setRunId} />}
+      </main>
+    </div>
+  )
+}
+
+function SsoSignIn() {
+  // Accounts live in SLOP Administration; this instance has no login of its own.
+  // The link goes to the platform sign-in, which comes back here once signed in.
+  const next = encodeURIComponent(window.location.pathname + window.location.search)
+  return (
+    <div className="center">
+      <div className="card col" style={{ width: 'min(420px,92vw)' }}>
+        <div className="brand" style={{ gap: 12 }}>
+          <Logo size={40} />
+          <div className="col" style={{ gap: 2 }}>
+            <div style={{ fontSize: 17, lineHeight: 1.15 }}>Sysible Linux<br />Engineering Platform</div>
+          </div>
+        </div>
+        <div className="muted">Sign in at the Sysible Linux Operations Platform</div>
+        <div className="faint" style={{ fontSize: 13, lineHeight: 1.45 }}>
+          This console has no separate sign-in — accounts are managed in SLOP
+          Administration. If you are already signed in there, your session may
+          have expired.
+        </div>
+        <a className="primary" style={{ textAlign: 'center', textDecoration: 'none' }}
+           href={`/login?next=${next}`}>Go to sign in</a>
+      </div>
+    </div>
+  )
+}
+
+
+function Auth({ needSetup, onAuthed }) {
+  const [u, setU] = useState('')
+  const [p, setP] = useState('')
+  const { err, wrap, node } = useErr()
+  const submit = () => wrap(async () => {
+    if (needSetup && p.length < 10) throw new Error('Password must be at least 10 characters.')
+    const path = needSetup ? 'setup' : 'login'
+    const d = await api(path, { method: 'POST', json: { username: u, password: p } })
+    setToken(d.token); setRole(d.role); onAuthed(d.username || u, d.role)
+  })
+  return (
+    <div className="center">
+      <div className="card col" style={{ width: 'min(380px,92vw)' }}>
+        <div className="brand" style={{ gap: 12 }}>
+          <Logo size={40} />
+          <div className="col" style={{ gap: 2 }}>
+            <div style={{ fontSize: 17, lineHeight: 1.15 }}>Sysible Linux<br />Engineering Platform</div>
+          </div>
+        </div>
+        <div className="muted">{needSetup ? 'Create the first administrator' : 'Sign in'}</div>
+        <Field label="Username"><input value={u} autoComplete="username" onChange={(e) => setU(e.target.value)} /></Field>
+        <Field label="Password"><input type="password" value={p} autoComplete={needSetup ? 'new-password' : 'current-password'}
+          onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} /></Field>
+        {node}
+        <button className="primary" onClick={submit}>{needSetup ? 'Create admin' : 'Sign in'}</button>
+      </div>
+    </div>
+  )
+}

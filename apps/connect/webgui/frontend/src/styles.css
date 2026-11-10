@@ -1,0 +1,343 @@
+/* The Sysible suite skin — one family across SLEP / Controller / Connect: an
+   engineering ground, brand GREEN as the primary accent, brand blue for links.
+   Both light and dark palettes are defined as tokens; dark is the default and
+   the app follows the OS preference until the viewer picks a theme (theme.js
+   stamps data-theme on <html>). Terminals stay dark in both themes on purpose. */
+:root {
+  color-scheme: dark;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --bg: #0d1117; --panel: #131923; --panel2: #1a212d; --line: #26303f; --line-strong: #33405a;
+  --text: #e6edf5; --muted: #93a1b5; --faint: #6f7d92;
+  --accent: #46a04a;       /* brand green — primary actions */
+  --accent-ink: #06210c;   /* text on a green fill */
+  --accent2: #5b86f0;      /* brand blue — links, active */
+  --green: #4caf5a; --red: #e5534b;
+  --term-bg: #0b0f17;      /* terminal surface — dark in both themes */
+  --shadow: 0 1px 2px rgba(0,0,0,.35), 0 8px 24px rgba(0,0,0,.28);
+  --topo: url("/brand/topo-dark.svg");
+  --r-lg: 10px; --r-md: 8px; --r-sm: 6px;
+}
+/* Light palette — applied on an explicit choice, or by OS preference when the
+   viewer hasn't chosen dark. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef1f6; --panel: #ffffff; --panel2: #f3f5f9; --line: #dbe1ea; --line-strong: #c4cddb;
+  --text: #1b2431; --muted: #5b6675; --faint: #8794a4;
+  --accent: #2f8a37; --accent-ink: #ffffff; --accent2: #2f6fe0;
+  --green: #2f9e4a; --red: #d23a30;
+  --term-bg: #0b0f17;
+  --shadow: 0 1px 2px rgba(20,30,50,.08), 0 8px 24px rgba(20,30,50,.10);
+  --topo: url("/brand/topo-light.svg");
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #eef1f6; --panel: #ffffff; --panel2: #f3f5f9; --line: #dbe1ea; --line-strong: #c4cddb;
+    --text: #1b2431; --muted: #5b6675; --faint: #8794a4;
+    --accent: #2f8a37; --accent-ink: #ffffff; --accent2: #2f6fe0;
+    --green: #2f9e4a; --red: #d23a30;
+    --shadow: 0 1px 2px rgba(20,30,50,.08), 0 8px 24px rgba(20,30,50,.10);
+    --topo: url("/brand/topo-light.svg");
+  }
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 14px; -webkit-font-smoothing: antialiased;
+}
+/* The platform ground: the same topographic field as the SLOP portal, the sign-in
+   page, Flashback and the Visualizer — over the two brand glows. It replaces a
+   green-only PNG recoloured through a CSS mask, which was a DIFFERENT field in a
+   different colour, so no two Sysible surfaces agreed on what the background was.
+
+   It was also broken behind SLOP: the mask was fetched from "/brand-topo-overlay.png",
+   an absolute root URL that Vite does not rewrite to the app's base, so under the
+   gateway it asked the PORTAL for a file only this app ships and got nothing. The
+   field now lives at /brand/, which the gateway serves for every app, and is
+   mirrored into this app's own public/brand/ so a standalone install still has it.
+
+   Generated once by the platform: portal/brand/make_topo.py in the SLOP repo. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    var(--topo) center / cover no-repeat,
+    radial-gradient(70% 55% at 15% -10%, rgba(67,160,71,0.12), transparent 60%),
+    radial-gradient(70% 60% at 100% 110%, rgba(85,128,238,0.09), transparent 55%);
+}
+.center { display: grid; place-items: center; height: 100%; }
+.muted { color: var(--muted); }
+
+/* ---------- login ---------- */
+.login-wrap { display: grid; place-items: center; height: 100%; }
+.login {
+  display: flex; flex-direction: column; gap: 10px; width: 300px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 24px; box-shadow: var(--shadow);
+}
+.login-brand { font-size: 20px; margin-bottom: 6px; letter-spacing: .3px; }
+.login-brand b { color: var(--accent); }
+/* Every text field in the app, not just the ones on the forms that happened to
+   exist when this rule was written. A bare <input> in a modal inherited NONE of
+   this and fell back to the browser default: a small light box on a dark panel,
+   which is how the sudo-password modal ended up looking as though it had no
+   field to type into at all. */
+.login input, .add-host input, .add-host textarea,
+.modal-body input, .modal-body textarea, .modal-body select {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--text); padding: 9px 11px; font: inherit; width: 100%;
+}
+.login input::placeholder, .add-host input::placeholder,
+.modal-body input::placeholder, .modal-body textarea::placeholder { color: var(--faint); }
+.login input:focus, .add-host input:focus, .add-host textarea:focus,
+.modal-body input:focus, .modal-body textarea:focus, .modal-body select:focus,
+.term-find input:focus { outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.login-err { color: var(--red); font-size: 13px; }
+button.primary, .side-btn {
+  background: var(--accent); color: var(--accent-ink); font-weight: 600; border: 0; border-radius: var(--r-sm);
+  padding: 9px 12px; cursor: pointer; font-family: inherit; font-size: inherit;
+}
+button.primary:hover, .side-btn:hover { filter: brightness(1.06); }
+button.primary:disabled, .side-btn:disabled { opacity: .55; filter: none; cursor: default; }
+.side-btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 400; }
+.side-btn.ghost:hover { filter: none; }
+a, .link { color: var(--accent2); }
+
+/* ---------- shell ---------- */
+.connect-shell { display: grid; grid-template-columns: 232px 1fr; height: 100%; }
+.side {
+  background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; padding: 12px; gap: 6px; overflow: auto;
+}
+.side-brand { font-size: 16px; margin-bottom: 8px; }
+.side-brand b { color: var(--accent); }
+.side-sec {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  margin: 12px 0 4px; display: flex; align-items: center; justify-content: space-between;
+}
+.side-add, .side-host-del, .tab-x {
+  background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.side-empty { color: var(--faint); font-size: 12px; }
+.side-host { display: flex; align-items: center; gap: 4px; }
+.side-host-open {
+  flex: 1; text-align: left; background: transparent; border: 0; color: var(--text);
+  cursor: pointer; padding: 6px 4px; border-radius: 6px; font: inherit;
+  display: flex; align-items: center; gap: 7px; overflow: hidden; text-overflow: ellipsis;
+}
+.side-host-open:hover, .side-btn.ghost:hover { background: var(--panel2); }
+.side-host-open .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
+/* Stacked, not side by side: the sidebar is 232px and three controls in a row
+   left each button ~70px, which broke "Sudo Password" and "Sign out" across two
+   lines mid-label. The identity + theme toggle share the top row; the actions get
+   the full width underneath. */
+.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }
+.side-foot-who { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.side-foot-who .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-host {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; margin-top: 6px;
+}
+.add-host .row { display: flex; gap: 6px; }
+
+/* ---------- main / tabs ---------- */
+.main { display: flex; flex-direction: column; min-width: 0; }
+.tabbar {
+  display: flex; align-items: center; gap: 4px; padding: 6px 8px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.tab {
+  background: transparent; border: 1px solid transparent; border-bottom: 0; color: var(--muted);
+  border-radius: var(--r-sm) var(--r-sm) 0 0; padding: 6px 12px; cursor: pointer; font: inherit;
+  display: flex; align-items: center; gap: 8px; position: relative;
+}
+.tab:hover { color: var(--text); background: var(--panel2); }
+/* Active tab: a quiet panel with a green underline, not a solid green block. */
+.tab.active { background: var(--panel2); border-color: var(--line); color: var(--text); font-weight: 500; }
+.tab.active::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px;
+  background: var(--accent); border-radius: 2px; }
+.tab-x:hover { color: var(--red); }
+.tab-add { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: var(--r-sm); cursor: pointer; padding: 6px 10px; }
+.tab-add:hover { color: var(--text); border-color: var(--accent); }
+.tab-tools { margin-left: auto; display: flex; gap: 4px; }
+.tool { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--muted); border-radius: 7px; cursor: pointer; padding: 0; }
+.tool:hover { color: var(--text); border-color: var(--accent); }
+.tool.danger:hover { color: var(--red); border-color: var(--red); }
+
+/* ---------- stage / tiles / dividers ---------- */
+.stage { position: relative; flex: 1; min-height: 0; background: var(--bg); }
+.stage.drag-over { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.stage-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; z-index: 1; }
+.stage-empty-card { max-width: 380px; text-align: center; padding: 22px 26px;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-lg); background: var(--panel); color: var(--muted); }
+.stage.drag-over .stage-empty-card { border-color: var(--accent); color: var(--text); }
+.stage-empty-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.stage-empty-sub { font-size: 13px; line-height: 1.5; }
+.stage-empty-sub b { color: var(--accent); font-weight: 600; }
+.stage-empty-btn { margin-top: 14px; background: var(--accent); color: #06210a; border: 0;
+  border-radius: var(--r-sm); padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.stage-empty-btn:hover { filter: brightness(1.08); }
+.stage-empty-hint { margin-top: 14px; font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 42ch; }
+.stage-empty-hint b { color: var(--text); font-weight: 600; }
+
+/* Drop preview: the exact half a dragged host will take, drawn over the tile it
+   is about to split. Without it a drag has no feedback and the direction the
+   drop will choose is invisible until after it happens. */
+.drop-preview { position: absolute; z-index: 6; pointer-events: none;
+  border: 2px dashed var(--accent); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  display: flex; align-items: center; justify-content: center; }
+/* --bg-2 does not exist in this theme, so the label was painting on a transparent
+   background — near-invisible dark-on-dark over the tinted preview. Use the accent
+   fill with its ink colour, which reads in both themes. */
+.drop-preview span { font-size: 12px; font-weight: 700; letter-spacing: .02em;
+  color: var(--accent-ink, #06210a); background: var(--accent);
+  padding: 5px 12px; border-radius: var(--r-sm); box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
+.ws-layer { position: absolute; inset: 0; }
+.tile { position: absolute; padding: 3px; display: flex; }
+.tile > * { pointer-events: auto; }
+.tile-inner, .tile > .tile-h { }
+.tile { flex-direction: column; }
+.tile-h {
+  display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11.5px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+  border-bottom: 0; border-radius: 8px 8px 0 0;
+}
+.tile.active .tile-h { color: var(--text); border-color: var(--accent); }
+.tile-body {
+  flex: 1; min-height: 0; border: 1px solid var(--line); border-top: 0;
+  border-radius: 0 0 8px 8px; overflow: hidden; background: var(--term-bg);
+}
+.tile.active .tile-body { border-color: var(--accent); }
+.term { width: 100%; height: 100%; padding: 4px 2px 2px 6px; }
+.divider { position: absolute; z-index: 5; }
+.divider.row { cursor: col-resize; }
+.divider.col { cursor: row-resize; }
+.divider::after { content: ""; position: absolute; inset: 0; }
+.divider.row::after { left: -3px; right: -3px; }
+.divider.col::after { top: -3px; bottom: -3px; }
+.divider:hover::after { background: var(--accent); opacity: .5; }
+
+/* ---------- pop-out ---------- */
+.popout { position: fixed; inset: 0; background: var(--term-bg); }
+.popout .term { padding: 6px; }
+
+/* Controller-proxied host markers */
+.dot.ok{background:#63c869}
+.dot.ctrl{background:#5580ee}
+.host-badge{margin-left:6px;font-size:10px;opacity:.6;text-transform:uppercase;letter-spacing:.04em}
+
+/* ---------- enterprise login + brand ---------- */
+.login { align-items: stretch; }
+.login-head { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-bottom: 6px; }
+.login-brand { font-size: 20px; letter-spacing: .3px; }
+.login-brand b { color: var(--accent); }
+.login-sub { color: var(--muted); font-size: 12.5px; }
+.login-label { color: var(--muted); font-size: 13px; }
+.login-foot { text-align: center; color: var(--faint); font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; margin-top: 6px; }
+.side-brand { display: flex; align-items: center; gap: 8px; }
+.side-brand svg { flex: 0 0 auto; }
+.side-brand b { color: var(--accent); }
+
+/* ---------- per-terminal toolbar ---------- */
+.term-wrap { display: flex; flex-direction: column; height: 100%; }
+.term-tools { display: flex; align-items: center; gap: 3px; padding: 4px 6px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  /* A tile can be split down to a fraction of the window. Scroll the toolbar
+     rather than let flex crush the keys until their labels break mid-word. */
+  overflow-x: auto; scrollbar-width: none; }
+.term-tools::-webkit-scrollbar { display: none; }
+/* text keys (Ctrl-C, Sudo Password, A−, A+, ↑, ↓) */
+.term-tools .tt-key { background: var(--panel2); border: 1px solid var(--line);
+  color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 11px;
+  font-weight: 500; line-height: 1; padding: 4px 8px; letter-spacing: .02em;
+  white-space: nowrap; flex: 0 0 auto; }
+/* icon buttons (find, save, close) — square, SVG centred */
+.term-tools .tt-icon { display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 24px; padding: 0; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--muted); border-radius: 6px; cursor: pointer;
+  flex: 0 0 auto; }
+.term-tools .tt-key:hover, .term-tools .tt-icon:hover, .term-tools .tt-icon.on {
+  color: var(--text); border-color: var(--accent); }
+/* thin separator between key groups */
+.term-tools .tt-sep { width: 1px; height: 16px; background: var(--line); margin: 0 3px; }
+/* close sits at the far right, turns red on hover */
+.term-tools .tt-close { margin-left: auto; }
+.term-tools .tt-close:hover { color: var(--red); border-color: var(--red); }
+.term-find { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; }
+.term-find input { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 6px; padding: 3px 7px; font: inherit; font-size: 11px; width: 120px; }
+.term-wrap .term { flex: 1; min-height: 0; width: 100%; padding: 4px 2px 2px 6px; }
+
+/* per-pane close in the tile header */
+.tile-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-x { display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 18px; padding: 0; background: transparent; border: 0;
+  color: var(--muted); border-radius: 4px; cursor: pointer; }
+.tile-x:hover { color: var(--red); background: var(--panel2); }
+
+/* ---------- host groups + ping status ---------- */
+/* The environment heading is a control, not a caption: it folds its group so a
+   large fleet can be drilled into instead of scrolled past. */
+.side-envgroup { display: flex; align-items: center; gap: 5px; width: 100%;
+  background: transparent; border: 0; padding: 2px 0 2px 4px; cursor: pointer;
+  font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); margin: 8px 0 2px; text-align: left; }
+.side-envgroup:hover { color: var(--text); }
+.side-envgroup .caret { flex: 0 0 auto; transition: transform .12s ease; transform: rotate(90deg); }
+.side-envgroup.closed .caret { transform: rotate(0deg); }
+.side-envgroup .envname { flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-envgroup .envcount { flex: 0 0 auto; font-weight: 600; }
+.side-filter { width: 100%; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); color: var(--text); padding: 6px 9px; font: inherit;
+  font-size: 12px; margin: 2px 0; }
+.side-filter:focus { outline: none; border-color: var(--accent); }
+.side-filter::placeholder { color: var(--faint); }
+.side-runas { font-size: 11px; color: var(--faint); margin: 1px 0 2px 16px; cursor: default; }
+.side-runas b { color: var(--muted); font-weight: 600; }
+.side-host-open .dot.up { background: var(--green); }
+.side-host-open .dot.down { background: var(--red); }
+
+/* ---------- theme toggle + footer ---------- */
+.side-foot-actions { display: flex; flex-direction: column; gap: 6px; }
+.side-foot-actions .side-btn { width: 100%; text-align: center; white-space: nowrap; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: var(--r-sm); cursor: pointer; }
+.icon-btn:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---------- fleet actions (sidebar group) ---------- */
+.side-sec-count { font-size: 10px; font-weight: 600; color: var(--faint);
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; letter-spacing: 0; }
+.fleet-group { display: flex; flex-direction: column; gap: 4px; padding: 6px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-md); }
+.fleet-btn { text-align: left; background: transparent; border: 1px solid transparent; color: var(--text);
+  border-radius: var(--r-sm); padding: 7px 9px; cursor: pointer; font: inherit; font-size: 12.5px; }
+.fleet-btn:hover { background: var(--panel); border-color: var(--line); }
+.fleet-btn.danger { color: var(--red); }
+.fleet-btn.danger:hover { background: color-mix(in srgb, var(--red) 12%, transparent); border-color: var(--red); }
+.fleet-sep { font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint);
+  margin: 4px 2px 1px; padding-top: 5px; border-top: 1px solid var(--line); }
+.side-btn.sm { padding: 6px 10px; font-size: 12px; text-align: left; }
+.modal-back { position: fixed; inset: 0; background: rgba(4,7,12,.5); backdrop-filter: blur(2px); display: grid;
+  place-items: center; z-index: 50; }
+.modal { width: min(760px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; box-shadow: var(--shadow); }
+.modal-h { display: flex; align-items: center; gap: 6px; padding: 12px 14px;
+  border-bottom: 1px solid var(--line); }
+.modal-body { padding: 10px 14px; overflow: auto; }
+.fleet-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.fleet-name { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.fleet-out { margin: 6px 0 0; padding: 8px 10px; background: var(--term-bg); border: 1px solid var(--line);
+  border-radius: 6px; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+  white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+
+/* ---------- files modal ---------- */
+.file-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.file-name { flex: 1; text-align: left; background: transparent; border: 0; color: var(--text);
+  cursor: pointer; font: inherit; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name:hover { color: var(--accent); }

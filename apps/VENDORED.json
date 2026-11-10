@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Where each vendored app came from, and which commit of it this tree holds.",
+    "",
+    "The SOURCE OF TRUTH for these three apps is this repository. The standalone",
+    "repositories named below are PUBLISH TARGETS: tools/publish-app pushes a",
+    "finished change out to one of them. Editing a standalone repo directly and",
+    "expecting the platform to pick it up is the one workflow this layout does not",
+    "support -- the next publish would overwrite it.",
+    "",
+    "`commit` is the commit of the standalone repo each directory was last synced",
+    "with, in either direction. tools/publish-app updates it after a successful",
+    "push, which is what lets `publish-app --status` say whether a target has",
+    "drifted since."
+  ],
+  "apps": {
+    "controller": {
+      "label": "Sysible Controller",
+      "repo": "https://github.com/sysiblesoftware/Sysible-Controller",
+      "branch": "main",
+      "commit": "684d0fe026a4",
+      "compose_service": "controller",
+      "path_prefix": ""
+    },
+    "slep": {
+      "label": "Sysible Linux Engineering Platform",
+      "repo": "https://github.com/sysiblesoftware/sysible-linux-engineering-platform",
+      "branch": "main",
+      "commit": "8c5dd88b15e9",
+      "compose_service": "slep",
+      "path_prefix": "/slep/"
+    },
+    "connect": {
+      "label": "Sysible Connect",
+      "repo": "https://github.com/sysiblesoftware/sysible-connect",
+      "branch": "main",
+      "commit": "07585a6257cf",
+      "compose_service": "connect",
+      "path_prefix": "/connect/"
+    }
+  }
+}

@@ -39,13 +39,39 @@ say()  { printf '%s\n' "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # What to do (default: everything).
-WANT_APPS=1; WANT_GW=1
-case "${1:-all}" in
+#
+# INTEGRATED is the one-checkout layout: the Controller, SLEP and Connect are
+# built from apps/ in THIS tree, by this repo's compose file, behind its
+# `integrated` profile. Not the default yet, deliberately — a host already
+# running the three apps the old way has their container names and ports taken,
+# and switching it by surprise during an update is how a fleet's Controller
+# database goes missing. docs/INTEGRATED.md has the migration. Pass --integrated
+# to choose it; a FRESH host should.
+WANT_APPS=1; WANT_GW=1; INTEGRATED=0
+for _a in "$@"; do
+  case "$_a" in
+    --integrated) INTEGRATED=1 ;;
+  esac
+done
+# The mode word is the first argument that is not a flag.
+_MODE=all
+for _a in "$@"; do
+  case "$_a" in
+    --*) : ;;
+    *) _MODE="$_a"; break ;;
+  esac
+done
+case "$_MODE" in
   all|"")   WANT_APPS=1; WANT_GW=1 ;;
   apps)     WANT_APPS=1; WANT_GW=0 ;;
   gateway|gw) WANT_APPS=0; WANT_GW=1 ;;
-  *) die "unknown argument '$1' (use: all | apps | gateway)" ;;
+  *) die "unknown argument '$_MODE' (use: all | apps | gateway, with optional --integrated)" ;;
 esac
+if [ "$INTEGRATED" -eq 1 ]; then
+  for _k in controller slep connect; do
+    [ -d "$HERE/apps/$_k" ] || die "--integrated needs apps/$_k in this checkout; this tree does not have it"
+  done
+fi
 
 [ "$(id -u)" -eq 0 ] || exec sudo -- "$0" "$@"
 
@@ -560,6 +586,22 @@ _upsert_kv "$ENV_FILE" SYSIBLE_SLOP_DIR "$HERE" 2>/dev/null || true
 
 # ---- the three apps (best-effort: one failing never stops the rest) ------
 FAILED=""
+# The one-checkout layout: nothing to clone. The three apps are built from
+# apps/ by this repo's compose file, so the loop below -- which clones three
+# repositories over a network that might only half-work, and whose "could not
+# clone slep - skipping it" left a host that looked installed and was not -- has
+# nothing to do. Their SSO secret, trust flag and URL prefix are not written into
+# three .env files either: the prefix is a build-arg literal per service and the
+# secret is the platform's own, already in the .env beside this compose file.
+if [ "$INTEGRATED" -eq 1 ] && [ "$WANT_APPS" -eq 1 ]; then
+  say
+  say "============================================================"
+  say " apps — built from this checkout (apps/), not cloned"
+  say "============================================================"
+  say "  controller, slep and connect are services of this compose project."
+  WANT_APPS=0
+  _upsert_kv "$ENV_FILE" SYSIBLE_INTEGRATED 1
+fi
 if [ "$WANT_APPS" -eq 1 ]; then
   # The host's LAN IP — where the Controller publishes its backend/agent API on :9000.
   # Same detection sysiblectl uses when it seeds the Controller's advertised address.
@@ -674,7 +716,8 @@ if [ "$WANT_GW" -eq 1 ]; then
   say "============================================================"
   say " SLOP gateway — the single front door (this repo: $HERE)"
   say "============================================================"
-  if env SYSIBLE_SLOP_DIR="$HERE" sysiblectl slop "$CTL_BUILD_VERB"; then
+  if env SYSIBLE_SLOP_DIR="$HERE" SYSIBLE_INTEGRATED="$INTEGRATED" \
+       sysiblectl slop "$CTL_BUILD_VERB"; then
     say "  SLOP gateway is up."
   else
     FAILED="$FAILED slop-gateway"; say "  WARNING: the SLOP gateway did not come up (scroll up for the error)."

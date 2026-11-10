@@ -1,0 +1,595 @@
+"""
+Webserver Portal - the host-facing surface a remote host operator
+reaches in a browser to log in (simple username/password, configured
+in the Webserver Portal Configuration page) and download a ready-to-run
+agent bundle for this controller.
+
+This is a separate FastAPI app from backend.app:app on purpose - see
+backend/portal_manager.py for why it's a standalone process on its own
+HTTPS port (same self-signed cert as the controller) rather than
+routes on the main API. It does NOT use require_api_key
+(backend/auth.py): that key is for the admin GUI, not a host operator
+typing a username/password into a browser.
+"""
+
+import base64
+import html
+import os
+import secrets
+import threading
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+
+from backend.agent_bundle import mint_agent_bundle, resolve_controller_addresses, bundle_addresses
+from backend.db import get_controller_config, get_portal_credentials, log_portal_event
+from backend import portal_auth, portal_files
+
+# Interactive docs/schema disabled - this is a public, host-facing portal,
+# so there's no reason to publish an API map. Readiness is probed via
+# /health, not openapi.json.
+app = FastAPI(title="Sysible Webserver Portal", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    """Security response headers for the public-facing portal. CSP is
+    'self' (not 'none') because the portal serves its own HTML/CSS/logo.
+    HSTS is safe: the portal is launched with TLS (see portal_manager)."""
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers.setdefault("Cache-Control", "no-store")
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'; form-action 'self'"
+    )
+    return response
+
+SESSION_COOKIE = "sysible_portal_session"
+
+# Ceiling on a single portal upload (provisioning artifacts are small). Prevents
+# a shared-credential user from OOM'ing the portal with a huge body. 64 MB
+# default; tune with SYSIBLE_PORTAL_MAX_UPLOAD_BYTES.
+try:
+    _PORTAL_MAX_UPLOAD_BYTES = int(os.getenv("SYSIBLE_PORTAL_MAX_UPLOAD_BYTES", str(64 * 1024 * 1024)))
+except ValueError:
+    _PORTAL_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+# The Sysible logo, served on the portal's own pages. Read from the
+# repo-root PNG rather than bundled elsewhere so this process stays free
+# of any extra dependency and can run on a headless server.
+LOGO_PATH = Path(__file__).resolve().parent.parent / "sysible_logo.png"
+
+
+def _page(body: str, message: str = "", wide: bool = False) -> str:
+    banner = f'<div class="alert">{message}</div>' if message else ""
+    width = "680px" if wide else "380px"
+
+    logo_tag = (
+        '<img src="/static/logo.png" alt="Sysible" onerror="this.remove()">'
+        if LOGO_PATH.exists() else ""
+    )
+    favicon_tag = (
+        '<link rel="icon" type="image/png" href="/static/logo.png">'
+        if LOGO_PATH.exists() else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>Sysible Controller - Webserver Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {favicon_tag}
+  <style>
+    :root {{
+      --bg: #1E1E1E;
+      --card: #262626;
+      --card-border: #3A3A3A;
+      --input-bg: #2B2B2B;
+      --input-border: #505050;
+      --text: #EAEAEA;
+      --text-dim: #9aa5b1;
+      --accent: #6ddb73;
+      --accent-border: #57c65d;
+      --accent-hover: #82e388;
+      --accent-pressed: #55c25b;
+      --on-accent: #06210f;
+      --error: #ff5c5c;
+      --link: #7aa2ff;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Sora", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text); margin: 0; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 36px 16px 48px;
+    }}
+    .topbar {{ display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }}
+    .topbar img {{ height: 34px; }}
+    .topbar .name {{ font-size: 16px; font-weight: 600; letter-spacing: 0.2px; line-height: 1.3; }}
+    .topbar .sub {{ font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.7px; }}
+    .box {{
+      background: var(--card); border: 1px solid var(--card-border);
+      padding: 32px 36px; border-radius: 10px; width: {width}; max-width: 92vw;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    }}
+    .row {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
+    h1 {{ font-size: 19px; margin: 0 0 4px; font-weight: 600; }}
+    .lede {{ color: var(--text-dim); font-size: 13px; margin: 0 0 22px; }}
+    h2 {{ font-size: 12px; margin: 26px 0 10px; color: var(--text-dim);
+          text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }}
+    h2:first-of-type {{ margin-top: 6px; }}
+    label {{ display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }}
+    input {{
+      width: 100%; padding: 10px 12px; margin: 0 0 16px; font-size: 14px;
+      background: var(--input-bg); color: var(--text);
+      border: 1px solid var(--input-border); border-radius: 6px;
+    }}
+    input:focus {{ outline: none; border-color: var(--accent-border); background: #303030; }}
+    input[type=file] {{ padding: 8px 0; border: none; background: none; }}
+    button, .btn {{
+      display: inline-block; width: 100%; padding: 11px; text-align: center;
+      background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent-border);
+      border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500;
+      text-decoration: none; transition: background 0.15s ease; font-family: inherit;
+    }}
+    button:hover, .btn:hover {{ background: var(--accent-hover); }}
+    button:active, .btn:active {{ background: var(--accent-pressed); }}
+    .btn-sm {{ width: auto; padding: 7px 16px; font-size: 12px; }}
+    .btn-quiet {{ background: transparent; border-color: var(--input-border); color: var(--text-dim); }}
+    .btn-quiet:hover {{ background: #303030; color: var(--text); }}
+    a {{ color: var(--link); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    ul {{ list-style: none; padding: 0; margin: 0; }}
+    li {{ display: flex; justify-content: space-between; align-items: center;
+          padding: 10px 0; border-bottom: 1px solid var(--card-border); gap: 12px; }}
+    li:last-child {{ border-bottom: none; }}
+    li .meta {{ color: var(--text-dim); font-size: 12px; margin-left: 8px; }}
+    .empty {{ color: var(--text-dim); font-size: 13px; margin: 4px 0; }}
+    .alert {{
+      padding: 10px 14px; margin-bottom: 18px; border-radius: 6px; font-size: 13px;
+      background: rgba(255,92,92,0.12); border: 1px solid rgba(255,92,92,0.4); color: var(--error);
+    }}
+    .footer {{ margin-top: 24px; color: var(--text-dim); font-size: 11px; text-align: center; }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    {logo_tag}
+    <div>
+      <div class="name">Sysible Controller</div>
+      <div class="sub">Webserver Portal</div>
+    </div>
+  </div>
+  <div class="box">
+    {banner}
+    {body}
+  </div>
+  <div class="footer">Sysible Enterprise Software</div>
+</body>
+</html>"""
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+
+
+@app.get("/static/logo.png")
+async def logo():
+    """Unauthenticated on purpose - it's just the product mark shown on
+    the login page itself, nothing sensitive. No static-file mount
+    exists in this standalone portal app, so this single route stands
+    in for one."""
+    if not LOGO_PATH.exists():
+        return Response(status_code=404)
+
+    return FileResponse(LOGO_PATH, media_type="image/png")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def login_page(error: str = ""):
+    messages = {
+        "badlogin": "Invalid username or password.",
+        "throttled": "Too many failed login attempts. Please wait a few minutes and try again.",
+        "notconfigured": "The portal has no login credentials configured yet - ask your admin to set them in Webserver Portal Configuration.",
+        "expired": "Your session expired - please log in again.",
+    }
+
+    body = """
+    <h1>Sign In</h1>
+    <p class="lede">Enter your Webserver Portal credentials to continue.</p>
+    <form method="post" action="/login">
+      <label>Username</label>
+      <input type="text" name="username" autofocus required>
+      <label>Password</label>
+      <input type="password" name="password" required>
+      <button type="submit">Log In</button>
+    </form>
+    """
+
+    return _page(body, messages.get(error, ""))
+
+
+# ---------------------------------------------------------------------------
+# Brute-force throttling for the public portal login.
+# The portal is the one password login reachable without already holding a
+# secret, so it's the real guessing surface. Track failures per client IP in
+# memory; after LOGIN_MAX_FAILURES within LOGIN_WINDOW_S, lock that IP out for
+# LOGIN_LOCKOUT_S. In-memory (not the DB) on purpose: it's per-process, resets
+# on restart, and never persists anything tied to a password attempt.
+# ---------------------------------------------------------------------------
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_S = 15 * 60
+LOGIN_LOCKOUT_S = 15 * 60
+_login_state = {}            # ip -> {"fails": [timestamps], "until": lock_expiry}
+_login_lock = threading.Lock()
+
+
+def _login_locked_for(ip):
+    """Seconds remaining on this IP's lockout, or 0 if not locked."""
+    if not ip:
+        return 0
+    with _login_lock:
+        st = _login_state.get(ip)
+        if not st:
+            return 0
+        remaining = st.get("until", 0) - time.time()
+        return int(remaining) if remaining > 0 else 0
+
+
+# Decoy credential for constant-time login (see the login handler): a full PBKDF2
+# verify runs against this even when the username is wrong, so timing can't reveal
+# the configured portal username. Random per process, never matches.
+_PORTAL_DECOY_SALT, _PORTAL_DECOY_HASH = portal_auth.hash_password(secrets.token_hex(16))
+
+
+def _record_login_failure(ip):
+    if not ip:
+        return
+    now = time.time()
+    with _login_lock:
+        st = _login_state.setdefault(ip, {"fails": [], "until": 0})
+        st["fails"] = [t for t in st["fails"] if now - t < LOGIN_WINDOW_S]
+        st["fails"].append(now)
+        if len(st["fails"]) >= LOGIN_MAX_FAILURES:
+            st["until"] = now + LOGIN_LOCKOUT_S
+            st["fails"] = []
+
+
+def _clear_login_failures(ip):
+    if ip:
+        with _login_lock:
+            _login_state.pop(ip, None)
+
+
+@app.post("/login")
+async def login(request: Request, username: str = Form(...), password: str = Form(...), cli: int = 0):
+    # Logged either way (success or failure) so the Webserver Portal
+    # Configuration page can show real login history, not just "is it
+    # configured" - the host operator's IP is the only identifying
+    # detail worth keeping here, the password obviously never is.
+    #
+    # cli=1 is the copy-paste curl path: it gets real HTTP status codes
+    # (so `curl -f` stops the chain right here with a clear reason) instead
+    # of browser-style 303 redirects that a script can't tell apart from
+    # success.
+    ip = request.client.host if request.client else ""
+
+    locked = _login_locked_for(ip)
+    if locked:
+        log_portal_event("login_throttled", username, ip)
+        msg = (f"Too many failed login attempts. Try again in about "
+               f"{max(1, locked // 60)} minute(s).")
+        if cli:
+            return Response(msg + "\n", status_code=429, media_type="text/plain")
+        return RedirectResponse("/?error=throttled", status_code=303)
+
+    creds = get_portal_credentials()
+
+    if not creds or not creds.get("username"):
+        if cli:
+            return Response(
+                "The portal has no login configured. Set one up in the "
+                "Webserver Portal page of the web console first.\n",
+                status_code=409, media_type="text/plain",
+            )
+        return RedirectResponse("/?error=notconfigured", status_code=303)
+
+    if secrets.compare_digest(username, creds["username"]):
+        valid = portal_auth.verify_password(
+            password, creds.get("password_salt"), creds.get("password_hash"))
+    else:
+        # Decoy verify so a wrong username costs the same PBKDF2 time as a right one
+        # (don't leak the configured portal username via a fast short-circuit).
+        portal_auth.verify_password(password, _PORTAL_DECOY_SALT, _PORTAL_DECOY_HASH)
+        valid = False
+
+    if not valid:
+        _record_login_failure(ip)
+        log_portal_event("login_failed", username, ip)
+        if cli:
+            return Response(
+                "Login failed: wrong username or password. Note the password "
+                "goes inside the single quotes in the curl command.\n",
+                status_code=401, media_type="text/plain",
+            )
+        return RedirectResponse("/?error=badlogin", status_code=303)
+
+    _clear_login_failures(ip)
+    log_portal_event("login_success", username, ip)
+    token = portal_auth.create_session(ip)
+
+    if cli:
+        response = Response("Login OK\n", media_type="text/plain")
+    else:
+        response = RedirectResponse("/files", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, secure=True, samesite="strict",
+        max_age=portal_auth.SESSION_TTL_SECONDS,
+    )
+
+    return response
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+
+    if token:
+        portal_auth.revoke_session(token)
+
+    response = RedirectResponse("/", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+
+    return response
+
+
+@app.get("/files", response_class=HTMLResponse)
+async def files_hub(request: Request):
+    token_cookie = request.cookies.get(SESSION_COOKIE)
+
+    if not portal_auth.validate_session(token_cookie):
+        return RedirectResponse("/?error=expired", status_code=303)
+
+    config = get_controller_config()
+
+    bundle_section = (
+        '<p><a class="btn" href="/files/bundle">Download Agent Bundle</a></p>'
+        if resolve_controller_addresses(config)
+        else '<p class="empty">The controller hostname/IP has not been set '
+             'yet - ask your admin to configure it in Controller '
+             'Configuration before an agent bundle can be built.</p>'
+    )
+
+    downloads = portal_files.list_downloads()
+
+    if downloads:
+        rows = "".join(
+            f'<li><span>{html.escape(f["filename"])}'
+            f'<span class="meta">{_human_size(f["size"])}</span></span>'
+            f'<a class="btn btn-sm" href="/files/download/{quote(f["filename"])}">Download</a></li>'
+            for f in downloads
+        )
+        downloads_html = f"<ul>{rows}</ul>"
+    else:
+        downloads_html = '<p class="empty">Nothing staged for you yet.</p>'
+
+    body = f"""
+    <div class="row">
+      <h1>Files Hub</h1>
+      <a class="btn btn-sm btn-quiet" href="/logout">Log out</a>
+    </div>
+    <p class="lede">Download your agent bundle, grab files staged for you, or send a file to the controller.</p>
+
+    <h2>Agent Bundle</h2>
+    {bundle_section}
+
+    <h2>Files Staged For You</h2>
+    {downloads_html}
+
+    <h2>Send A File To The Controller</h2>
+    <form method="post" action="/files/upload" enctype="multipart/form-data">
+      <input type="file" name="file" required>
+      <button type="submit">Upload</button>
+    </form>
+    """
+
+    return _page(body, wide=True)
+
+
+@app.get("/files/bundle")
+async def download_bundle(request: Request, cli: int = 0):
+    # cli=1 is set by the copy-paste curl command. For that path we return
+    # real HTTP error codes instead of browser-style 303 redirects, so a
+    # failure (bad login, expired session, no controller address) aborts
+    # the curl `&&` chain with a clear message - rather than silently
+    # saving a redirect page and letting `unzip` fail confusingly with
+    # "cannot find sysible-agent-bundle.zip".
+    token_cookie = request.cookies.get(SESSION_COOKIE)
+
+    if not portal_auth.validate_session(token_cookie):
+        if cli:
+            return Response(
+                "Not logged in (the portal login failed or the session "
+                "expired). Check the username and password in the curl "
+                "command and try again.\n",
+                status_code=401, media_type="text/plain",
+            )
+        return RedirectResponse("/?error=expired", status_code=303)
+
+    config = get_controller_config()
+    addresses = bundle_addresses(config)
+
+    if not addresses:
+        if cli:
+            return Response(
+                "The controller has no configured address, so an agent "
+                "bundle can't be built. Set one in Controller "
+                "Configuration in the web console, then retry.\n",
+                status_code=409, media_type="text/plain",
+            )
+        return RedirectResponse("/files", status_code=303)
+
+    filename, zip_bytes = mint_agent_bundle(addresses, config["port"])
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _build_bundle_response():
+    """Shared bundle builder used by the CLI endpoint. Returns either a
+    zip Response or a plain-text error Response (409) if the controller
+    has no configured address."""
+    config = get_controller_config()
+    addresses = bundle_addresses(config)
+    if not addresses:
+        return Response(
+            "The controller has no configured address, so an agent bundle "
+            "can't be built. Set one in Controller Configuration in the "
+            "web console, then retry.\n",
+            status_code=409, media_type="text/plain",
+        )
+    filename, zip_bytes = mint_agent_bundle(addresses, config["port"])
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/cli/bundle")
+async def cli_bundle(request: Request):
+    """One-shot bundle download for the copy-paste curl command. Auth is
+    HTTP Basic (curl -u user:pass) against the portal credentials, so
+    there is no login/cookie round-trip - the single biggest source of
+    "Login OK but 401" breakage (a stale or unwritable /tmp cookie jar
+    leaving the session cookie unsaved between the two requests)."""
+    ip = request.client.host if request.client else ""
+    auth = request.headers.get("Authorization", "")
+
+    # This Basic-auth path checks the SAME portal password as /login, so it must
+    # share the brute-force lockout — otherwise it's an unthrottled guessing
+    # oracle against the one network-reachable credential.
+    locked = _login_locked_for(ip)
+    if locked:
+        return Response(
+            f"Too many failed attempts. Try again in {locked} seconds.\n",
+            status_code=429, media_type="text/plain",
+            headers={"Retry-After": str(locked)},
+        )
+
+    if not auth.startswith("Basic "):
+        return Response(
+            "Provide the portal username and password with curl -u "
+            "'user:password'.\n",
+            status_code=401, media_type="text/plain",
+            headers={"WWW-Authenticate": 'Basic realm="sysible-portal"'},
+        )
+
+    try:
+        user, _, pw = base64.b64decode(auth[6:]).decode("utf-8", "replace").partition(":")
+    except Exception:
+        return Response("Malformed authorization header.\n",
+                        status_code=401, media_type="text/plain")
+
+    creds = get_portal_credentials()
+    if not creds or not creds.get("username"):
+        return Response(
+            "The portal has no login configured. Set one up in the "
+            "Webserver Portal page of the web console first.\n",
+            status_code=409, media_type="text/plain",
+        )
+
+    # Always run one PBKDF2 verify (real hash on a username match, decoy otherwise) so a
+    # wrong username costs the same time as a wrong password — no short-circuit timing
+    # oracle for username enumeration, matching the /login handler.
+    user_ok = secrets.compare_digest(user, creds["username"])
+    if user_ok:
+        pw_ok = portal_auth.verify_password(pw, creds.get("password_salt"), creds.get("password_hash"))
+    else:
+        portal_auth.verify_password(pw, _PORTAL_DECOY_SALT, _PORTAL_DECOY_HASH)
+        pw_ok = False
+    valid = user_ok and pw_ok
+    if not valid:
+        _record_login_failure(ip)
+        log_portal_event("login_failed", user, ip)
+        return Response(
+            "Login failed: wrong username or password.\n",
+            status_code=401, media_type="text/plain",
+        )
+
+    _clear_login_failures(ip)
+    log_portal_event("login_success", user, ip)
+    return _build_bundle_response()
+
+
+@app.get("/files/download/{filename}")
+async def download_staged_file(filename: str, request: Request):
+    token_cookie = request.cookies.get(SESSION_COOKIE)
+
+    if not portal_auth.validate_session(token_cookie):
+        return RedirectResponse("/?error=expired", status_code=303)
+
+    try:
+        path = portal_files.download_path(filename)
+    except (portal_files.InvalidFilename, FileNotFoundError):
+        return RedirectResponse("/files", status_code=303)
+
+    return FileResponse(path, filename=path.name)
+
+
+@app.post("/files/upload")
+async def upload_file(request: Request, file: UploadFile = File(...)):
+    token_cookie = request.cookies.get(SESSION_COOKIE)
+
+    if not portal_auth.validate_session(token_cookie):
+        return RedirectResponse("/?error=expired", status_code=303)
+
+    # Bound how much we buffer: the portal is for small provisioning artifacts,
+    # and this endpoint is reachable by the shared portal credential (the most
+    # exposed login), so an unbounded read() would let one request OOM the
+    # portal process. Reject an oversized Content-Length up front, and read only
+    # up to the cap+1 so a spoofed/absent length still can't over-buffer.
+    try:
+        clen = int(request.headers.get("content-length") or 0)
+    except (ValueError, TypeError):
+        clen = 0
+    if clen and clen > _PORTAL_MAX_UPLOAD_BYTES + 4096:
+        return Response(f"File exceeds the {_PORTAL_MAX_UPLOAD_BYTES}-byte upload limit.\n",
+                        status_code=413, media_type="text/plain")
+    data = await file.read(_PORTAL_MAX_UPLOAD_BYTES + 1)
+    if len(data) > _PORTAL_MAX_UPLOAD_BYTES:
+        return Response(f"File exceeds the {_PORTAL_MAX_UPLOAD_BYTES}-byte upload limit.\n",
+                        status_code=413, media_type="text/plain")
+    portal_files.save_upload(file.filename, data)
+
+    return RedirectResponse("/files", status_code=303)
+
+
+@app.get("/download")
+async def download_legacy(request: Request):
+    """Old direct-bundle URL, kept as a redirect now that downloading
+    lives inside the /files hub - avoids breaking anything that still
+    links straight to /download (browser history, an old bookmark)."""
+    return RedirectResponse("/files/bundle", status_code=303)
+
+
+@app.get("/health")
+async def health():
+    """Unauthenticated - lets the GUI's portal status check confirm
+    the process isn't just alive (PID exists) but actually serving."""
+    return {"status": "running"}

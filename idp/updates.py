@@ -50,17 +50,24 @@ def _url(path: str) -> str:
 _KEY_RE = re.compile(r"[a-z0-9_-]{1,32}\Z")
 
 
-def _call(path: str, user: str, role: str, method: str = "GET") -> tuple[dict | None, str | None]:
+def _call(path: str, user: str, role: str, method: str = "GET",
+          body: dict | None = None) -> tuple[dict | None, str | None]:
     """(data, error). Never raises — Administration must render even when the
     updater is missing, stopped, or mid-restart because it is updating SLOP."""
     if not configured():
         return None, "the updater service is not deployed"
-    req = urllib.request.Request(_url(path), method=method, headers={
+    headers = {
         "X-Sysible-Auth": SECRET,
         "X-Sysible-User": user,
         "X-Sysible-Role": role,
         "Accept": "application/json",
-    })
+    }
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(_url(path), data=data, method=method,
+                                 headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.loads(r.read().decode("utf-8") or "{}"), None
@@ -127,6 +134,17 @@ def module_action(key: str, module: str, act: str, user: str, role: str):
     if not (_KEY_RE.match(key) and _KEY_RE.match(module) and _KEY_RE.match(act)):
         return None, "unknown product, module or action"
     return _call(f"/api/action/{key}/{module}/{act}", user, role, method="POST")
+
+
+def autoupdate(user: str, role: str):
+    """The automatic-update schedule, and what the last run actually did."""
+    return _call("/api/autoupdate", user, role)
+
+
+def set_autoupdate(changes: dict, user: str, role: str):
+    """Change the schedule. The updater validates every field again on its side
+    — this is a console, not the authority."""
+    return _call("/api/autoupdate", user, role, method="POST", body=changes)
 
 
 def pending(apps) -> int:

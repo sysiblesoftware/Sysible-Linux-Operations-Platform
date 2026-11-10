@@ -1,0 +1,1216 @@
+"""Create Infrastructure — a form-driven Terraform VM builder.
+
+The console shows menus (from PROVIDERS below); this module turns the selections
+into a real Terraform project (main.tf / variables.tf / outputs.tf + a cloud-init
+file) written into a SLEP project. Every provider emits a normalized
+`output "sysible_hosts"` — a list of {name, ip, user} — so after `terraform apply`
+the auto-enroll step can read the created VMs back and register them in a
+connected Sysible Controller (see app.py /infra/{id}/enroll).
+
+The generated HCL is deliberately plain and variable-driven so it reads well in
+the IDE and is easy to tweak by hand afterwards.
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+
+# ---- option schema shown as menus in the console ---------------------------
+# type: "select" (choices), "number", "text", "textarea". `default` seeds the form.
+_COUNT = {"key": "count", "label": "How many VMs", "type": "number", "default": 1}
+_PREFIX = {"key": "name_prefix", "label": "Name prefix", "type": "text", "default": "app"}
+_HOSTNAME = {"key": "hostname", "label": "Hostname (base name set on the VMs)", "type": "text",
+             "default": "sysible",
+             "help": "The OS hostname the VMs boot with. A single VM gets exactly this; several get "
+                     "it suffixed (sysible-1, sysible-2, …). Set per-VM via the cloud-init meta-data."}
+# libvirt only: how the provider learns each VM's IP after boot. On a libvirt-managed
+# NAT network the IP is read from libvirt's own DHCP lease (the reliable default). On a
+# network BRIDGED to the host LAN, the VMs get their IPs from the LAN's DHCP server,
+# which libvirt cannot see — so the QEMU guest agent (installed on first boot) reports
+# the IP instead. Picking the wrong one is the classic "couldn't retrieve IP address of
+# domain" apply failure.
+_NET_MODE = {"key": "net_mode", "label": "How the VMs get their IP address", "type": "select",
+             "default": "nat", "choices": ["nat", "bridge"],
+             "help": "nat — the network is a libvirt-managed NAT network with its own DHCP (the provider "
+                     "reads the IP from libvirt's lease; the reliable default, e.g. the 'default' network). "
+                     "bridge — the network is bridged onto your host LAN and VMs get IPs from the LAN's "
+                     "DHCP, which libvirt can't read; the QEMU guest agent reports the IP instead. The VMs "
+                     "install the agent on first boot, so a bridged first apply can take a couple minutes "
+                     "longer while it comes up."}
+_SSH_USER = {"key": "ssh_user", "label": "Login user", "type": "text", "default": "ubuntu"}
+_SSH_KEY = {"key": "ssh_public_key", "label": "Deploy SSH public key (for SLEP access)",
+            "type": "textarea", "default": "", "help": "Paste an ssh-ed25519/ssh-rsa public key. Optional."}
+_SSH_PASSWORD = {"key": "ssh_password", "label": "Login password (optional — enables password SSH)",
+                 "type": "password", "default": "",
+                 "help": "Set a password for the login user and turn ON password SSH. Leave blank for "
+                         "key-only. Stored hashed (SHA-512) in the VM's cloud-init, not in plaintext."}
+# The CLOUD RESOURCE TAG, and nothing else. Terraform puts it in
+# `tags = [var.environment, "slep"]` and `Environment = var.environment` across
+# every renderer below — it names the resources in the cloud console, and has
+# nothing to do with which Controller group an agent enrolls into.
+#
+# It used to say "(Controller group)", which is where this went wrong: an
+# operator read that, typed their Controller environment here, and the panel
+# then threw it away — the submit overwrote this key with the Controller
+# environment picker's value, or with "" when enrolment was off. Two different
+# things were sharing one key and the label pointed at the wrong one. The group
+# to enroll into is `controller_environment` now.
+_ENV = {"key": "environment", "label": "Environment tag (names the resources in your cloud)",
+        "type": "text", "default": "production",
+        "help": "Tags the created resources, e.g. dev / staging / production. "
+                "Not the Controller environment — that is chosen further down."}
+
+# Curated catalog of common cloud images (generic/-cloud qcow2 with cloud-init),
+# offered as a picker so the operator doesn't hunt for URLs. Each uses the distro's
+# stable "latest/current" path so it tracks point releases. amd64/x86_64.
+CLOUD_IMAGES = [
+    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"},
+    {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"},
+    {"label": "Debian 12 (Bookworm)", "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"},
+    {"label": "Debian 11 (Bullseye)", "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"},
+    {"label": "Rocky Linux 9", "url": "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"},
+    {"label": "Rocky Linux 8", "url": "https://download.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base.latest.x86_64.qcow2"},
+    {"label": "AlmaLinux 9", "url": "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"},
+    {"label": "AlmaLinux 8", "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"},
+    {"label": "CentOS Stream 9", "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"},
+    {"label": "Fedora 40 Cloud", "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2"},
+    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2"},
+]
+
+PROVIDERS = {
+    "aws": {
+        "label": "AWS EC2",
+        "blurb": "Elastic Compute Cloud instances. Needs AWS credentials (attach a cloud credential).",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "region", "label": "Region", "type": "select", "default": "us-east-1",
+             "choices": ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1", "eu-central-1", "ap-southeast-1", "ap-south-1"]},
+            {"key": "instance_type", "label": "Instance type", "type": "select", "default": "t3.micro",
+             "choices": ["t3.micro", "t3.small", "t3.medium", "t3.large", "t3.xlarge", "m5.large", "m5.xlarge", "c5.large"]},
+            {"key": "ami", "label": "AMI id", "type": "text", "default": "ami-0c7217cdde317cfec",
+             "help": "Default is Ubuntu 22.04 (us-east-1). Change per region."},
+            {"key": "disk_size", "label": "Root disk (GB)", "type": "number", "default": 20},
+            _SSH_USER, _SSH_KEY, _ENV,
+        ],
+    },
+    "digitalocean": {
+        "label": "DigitalOcean",
+        "blurb": "Droplets. Needs a DigitalOcean API token (attach a cloud credential: DIGITALOCEAN_TOKEN=…).",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "region", "label": "Region", "type": "select", "default": "nyc3",
+             "choices": ["nyc1", "nyc3", "sfo3", "ams3", "fra1", "lon1", "sgp1", "tor1", "blr1"]},
+            {"key": "size", "label": "Droplet size", "type": "select", "default": "s-1vcpu-1gb",
+             "choices": ["s-1vcpu-1gb", "s-1vcpu-2gb", "s-2vcpu-2gb", "s-2vcpu-4gb", "s-4vcpu-8gb"]},
+            {"key": "image", "label": "Image", "type": "select", "default": "ubuntu-22-04-x64",
+             "choices": ["ubuntu-22-04-x64", "ubuntu-24-04-x64", "debian-12-x64", "rockylinux-9-x64", "fedora-40-x64"]},
+            {"key": "ssh_user", "label": "Login user", "type": "text", "default": "root"},
+            _SSH_KEY, _ENV,
+        ],
+    },
+    "libvirt": {
+        "label": "libvirt (KVM/QEMU)",
+        "blurb": "KVM/QEMU VMs via the dmacvicar/libvirt provider, on a local or remote hypervisor. Set the connection URI, base image + pool below.",
+        "options": [
+            {"key": "uri", "label": "Hypervisor connection URI", "type": "text", "default": "qemu:///system",
+             "help": "Local host: qemu:///system. Remote KVM host over SSH: qemu+ssh://root@kvm-host/system "
+                     "(the SLEP host needs SSH access + a key to that hypervisor). Also qemu+tcp:// / qemu+tls://."},
+            _COUNT, _PREFIX,
+            {"key": "memory", "label": "Memory (MB)", "type": "select", "default": "2048",
+             "choices": ["1024", "2048", "4096", "8192", "16384"]},
+            {"key": "vcpu", "label": "vCPUs", "type": "select", "default": "2", "choices": ["1", "2", "4", "8"]},
+            {"key": "disk_size", "label": "Root disk (GB)", "type": "number", "default": 20,
+             "help": "The VM's root disk. Cloud images ship a tiny (~2GB) root, so pick enough headroom "
+                     "for packages — the copy-on-write clone is grown to this and cloud-init's growpart "
+                     "expands the filesystem to fill it on first boot."},
+            {"key": "pool", "label": "Storage pool", "type": "text", "default": "default"},
+            {"key": "base_volume", "label": "Existing pool volume (optional — skips download)", "type": "text",
+             "default": "",
+             "help": "Name of a cloud image ALREADY in the pool on the hypervisor "
+                     "(e.g. jammy.qcow2). When set, each VM's disk is a copy-on-write clone of it — "
+                     "nothing is downloaded or uploaded, and the base-image URL below is ignored."},
+            {"key": "base_image", "label": "Base image URL", "type": "text",
+             "default": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+             "help": "Used only when no existing pool volume is given: downloaded once into a shared "
+                     "base volume, cached on the hypervisor, and each VM's disk is a fast copy-on-write "
+                     "clone. A bare local path is read from the SLEP host (a container), not the "
+                     "hypervisor — to use an image on the hypervisor, name it under “Existing pool volume”."},
+            {"key": "network", "label": "Network name", "type": "text", "default": "default"},
+            _NET_MODE,
+            _HOSTNAME, _SSH_USER, _SSH_KEY, _SSH_PASSWORD, _ENV,
+        ],
+    },
+    "proxmox": {
+        "label": "Proxmox VE",
+        "blurb": "Proxmox VMs via the bpg/proxmox provider, cloned from a cloud-init template.",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "node", "label": "Proxmox node", "type": "text", "default": "pve"},
+            {"key": "template_id", "label": "Clone template VM id", "type": "number", "default": 9000,
+             "help": "The VM id of a cloud-init-ready template to clone."},
+            {"key": "cores", "label": "Cores", "type": "select", "default": "2", "choices": ["1", "2", "4", "8"]},
+            {"key": "memory", "label": "Memory (MB)", "type": "select", "default": "2048",
+             "choices": ["1024", "2048", "4096", "8192"]},
+            {"key": "disk_size", "label": "Disk (GB)", "type": "number", "default": 20},
+            {"key": "datastore", "label": "Datastore", "type": "text", "default": "local-lvm"},
+            {"key": "bridge", "label": "Network bridge", "type": "text", "default": "vmbr0"},
+            _SSH_USER, _SSH_KEY, _ENV,
+        ],
+    },
+    "gcp": {
+        "label": "Google Cloud (GCE)",
+        "blurb": "Compute Engine instances. Needs a GCP service-account key (attach a cloud credential: GOOGLE_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS) and your project id.",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "project", "label": "GCP project id", "type": "text", "default": "my-project"},
+            {"key": "region", "label": "Region", "type": "select", "default": "us-central1",
+             "choices": ["us-central1", "us-east1", "us-west1", "europe-west1", "europe-west4", "asia-east1", "asia-southeast1"]},
+            {"key": "zone", "label": "Zone", "type": "text", "default": "us-central1-a"},
+            {"key": "machine_type", "label": "Machine type", "type": "select", "default": "e2-small",
+             "choices": ["e2-micro", "e2-small", "e2-medium", "e2-standard-2", "e2-standard-4", "n2-standard-2"]},
+            {"key": "image", "label": "Image", "type": "text", "default": "ubuntu-os-cloud/ubuntu-2204-lts"},
+            {"key": "disk_size", "label": "Boot disk (GB)", "type": "number", "default": 20},
+            _SSH_USER, _SSH_KEY, _ENV,
+        ],
+    },
+    "azure": {
+        "label": "Microsoft Azure",
+        "blurb": "Linux VMs (with a resource group + network). Needs Azure credentials (attach a cloud credential: ARM_CLIENT_ID/ARM_CLIENT_SECRET/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID). SSH key must be RSA.",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "location", "label": "Region", "type": "select", "default": "eastus",
+             "choices": ["eastus", "eastus2", "westus2", "westeurope", "northeurope", "uksouth", "southeastasia", "australiaeast"]},
+            {"key": "vm_size", "label": "VM size", "type": "select", "default": "Standard_B1s",
+             "choices": ["Standard_B1s", "Standard_B2s", "Standard_D2s_v5", "Standard_D4s_v5", "Standard_F2s_v2"]},
+            {"key": "ssh_user", "label": "Admin user", "type": "text", "default": "azureuser"},
+            {"key": "ssh_public_key", "label": "Deploy SSH public key (RSA — Azure requires it)",
+             "type": "textarea", "default": "", "help": "Azure's admin_ssh_key needs an RSA key (ssh-rsa …)."},
+            _ENV,
+        ],
+    },
+}
+
+
+def provider_schema() -> dict:
+    """Menus for the console — providers with their option lists (no render fns)."""
+    return {p: {"label": v["label"], "blurb": v["blurb"], "options": v["options"]}
+            for p, v in PROVIDERS.items()}
+
+
+def _opt(spec, key, default=""):
+    return spec.get(key, default)
+
+
+def _hcl_inner(s) -> str:
+    """Escape a value for embedding inside an HCL double-quoted string (no quotes
+    added): backslash, quote, newline, and the ${ / %{ interpolation sigils — so a
+    user value can't break out of the string or be treated as an HCL interpolation.
+    Also a correctness fix: a legitimate value containing a quote no longer corrupts
+    the generated file."""
+    s = "" if s is None else str(s)
+    return (s.replace("\\", "\\\\").replace('"', '\\"')
+             .replace("\n", "\\n").replace("\r", "")
+             .replace("${", "$${").replace("%{", "%%{"))
+
+
+def _hcl(s) -> str:
+    """A safe HCL double-quoted string literal (quotes included) for a user value."""
+    return f'"{_hcl_inner(s)}"'
+
+
+def _one_line(s) -> str:
+    """First line only, trimmed — for values dropped into hand-built cloud-init YAML
+    (a username / an SSH key), so a newline can't inject a top-level cloud-init
+    directive (e.g. runcmd)."""
+    parts = str(s or "").splitlines()
+    return (parts[0].strip() if parts else "")
+
+
+def _sanitize_pubkey(s) -> str:
+    """Normalise an SSH public key to a clean `<type> <base64> [comment]`, stripping
+    quotes or junk that a corrupted store can wrap it in — e.g. a key that came back
+    as `ssh-ed25519 AAAA... slep-managed"` (a stray trailing quote from an old bug)
+    would otherwise bake straight into authorized_keys. Rebuild from the type +
+    base64 (the parts SSH actually matches on) plus a de-quoted comment, so the same
+    key with and without the junk dedupes to one clean line."""
+    k = _one_line(s).strip().strip('"').strip("'").strip()
+    parts = k.split()
+    if len(parts) < 2:
+        return k
+    comment = " ".join(parts[2:]).strip().strip('"').strip("'").strip()
+    return f"{parts[0]} {parts[1]}" + (f" {comment}" if comment else "")
+
+
+def _hash_password(password: str) -> str:
+    """SHA-512 crypt ($6$) hash of `password` — the format /etc/shadow and `chpasswd -e`
+    expect, verified by login exactly as `crypt.crypt(pw, hash) == hash`. Tries the
+    stdlib `crypt` module first, then falls back to `openssl passwd -6` (the `crypt`
+    module was REMOVED in Python 3.13, and swallowing that would silently ship a VM
+    with NO password). Returns '' only if neither is available."""
+    if not password:
+        return ""
+    try:
+        import crypt  # removed in 3.13; guarded below
+        return crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+    except Exception:  # noqa: BLE001
+        pass
+    openssl = shutil.which("openssl")
+    if openssl:
+        try:
+            # -6 = SHA-512; openssl generates its own salt. Feed the password on stdin
+            # (never argv) so it can't leak via the process list.
+            r = subprocess.run([openssl, "passwd", "-6", "-stdin"], input=password,
+                               capture_output=True, text=True, timeout=10)
+            out = (r.stdout or "").strip()
+            if r.returncode == 0 and out.startswith("$6$"):
+                return out
+        except Exception:  # noqa: BLE001
+            pass
+    return ""
+
+
+def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_password: str = "") -> str:
+    # Single-line each value so nothing can inject a top-level cloud-init directive.
+    # Also restrict the login name to a Unix-username charset: it's interpolated into a
+    # root shell script (useradd/chpasswd/sudoers) on the VM, so a stray shell
+    # metacharacter must never reach it even if an upstream validator is bypassed.
+    ssh_user = re.sub(r"[^A-Za-z0-9_.-]", "", _one_line(ssh_user)) or "user"
+    # Keep the password verbatim (first line only, no strip): a leading/trailing space
+    # is a legitimate part of a password, and stripping it would bake a hash that never
+    # matches what the operator types. Only a newline (YAML/shell-breaking) is dropped.
+    password = str(password or "").split("\n", 1)[0].replace("\r", "")
+    # Hash the optional password (SHA-512 crypt) so plaintext never lands in the
+    # cloud-init on disk; a pre-hashed one (carried through a regeneration) is used
+    # as-is.
+    hashed = _one_line(hashed_password)
+    if password and not hashed:
+        hashed = _hash_password(password)
+    clean, seen = [], set()
+    for k in keys:
+        k = _sanitize_pubkey(k) if k and k.strip() else ""
+        if k and k not in seen:
+            seen.add(k)
+            clean.append(k)
+
+    # 1) Native users: module (the cloud-init way). `- default` keeps the image's
+    #    own default account too, so you're never locked out if the named user has
+    #    trouble.
+    lines = ["#cloud-config", "users:", "  - default", f"  - name: {ssh_user}",
+             "    groups: [sudo, wheel]",
+             # Don't create a private group named after the user: if the base image
+             # already has a GROUP by that name (a stale 'admin' group with no user, a
+             # common leftover), useradd fails with "group admin exists" and the account
+             # is never created. --no-user-group sidesteps that; sudo comes from the
+             # sudo: rule below, not group membership.
+             "    no_user_group: true",
+             "    sudo: ALL=(ALL) NOPASSWD:ALL",
+             "    shell: /bin/bash",
+             f"    lock_passwd: {'false' if hashed else 'true'}"]
+    if hashed:
+        lines.append(f'    hashed_passwd: "{hashed}"')
+    lines.append("    ssh_authorized_keys:")
+    lines += [f"      - {k}" for k in clean] if clean else ["      []"]
+    # Create the sudo groups at the TOP LEVEL first, so the user's `groups:` above always
+    # references groups that EXIST. Without this, `groups: [sudo, wheel]` FAILS user
+    # creation on a distro that's missing one of them — `wheel` on Ubuntu/Debian, `sudo`
+    # on RHEL/Rocky/openSUSE — because useradd errors on an unknown group, so the login
+    # account is never created (cloud-init: "1 failure", and neither the named user nor
+    # the image default lands). cloud-init processes top-level groups BEFORE users, and
+    # creating an already-existing group is a harmless no-op.
+    lines.append("groups: [sudo, wheel]")
+    # NOTE: deliberately NOT setting `package_update: true`. It runs apt-get update at
+    # boot, which piles onto Ubuntu's own unattended-upgrades and holds the dpkg lock —
+    # so a playbook's apt task right after apply blocks ("stuck") waiting for the lock.
+    # Playbooks refresh the cache themselves (update_cache), so this only caused the race.
+    lines.append(f"ssh_pwauth: {'true' if hashed else 'false'}")
+
+    # 2) A setup script (dropped via write_files, run from runcmd) that GUARANTEES,
+    #    as root, the login user exists with these keys + passwordless sudo, and an
+    #    SSH server is installed and running — even on images that ignore the users:
+    #    module or ship sshd off. write_files uses a YAML block scalar and heredocs,
+    #    so the (hardcoded, single-lined) keys need no shell escaping. This is what
+    #    makes the VM reliably reachable regardless of the base image.
+    script = ["#!/bin/sh",
+              # --no-user-group (-N) so a pre-existing group of the same name (e.g. a
+              # stale 'admin' group in the base image) doesn't make useradd fail with
+              # "group <user> exists"; fall back to a plain useradd if -N isn't supported.
+              f"id -u {ssh_user} >/dev/null 2>&1 || useradd -m -s /bin/bash -N {ssh_user} 2>/dev/null "
+              f"|| useradd -m -s /bin/bash {ssh_user} 2>/dev/null || true",
+              f"getent group sudo  >/dev/null 2>&1 && usermod -aG sudo  {ssh_user} 2>/dev/null || true",
+              f"getent group wheel >/dev/null 2>&1 && usermod -aG wheel {ssh_user} 2>/dev/null || true",
+              f"install -d -m 700 /home/{ssh_user}/.ssh"]
+    if clean:
+        script.append(f"cat >> /home/{ssh_user}/.ssh/authorized_keys <<'SLEP_EOF'")
+        script += clean
+        script.append("SLEP_EOF")
+        script.append(f"sort -u -o /home/{ssh_user}/.ssh/authorized_keys /home/{ssh_user}/.ssh/authorized_keys 2>/dev/null || true")
+    script += [
+        f"touch /home/{ssh_user}/.ssh/authorized_keys",
+        f"chown -R {ssh_user}:{ssh_user} /home/{ssh_user}/.ssh 2>/dev/null || true",
+        f"chmod 700 /home/{ssh_user}/.ssh; chmod 600 /home/{ssh_user}/.ssh/authorized_keys",
+        f"printf '%s\\n' '{ssh_user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-slep-{ssh_user}",
+        f"chmod 440 /etc/sudoers.d/90-slep-{ssh_user}",
+        # install + start an SSH server (apt → dnf → yum), cross-distro, best-effort
+        "command -v sshd >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || { command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || { command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true",
+        "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true",
+        # Install qemu-guest-agent too (best-effort, cross-distro) — it's useful for
+        # host<->guest integration and lets `virsh domifaddr --source agent` report the
+        # IP. NOTE: we deliberately do NOT set qemu_agent=true on the domain: with that
+        # flag the libvirt provider reads the address ONLY from the agent (not the DHCP
+        # lease), which fails at first boot before the agent is up. The agent is a
+        # convenience here, not the address source.
+        "command -v qemu-ga >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent; } || { command -v dnf >/dev/null 2>&1 && dnf install -y qemu-guest-agent; } || { command -v yum >/dev/null 2>&1 && yum install -y qemu-guest-agent; } || true",
+        "systemctl enable --now qemu-guest-agent 2>/dev/null || systemctl enable --now qemu-ga 2>/dev/null || true",
+        # Map 127.0.1.1 to whatever hostname the VM actually booted with (set per-VM
+        # via the cloud-init meta-data local-hostname, e.g. 'sysible') so sudo and
+        # name resolution don't warn about an unresolvable host. Uses the runtime
+        # hostname, so it's correct for every VM without baking a name into the
+        # shared cloud-init.
+        "_hn=\"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null)\"",
+        "if [ -n \"$_hn\" ] && ! grep -qE \"^127\\.0\\.1\\.1[[:space:]]+$_hn( |\\$)\" /etc/hosts 2>/dev/null; then echo \"127.0.1.1 $_hn\" >> /etc/hosts; fi",
+    ]
+    if hashed:
+        # Set the password and turn password auth ON in sshd (cloud images usually
+        # disable it in a drop-in), then reload.
+        script += [
+            f"echo '{ssh_user}:{hashed}' | chpasswd -e 2>/dev/null || true",
+            "sed -ri 's/^#?\\s*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true",
+            "for f in /etc/ssh/sshd_config.d/*.conf; do [ -e \"$f\" ] && sed -ri 's/^#?\\s*PasswordAuthentication.*/PasswordAuthentication yes/' \"$f\"; done 2>/dev/null || true",
+            "systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true",
+        ]
+    lines.append("write_files:")
+    lines.append("  - path: /run/slep-setup.sh")
+    lines.append("    permissions: '0755'")
+    lines.append("    content: |")
+    lines += [f"      {ln}" for ln in script]
+    lines += ["runcmd:", "  - [ sh, /run/slep-setup.sh ]"]
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------- renderers
+def _render_aws(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    main = f'''terraform {{
+  required_providers {{
+    aws = {{ source = "hashicorp/aws", version = "~> 5.0" }}
+  }}
+}}
+
+provider "aws" {{
+  region = var.region
+}}
+
+resource "aws_instance" "vm" {{
+  count         = var.vm_count
+  ami           = var.ami
+  instance_type = var.instance_type
+  user_data     = file("${{path.module}}/cloudinit.cfg")
+  # cloud-init (user_data) only runs on an instance's FIRST boot, and AWS keeps a
+  # stable per-instance id — so editing the account/password and re-applying would
+  # otherwise update the attribute but never re-run it on the running box (the same
+  # trap the libvirt instance-id hash avoids). Replace the instance when the
+  # cloud-init changes so the new account is actually applied.
+  user_data_replace_on_change = true
+
+  root_block_device {{
+    volume_size = var.disk_size
+  }}
+  tags = {{
+    Name        = "${{var.name_prefix}}-${{count.index + 1}}"
+    Environment = var.environment
+    ManagedBy   = "SLEP"
+  }}
+}}
+'''
+    variables = _vars({
+        "region": ("string", spec.get("region", "us-east-1")),
+        "instance_type": ("string", spec.get("instance_type", "t3.micro")),
+        "ami": ("string", spec.get("ami", "")),
+        "disk_size": ("number", spec.get("disk_size", 20)),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = _outputs("aws_instance.vm", "public_ip", ssh_user)
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def _render_digitalocean(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "root")
+    main = f'''terraform {{
+  required_providers {{
+    digitalocean = {{ source = "digitalocean/digitalocean", version = "~> 2.0" }}
+  }}
+}}
+
+provider "digitalocean" {{}}  # token via DIGITALOCEAN_TOKEN (attach a cloud credential)
+
+resource "digitalocean_droplet" "vm" {{
+  count     = var.vm_count
+  name      = "${{var.name_prefix}}-${{count.index + 1}}"
+  region    = var.region
+  size      = var.size
+  image     = var.image
+  # user_data is force-new on digitalocean_droplet, so editing the account/password
+  # and re-applying recreates the droplet — cloud-init runs fresh and applies it.
+  user_data = file("${{path.module}}/cloudinit.cfg")
+  tags      = [var.environment, "slep"]
+}}
+'''
+    variables = _vars({
+        "region": ("string", spec.get("region", "nyc3")),
+        "size": ("string", spec.get("size", "s-1vcpu-1gb")),
+        "image": ("string", spec.get("image", "ubuntu-22-04-x64")),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = _outputs("digitalocean_droplet.vm", "ipv4_address", ssh_user)
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def _slug(name: str, fallback: str = "g") -> str:
+    """A libvirt/Terraform-safe resource-name suffix from a group name: lowercase, only
+    [a-z0-9_], never empty. Used to name each VM group's resources uniquely."""
+    s = re.sub(r"[^a-z0-9_]", "_", _one_line(str(name or "")).strip().lower()).strip("_")
+    s = re.sub(r"_+", "_", s)
+    return s or fallback
+
+
+def _hostslug(name: str, fallback: str = "vm") -> str:
+    """A DNS/hostname-safe label from a group name: lowercase, only [a-z0-9-], no
+    leading/trailing/duplicate hyphens, never empty. Used for the VM's libvirt DOMAIN
+    name and OS hostname — the user-visible name — unlike _slug (underscores, for HCL
+    resource identifiers). Hostnames may not contain underscores, so keep these hyphenated."""
+    s = re.sub(r"[^a-z0-9-]", "-", _one_line(str(name or "")).strip().lower()).strip("-")
+    s = re.sub(r"-+", "-", s)
+    return s or fallback
+
+
+# NoCloud network-config: force DHCP on the VM's primary NIC for EVERY image. Debian/
+# Ubuntu cloud images bring the NIC up via cloud-init's IMPLICIT fallback, but RHEL-
+# family images (Rocky / Alma / CentOS Stream GenericCloud) often DON'T — so their NIC
+# stays down, no DHCP request goes out, the provider never sees a lease, and the apply
+# fails with "couldn't retrieve IP address of domain" while Ubuntu/Debian on the SAME
+# network + cloud-init succeed. Supplying an explicit network-config removes the
+# guesswork. Version-2 with a glob match covers any ethernet name (eth0 / ens3 /
+# enp1s0 …), so it's image- and naming-independent; modern cloud-init (Rocky/Alma 9,
+# Debian 12, Ubuntu 22.04+) renders it to the distro's own network stack.
+_NETWORK_CONFIG = (
+    "version: 2\n"
+    "ethernets:\n"
+    "  sysible0:\n"
+    "    match:\n"
+    '      name: "e*"\n'
+    "    dhcp4: true\n"
+)
+
+
+def _libvirt_agent_block(spec) -> str:
+    """The domain's qemu_agent line — ONLY when the operator chose a bridged network.
+
+    On a libvirt NAT network the provider reads each VM's IP from libvirt's DHCP lease
+    (wait_for_lease); it must NOT set qemu_agent there, because with that flag the
+    provider reads the address from the guest agent ALONE and times out at first boot
+    before the agent is up (that's the regression that broke the lease path). On a
+    BRIDGED network libvirt has no lease to read, so the guest agent (installed by
+    cloud-init) is the only way to learn the IP — there we set qemu_agent = true. The
+    trailing marker lets migrate_libvirt_main_tf tell an intentional bridge agent line
+    from the accidental one an earlier release baked in on every network."""
+    if _opt(spec, "net_mode", "nat") == "bridge":
+        return ("  qemu_agent = true  # sysible:net_mode=bridge — read the VM IP from the "
+                "QEMU guest agent (a bridged network has no libvirt DHCP lease)\n")
+    return ""
+
+
+def _render_libvirt(spec, keys):
+    # Heterogeneous VM groups (e.g. Ubuntu + Arch in one apply): when `groups` is given,
+    # generate a resource set per group. Opt-in — the single-image path below is untouched.
+    groups = spec.get("groups")
+    if isinstance(groups, list) and groups:
+        return _render_libvirt_groups(spec, keys, groups)
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    agent_block = _libvirt_agent_block(spec)
+    base_volume = _one_line(_opt(spec, "base_volume", "")).strip()
+    # Storage: either clone each VM disk from an image ALREADY in the pool (no
+    # download/upload — the fast path when the image is on the hypervisor), or pull
+    # a base image into a shared volume once and CoW-clone from that.
+    if base_volume:
+        storage = ('# Clone each VM disk from an image already in the pool — nothing is downloaded\n'
+                   '# or uploaded; the base image lives on the hypervisor.\n'
+                   'resource "libvirt_volume" "disk" {\n'
+                   '  count            = var.vm_count\n'
+                   '  name             = "${var.name_prefix}-${count.index + 1}.qcow2"\n'
+                   '  pool             = var.pool\n'
+                   '  base_volume_name = var.base_volume\n'
+                   '  base_volume_pool = var.pool\n'
+                   '  format           = "qcow2"\n'
+                   '  # Grow the copy-on-write clone to the requested size. Cloud images ship a\n'
+                   '  # tiny (~2GB) root, so without this a VM fills up on the first apt update\n'
+                   '  # ("No space left on device"); cloud-init growpart expands the filesystem\n'
+                   '  # to fill this on first boot.\n'
+                   '  size             = var.disk_size * 1073741824\n'
+                   '}')
+    else:
+        storage = ('# Base image pulled into the pool ONCE and shared; per-VM disks are fast\n'
+                   '# copy-on-write clones (base_volume_id) — only the first apply downloads it.\n'
+                   'resource "libvirt_volume" "base" {\n'
+                   '  name   = "${var.name_prefix}-base.qcow2"\n'
+                   '  pool   = var.pool\n'
+                   '  source = var.base_image\n'
+                   '  format = "qcow2"\n'
+                   '}\n\n'
+                   'resource "libvirt_volume" "disk" {\n'
+                   '  count          = var.vm_count\n'
+                   '  name           = "${var.name_prefix}-${count.index + 1}.qcow2"\n'
+                   '  pool           = var.pool\n'
+                   '  base_volume_id = libvirt_volume.base.id\n'
+                   '  format         = "qcow2"\n'
+                   '  # Grow the CoW clone past the cloud image\'s tiny root (see above).\n'
+                   '  size           = var.disk_size * 1073741824\n'
+                   '}')
+    # Pin to the 0.7.x line. dmacvicar/libvirt 0.9.x is a terraform-plugin-framework
+    # rewrite that changed the HCL surface (nested blocks like disk/network_interface/
+    # console became nested *attributes*, `cloudinit` moved, `type`/`meta_data` became
+    # required) — so the block syntax this file emits is rejected by 0.9.x. A bare
+    # "~> 0.7" allows any 0.x < 1.0 (it would resolve to 0.9.x); "~> 0.7.0" locks to
+    # 0.7.z, which matches the resource model generated below.
+    main = f'''terraform {{
+  required_providers {{
+    libvirt = {{ source = "dmacvicar/libvirt", version = "~> 0.7.0" }}
+  }}
+}}
+
+provider "libvirt" {{
+  uri = var.uri
+}}
+
+resource "libvirt_cloudinit_disk" "ci" {{
+  count     = var.vm_count
+  name      = "${{var.name_prefix}}-${{count.index + 1}}-ci.iso"
+  pool      = var.pool
+  user_data = file("${{path.module}}/cloudinit.cfg")
+  # Explicit DHCP network-config so RHEL-family images (Rocky/Alma) bring the NIC
+  # up — Debian/Ubuntu do it implicitly, RHEL-family often don't (no lease -> apply
+  # fails with "couldn't retrieve IP address of domain").
+  network_config = file("${{path.module}}/network-config.cfg")
+  # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
+  # VM). One VM gets the bare base name; several get it suffixed so they stay
+  # unique. The instance-id is per-VM AND carries a hash of the cloud-init: cloud-init
+  # only re-runs the per-boot user/password/key setup when the instance-id changes, so
+  # tying it to filemd5(cloudinit.cfg) means editing the account (e.g. a new password)
+  # and re-applying forces cloud-init to apply it — a fixed instance-id would make
+  # cloud-init treat the machine as "already configured" and silently skip the change.
+  meta_data = "instance-id: ${{var.name_prefix}}-${{count.index + 1}}-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\nlocal-hostname: ${{var.vm_count > 1 ? "${{var.hostname}}-${{count.index + 1}}" : var.hostname}}\\n"
+}}
+
+{storage}
+
+resource "libvirt_domain" "vm" {{
+  count     = var.vm_count
+  name      = "${{var.name_prefix}}-${{count.index + 1}}"
+  memory    = var.memory
+  vcpu      = var.vcpu
+  # Pass the host CPU through. RHEL-family guests (Rocky/Alma 9+) REQUIRE an
+  # x86-64-v2 CPU — on the default emulated QEMU CPU (x86-64-v1) their glibc aborts
+  # ("Fatal glibc error: CPU does not support x86-64-v2") and init panics instantly,
+  # while Debian/Ubuntu still run on v1. host-passthrough exposes the host's real
+  # CPU (v2+), so every distro boots; it also gives near-native performance.
+  cpu {{
+    mode = "host-passthrough"
+  }}
+  cloudinit = libvirt_cloudinit_disk.ci[count.index].id
+{agent_block}  disk {{ volume_id = libvirt_volume.disk[count.index].id }}
+  network_interface {{
+    network_name   = var.network
+    wait_for_lease = true
+  }}
+  console {{
+    type        = "pty"
+    target_type = "serial"
+    target_port = "0"
+  }}
+
+  # cloud-init only re-reads the account/password/keys at BOOT. Updating the domain to
+  # point at a rebuilt cloud-init ISO does not power-cycle it, so without this the new
+  # config would sit unused until a manual reboot. replace_triggered_by rebuilds the
+  # domain (a fresh boot) whenever the cloud-init ISO changes — i.e. whenever you edit
+  # the account and re-apply — so the change actually lands. The disk is a separate
+  # resource and is NOT replaced, so the machine's data survives; only the per-instance
+  # cloud-init re-runs (new instance-id). This mirrors AWS user_data_replace_on_change.
+  lifecycle {{
+    replace_triggered_by = [libvirt_cloudinit_disk.ci[count.index].id]
+  }}
+}}
+'''
+    variables = _vars({
+        "uri": ("string", spec.get("uri", "qemu:///system")),
+        "memory": ("number", int(spec.get("memory", 2048))),
+        "vcpu": ("number", int(spec.get("vcpu", 2))),
+        "pool": ("string", spec.get("pool", "default")),
+        "base_image": ("string", spec.get("base_image", "")),
+        "base_volume": ("string", base_volume),
+        "disk_size": ("number", int(spec.get("disk_size", 20))),   # GB; grows the CoW clone
+        "network": ("string", spec.get("network", "default")),
+        "hostname": ("string", spec.get("hostname", "sysible")),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    # libvirt exposes the DHCP address at network_interface.0.addresses.0
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, d in libvirt_domain.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(d.network_interface[0].addresses[0], "")
+    user = {_hcl(ssh_user)}
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "network-config.cfg": _NETWORK_CONFIG,
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def _render_libvirt_groups(spec, keys, groups):
+    """Generate libvirt HCL for MULTIPLE VM groups in one project (e.g. an Ubuntu group
+    and an Arch group), so a single apply builds heterogeneous machines. Each group has
+    its own image, count, memory, vCPUs and disk size; per-group values are emitted as
+    HCL literals (the shared uri/pool/network stay variables). The group name is the VM's
+    hostname — there is no separate name-prefix/hostname in groups mode. All
+    groups share ONE cloud-init (same login account/keys). `sysible_hosts` concatenates
+    every group so enrollment/inventory see all VMs. Resource names are suffixed by a
+    slug of the group name so they never collide."""
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    agent_block = _libvirt_agent_block(spec)
+    blocks, host_lists, seen = [], [], set()
+    for i, g in enumerate(groups):
+        slug = _slug(g.get("name"), f"g{i + 1}")
+        while slug in seen:                        # keep slugs unique even if names clash
+            slug += f"_{i + 1}"
+        seen.add(slug)
+        # The VM name, hostname, disk and ISO files are ALL derived from the GROUP NAME
+        # (hostname-safe slug), so the group name IS the hostname — there is no separate
+        # global "name prefix" / "hostname" in groups mode.
+        hostslug = _hostslug(g.get("name"), f"vm{i + 1}")
+        n = max(1, int(g.get("count", 1) or 1))
+        mem = int(g.get("memory", 2048) or 2048)
+        vcpu = int(g.get("vcpu", 2) or 2)
+        disk_gb = int(g.get("disk_size", 20) or 20)
+        base_volume = _one_line(g.get("base_volume", "")).strip()
+        base_image = _one_line(g.get("base_image", "")).strip()
+        # Per-VM disk: clone an existing pool volume, or a base volume pulled from a URL.
+        if base_volume:
+            disk_res = (f'resource "libvirt_volume" "disk_{slug}" {{\n'
+                        f'  count            = {n}\n'
+                        f'  name             = "{hostslug}-${{count.index + 1}}.qcow2"\n'
+                        f'  pool             = var.pool\n'
+                        f'  base_volume_name = {_hcl(base_volume)}\n'
+                        f'  base_volume_pool = var.pool\n'
+                        f'  format           = "qcow2"\n'
+                        f'  size             = {disk_gb} * 1073741824\n}}')
+        else:
+            disk_res = (f'resource "libvirt_volume" "base_{slug}" {{\n'
+                        f'  name   = "{hostslug}-base.qcow2"\n'
+                        f'  pool   = var.pool\n'
+                        f'  source = {_hcl(base_image)}\n'
+                        f'  format = "qcow2"\n}}\n\n'
+                        f'resource "libvirt_volume" "disk_{slug}" {{\n'
+                        f'  count          = {n}\n'
+                        f'  name           = "{hostslug}-${{count.index + 1}}.qcow2"\n'
+                        f'  pool           = var.pool\n'
+                        f'  base_volume_id = libvirt_volume.base_{slug}.id\n'
+                        f'  format         = "qcow2"\n'
+                        f'  size           = {disk_gb} * 1073741824\n}}')
+        blocks.append(
+            f'# ---- group: {slug} ({n} VM(s), {mem}MB, {vcpu} vCPU, {disk_gb}GB) ----\n'
+            f'{disk_res}\n\n'
+            f'resource "libvirt_cloudinit_disk" "ci_{slug}" {{\n'
+            f'  count     = {n}\n'
+            f'  name      = "{hostslug}-${{count.index + 1}}-ci.iso"\n'
+            f'  pool      = var.pool\n'
+            f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
+            f'  network_config = file("${{path.module}}/network-config.cfg")\n'
+            f'  meta_data = "instance-id: {hostslug}-${{count.index + 1}}'
+            f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
+            f'local-hostname: {hostslug}-${{count.index + 1}}\\n"\n}}\n\n'
+            f'resource "libvirt_domain" "vm_{slug}" {{\n'
+            f'  count     = {n}\n'
+            f'  name      = "{hostslug}-${{count.index + 1}}"\n'
+            f'  memory    = {mem}\n'
+            f'  vcpu      = {vcpu}\n'
+            f'  cpu {{ mode = "host-passthrough" }}  # RHEL-family (Rocky/Alma 9+) need x86-64-v2; the default emulated CPU is v1 and panics their glibc\n'
+            f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
+            f'{agent_block}'
+            f'  disk {{ volume_id = libvirt_volume.disk_{slug}[count.index].id }}\n'
+            f'  network_interface {{\n    network_name   = var.network\n    wait_for_lease = true\n  }}\n'
+            f'  console {{\n    type        = "pty"\n    target_type = "serial"\n    target_port = "0"\n  }}\n'
+            f'  lifecycle {{\n    replace_triggered_by = [libvirt_cloudinit_disk.ci_{slug}[count.index].id]\n  }}\n}}')
+        host_lists.append(
+            f'[ for i, d in libvirt_domain.vm_{slug} : {{\n'
+            f'    name = "{hostslug}-${{i + 1}}"\n'
+            f'    ip   = try(d.network_interface[0].addresses[0], "")\n'
+            f'    user = {_hcl(ssh_user)}\n  }} ]')
+
+    main = ('terraform {\n  required_providers {\n'
+            '    libvirt = { source = "dmacvicar/libvirt", version = "~> 0.7.0" }\n  }\n}\n\n'
+            'provider "libvirt" {\n  uri = var.uri\n}\n\n'
+            + "\n\n".join(blocks) + "\n")
+    variables = _vars({
+        "uri": ("string", spec.get("uri", "qemu:///system")),
+        "pool": ("string", spec.get("pool", "default")),
+        "network": ("string", spec.get("network", "default")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = ('output "sysible_hosts" {\n  value = concat(\n    '
+               + ",\n    ".join(host_lists) + "\n  )\n}\n")
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "network-config.cfg": _NETWORK_CONFIG,
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
+    """Bring an EXISTING libvirt project's main.tf up to the current cloud-init re-run
+    behaviour, in place (the infra row doesn't store the full spec, so we patch rather
+    than re-render — which also preserves any hand-edits). Two idempotent patches:
+
+      1. Fold a hash of the cloud-init into the NoCloud instance-id, so editing the
+         account/password and re-applying changes the ISO → cloud-init re-runs.
+      2. Add `lifecycle { replace_triggered_by = [the ci ISO] }` to the domain, so that
+         changed ISO actually rebuilds the VM (a fresh boot) instead of updating the
+         domain in place (which never re-runs cloud-init).
+
+    Returns (new_text, notes). notes is empty when nothing changed (already current, or
+    not a libvirt project). Only touches libvirt projects."""
+    import re
+    if 'libvirt_cloudinit_disk' not in text:
+        return text, []
+    notes = []
+    # 1) instance-id hash — only if not already folded in.
+    if 'filemd5(' not in text:
+        new = re.sub(
+            r'(instance-id: \$\{var\.name_prefix\}-\$\{count\.index \+ 1\})(\\n|")',
+            r'\1-${substr(filemd5("${path.module}/cloudinit.cfg"), 0, 10)}\2',
+            text, count=1)
+        if new != text:
+            text = new
+            notes.append("instance-id now tracks the cloud-init (re-apply re-runs it)")
+    # 2) domain replace_triggered_by — anchor on the unique cloudinit assignment so the
+    #    lifecycle block lands INSIDE the libvirt_domain resource.
+    if 'replace_triggered_by' not in text:
+        anchor = 'cloudinit = libvirt_cloudinit_disk.ci[count.index].id'
+        if anchor in text:
+            text = text.replace(
+                anchor,
+                anchor + '\n\n  lifecycle {\n    replace_triggered_by = [libvirt_cloudinit_disk.ci[count.index].id]\n  }',
+                1)
+            notes.append("domain rebuilds on a cloud-init change (forces the reboot that applies it)")
+    # 3) Size the VM disk. Older projects cloned the base image's tiny (~2GB) root with no
+    #    size, so a VM fills up on the first apt update. Size the disk from var.disk_size
+    #    (GB) so it's editable — the companion variables.tf gets the variable (default 20)
+    #    via ensure_disk_size_var(). cloud-init growpart then expands the filesystem.
+    if 'size' not in text and 'disk_size' not in text:   # no volume size set yet
+        for anchor in ('base_volume_pool = var.pool', 'base_volume_id = libvirt_volume.base.id'):
+            if anchor in text:
+                text = text.replace(anchor, anchor + '\n  size             = var.disk_size * 1073741824', 1)
+                notes.append("VM disk sized from var.disk_size (default 20GB — edit variables.tf to change)")
+                break
+    # 4) REMOVE an ACCIDENTAL `qemu_agent = true` an earlier SLEP release baked into
+    #    every domain. With that flag the dmacvicar provider reads the VM address ONLY
+    #    from the QEMU guest agent, not the DHCP lease — so at first boot, before the
+    #    agent is up, every VM times out with "couldn't retrieve IP address of domain",
+    #    regressing VMs that resolved fine via the lease. Strip only the BARE line
+    #    (nothing after `true`); an INTENTIONAL bridge-network agent line carries a
+    #    trailing `# sysible:net_mode=bridge` marker and is left alone, so a project the
+    #    operator set to bridge mode keeps its agent. Idempotent (no-op when absent).
+    if 'qemu_agent' in text:
+        new = re.sub(r'\n[ \t]*qemu_agent[ \t]*=[ \t]*true[ \t]*(?=\n)', '', text)
+        if new != text:
+            text = new
+            notes.append('removed a leftover qemu_agent from the VM(s) — it forced address '
+                         'detection through the guest agent and timed out at first boot; back to '
+                         'the DHCP lease (bridge-mode projects keep their agent)')
+    # 5) Add an explicit DHCP network-config to the cloud-init ISO(s). RHEL-family
+    #    images (Rocky/Alma/CentOS GenericCloud) don't bring the NIC up from cloud-
+    #    init's IMPLICIT fallback the way Debian/Ubuntu do, so they never DHCP and the
+    #    apply fails with "couldn't retrieve IP address of domain" while the Debian-
+    #    family VMs on the same network succeed. Point every libvirt_cloudinit_disk at
+    #    a network-config.cfg (the runner writes the file alongside main.tf). Anchor on
+    #    each `user_data = file(.../cloudinit.cfg)` line; idempotent.
+    if 'network_config' not in text and 'cloudinit.cfg")' in text:
+        new = re.sub(
+            r'(user_data = file\("\$\{path\.module\}/cloudinit\.cfg"\))',
+            r'\1\n  network_config = file("${path.module}/network-config.cfg")',
+            text)
+        if new != text:
+            text = new
+            notes.append('added an explicit DHCP network-config so RHEL-family VMs '
+                         '(Rocky/Alma) bring their NIC up and get a lease')
+    # 6) Pass the host CPU through to the domain. RHEL-family guests (Rocky/Alma 9+)
+    #    REQUIRE an x86-64-v2 CPU; on the default emulated QEMU CPU (v1) their glibc
+    #    aborts ("CPU does not support x86-64-v2") and init panics at boot — the exact
+    #    "stuck, no lease, no console" symptom — while Debian/Ubuntu still boot on v1.
+    #    Add `cpu { mode = "host-passthrough" }` to every libvirt_domain that lacks a
+    #    cpu mode. Anchor on each domain's cloudinit line; idempotent.
+    if 'host-passthrough' not in text and 'cloudinit = libvirt_cloudinit_disk.' in text:
+        new = re.sub(
+            r'(cloudinit = libvirt_cloudinit_disk\.\w+\[count\.index\]\.id)',
+            r'cpu { mode = "host-passthrough" }\n  \1',
+            text)
+        if new != text:
+            text = new
+            notes.append('set the VM CPU to host-passthrough so RHEL-family guests '
+                         '(Rocky/Alma 9+) get the x86-64-v2 CPU they require and stop '
+                         'panicking at boot')
+    return text, notes
+
+
+def ensure_disk_size_var(variables_text: str) -> tuple[str, bool]:
+    """Ensure a libvirt project's variables.tf defines `disk_size` (GB), so the size
+    added to main.tf by migrate_libvirt_main_tf resolves. Appends the variable with a
+    20GB default if absent — the operator edits that default (or terraform.tfvars) to
+    pick any size. Returns (text, changed)."""
+    if 'disk_size' in variables_text:
+        return variables_text, False
+    block = ('\nvariable "disk_size" {\n  type    = number\n  default = 20   '
+             '# VM root disk in GB — set to whatever you need (e.g. 100)\n}\n')
+    sep = '' if variables_text.endswith('\n') else '\n'
+    return variables_text + sep + block, True
+
+
+def _render_proxmox(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    key_hcl = ", ".join(_hcl(k.strip()) for k in keys if k and k.strip()) or ""
+    main = f'''terraform {{
+  required_providers {{
+    proxmox = {{ source = "bpg/proxmox", version = "~> 0.60" }}
+  }}
+}}
+
+provider "proxmox" {{}}  # endpoint/token via PROXMOX_VE_* env (attach a cloud credential)
+
+resource "proxmox_virtual_environment_vm" "vm" {{
+  count     = var.vm_count
+  name      = "${{var.name_prefix}}-${{count.index + 1}}"
+  node_name = var.node
+
+  clone {{
+    vm_id     = var.template_id
+    node_name = var.node
+  }}
+  cpu {{
+    cores = var.cores
+  }}
+  memory {{
+    dedicated = var.memory
+  }}
+  disk {{
+    datastore_id = var.datastore
+    interface    = "scsi0"
+    size         = var.disk_size
+  }}
+  network_device {{
+    bridge = var.bridge
+  }}
+  initialization {{
+    ip_config {{
+      ipv4 {{
+        address = "dhcp"
+      }}
+    }}
+    user_account {{
+      username = {_hcl(ssh_user)}
+      keys     = [{key_hcl}]
+    }}
+  }}
+}}
+'''
+    variables = _vars({
+        "node": ("string", spec.get("node", "pve")),
+        "template_id": ("number", int(spec.get("template_id", 9000))),
+        "cores": ("number", int(spec.get("cores", 2))),
+        "memory": ("number", int(spec.get("memory", 2048))),
+        "disk_size": ("number", spec.get("disk_size", 20)),
+        "datastore": ("string", spec.get("datastore", "local-lvm")),
+        "bridge": ("string", spec.get("bridge", "vmbr0")),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, v in proxmox_virtual_environment_vm.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(v.ipv4_addresses[1][0], "")
+    user = {_hcl(ssh_user)}
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs}
+
+
+def _render_gcp(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    # GCE injects SSH keys via instance metadata `ssh-keys` (newline-separated
+    # "user:key" lines) — no cloud-init file needed.
+    ssh_keys = "\\n".join(f"{_hcl_inner(ssh_user)}:{_hcl_inner(k.strip())}" for k in keys if k and k.strip())
+    main = f'''terraform {{
+  required_providers {{
+    google = {{ source = "hashicorp/google", version = "~> 5.0" }}
+  }}
+}}
+
+provider "google" {{
+  project = var.project
+  region  = var.region
+}}
+
+resource "google_compute_instance" "vm" {{
+  count        = var.vm_count
+  name         = "${{var.name_prefix}}-${{count.index + 1}}"
+  machine_type = var.machine_type
+  zone         = var.zone
+
+  boot_disk {{
+    initialize_params {{
+      image = var.image
+      size  = var.disk_size
+    }}
+  }}
+  network_interface {{
+    network = "default"
+    access_config {{}}   # ephemeral public IP
+  }}
+  metadata = {{
+    ssh-keys = "{ssh_keys}"
+  }}
+  labels = {{
+    environment = var.environment
+    managed_by  = "slep"
+  }}
+}}
+'''
+    variables = _vars({
+        "project": ("string", spec.get("project", "my-project")),
+        "region": ("string", spec.get("region", "us-central1")),
+        "zone": ("string", spec.get("zone", "us-central1-a")),
+        "machine_type": ("string", spec.get("machine_type", "e2-small")),
+        "image": ("string", spec.get("image", "ubuntu-os-cloud/ubuntu-2204-lts")),
+        "disk_size": ("number", spec.get("disk_size", 20)),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, v in google_compute_instance.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(v.network_interface[0].access_config[0].nat_ip, "")
+    user = {_hcl(ssh_user)}
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs}
+
+
+def _render_azure(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "azureuser")
+    # admin_ssh_key takes the deploy key; the Controller key (if any) goes in via
+    # cloud-init custom_data so it also lands in authorized_keys.
+    ctrl_keys = [k for k in keys[1:] if k and k.strip()]
+    main = f'''terraform {{
+  required_providers {{
+    azurerm = {{ source = "hashicorp/azurerm", version = "~> 3.0" }}
+  }}
+}}
+
+provider "azurerm" {{
+  features {{}}
+}}
+
+resource "azurerm_resource_group" "rg" {{
+  name     = "${{var.name_prefix}}-rg"
+  location = var.location
+}}
+
+resource "azurerm_virtual_network" "vnet" {{
+  name                = "${{var.name_prefix}}-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}}
+
+resource "azurerm_subnet" "subnet" {{
+  name                 = "${{var.name_prefix}}-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+}}
+
+resource "azurerm_public_ip" "pip" {{
+  count               = var.vm_count
+  name                = "${{var.name_prefix}}-${{count.index + 1}}-pip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+}}
+
+resource "azurerm_network_interface" "nic" {{
+  count               = var.vm_count
+  name                = "${{var.name_prefix}}-${{count.index + 1}}-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  ip_configuration {{
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.pip[count.index].id
+  }}
+}}
+
+resource "azurerm_linux_virtual_machine" "vm" {{
+  count                 = var.vm_count
+  name                  = "${{var.name_prefix}}-${{count.index + 1}}"
+  resource_group_name   = azurerm_resource_group.rg.name
+  location              = azurerm_resource_group.rg.location
+  size                  = var.vm_size
+  admin_username        = var.admin_user
+  network_interface_ids = [azurerm_network_interface.nic[count.index].id]
+  # custom_data is force-new on azurerm_linux_virtual_machine, so editing the
+  # account/password and re-applying recreates the VM — cloud-init runs fresh.
+  custom_data           = base64encode(file("${{path.module}}/cloudinit.cfg"))
+
+  admin_ssh_key {{
+    username   = var.admin_user
+    public_key = var.ssh_public_key
+  }}
+  os_disk {{
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }}
+  source_image_reference {{
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts"
+    version   = "latest"
+  }}
+}}
+'''
+    variables = _vars({
+        "location": ("string", spec.get("location", "eastus")),
+        "vm_size": ("string", spec.get("vm_size", "Standard_B1s")),
+        "admin_user": ("string", ssh_user),
+        "ssh_public_key": ("string", spec.get("ssh_public_key", "")),
+        "vm_count": ("number", spec.get("count", 1)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, v in azurerm_linux_virtual_machine.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(v.public_ip_address, azurerm_public_ip.pip[i].ip_address, "")
+    user = {_hcl(ssh_user)}
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "cloudinit.cfg": _cloudinit(ssh_user, ctrl_keys, _opt(spec, "ssh_password", ""))}
+
+
+_RENDERERS = {"aws": _render_aws, "digitalocean": _render_digitalocean,
+              "libvirt": _render_libvirt, "proxmox": _render_proxmox,
+              "gcp": _render_gcp, "azure": _render_azure}
+
+
+def _vars(defs: dict) -> str:
+    out = []
+    for name, (typ, default) in defs.items():
+        if typ == "string":
+            dv = _hcl(default)          # escaped — user values can't break out of the literal
+        else:
+            dv = str(default)
+        out.append(f'variable "{name}" {{\n  type    = {typ}\n  default = {dv}\n}}\n')
+    return "\n".join(out)
+
+
+def _outputs(resource: str, ip_attr: str, ssh_user: str) -> str:
+    return (f'output "sysible_hosts" {{\n'
+            f'  value = [ for i, r in {resource} : {{\n'
+            f'    name = "${{var.name_prefix}}-${{i + 1}}"\n'
+            f'    ip   = r.{ip_attr}\n'
+            f'    user = {_hcl(ssh_user)}\n'
+            f'  }} ]\n}}\n')
+
+
+def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: str = "",
+             managed_key: str = "") -> dict:
+    """Return {filename: content} for the chosen provider + options. Keys baked into
+    cloud-init (so the machine is reachable after boot), each a separate
+    authorized_keys entry:
+      * `managed_key` — SLEP's OWN managed public key, so its default "SLEP managed
+        key" credential can always log in to a VM it built (no manual key
+        distribution needed);
+      * `deploy_key` — the public half of a chosen SLEP SSH credential (when the
+        operator picks one for the cadence's Ansible steps);
+      * `controller_key` — so a connected Controller can reach it;
+      * the operator's typed `ssh_public_key`.
+    Blank/duplicate keys are dropped by the cloud-init renderer."""
+    if provider not in _RENDERERS:
+        raise ValueError(f"unknown provider '{provider}'")
+    keys = [managed_key, deploy_key, controller_key, spec.get("ssh_public_key", "")]
+    return _RENDERERS[provider](spec, keys)
+
+
+# --- Lifecycle cadence scaffolds -------------------------------------------
+# After Create (Terraform/OpenTofu), the recommended flow is Configure (Ansible)
+# (Maintain was a third stage, driven by Salt; that is Sysible Baseline's job
+# now). These write a sensible starter file into the same project
+# so the operator can go straight from built VMs to configuring and maintaining
+# them, without hand-typing the scaffolding.
+_CONFIGURE_YML = """\
+---
+# Configure — Ansible. Runs after the VMs exist (Create step). Target the hosts
+# you enrolled (pick the inventory built from your Controller environment), and
+# install / set up software here. Run it from the IDE: press Run -> Ansible.
+- name: Configure {name}
+  hosts: all
+  become: true
+  gather_facts: true
+  pre_tasks:
+    # Freshly-built cloud VMs ship with an EMPTY/stale apt cache, so a package
+    # install fails with "No package matching '<pkg>' is available" until the cache
+    # is refreshed — even though the package installs fine by hand after a later
+    # `apt update`. Refresh it once up front (Debian/Ubuntu only; other families
+    # skip this). cache_valid_time avoids re-fetching on every run.
+    - name: Refresh the apt cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == 'Debian'
+  tasks:
+    - name: Ping the hosts
+      ansible.builtin.ping:
+
+    - name: Install base packages
+      ansible.builtin.package:
+        name:
+          - htop
+          - curl
+        state: present
+"""
+
+_SCAFFOLDS = {
+    "configure": ("configure.yml", lambda name: _CONFIGURE_YML.format(name=name or "hosts")),
+    # "maintain" was a Salt .sls scaffold. Keeping hosts in a declared state
+    # over time is Sysible Baseline's job now; SLEP scaffolds the things that
+    # BUILD a host, not the states that hold it there.
+}
+
+
+def scaffold(stage: str, project_name: str = "") -> tuple:
+    """(filename, content) for a cadence stage: 'configure' (Ansible)."""
+    entry = _SCAFFOLDS.get((stage or "").strip().lower())
+    if not entry:
+        raise ValueError(f"unknown stage '{stage}'")
+    fname, render = entry
+    return fname, render(project_name)

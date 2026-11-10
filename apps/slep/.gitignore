@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# SLEP runtime data (DB, project workdirs, run logs, secrets)
+/data/
+*.sqlite3
+*.db
+
+# Node / frontend build
+node_modules/
+webgui/frontend/dist/
+webgui/frontend/.vite/
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local container env, written by SLOP's install.sh into the compose dir (the SSO
+# shared secret, the gateway trust flag, the base path). Untracked, it made
+# `git status --porcelain` dirty, and the updater refuses to pull a dirty checkout
+# — so every install permanently blocked its own updates ("the checkout has local
+# changes — resolve them on the host first"). It also holds a secret, which has no
+# business sitting one `git add -A` away from a commit.
+.env

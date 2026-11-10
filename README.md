@@ -10,6 +10,14 @@ is reachable by the server's **raw IP** — no subdomains, no DNS, no `/etc/host
 It's the **CE SLOP** download: instead of standing up and bookmarking three
 separate consoles on three ports, you run the apps and put SLOP in front.
 
+> **The apps are in this repository.** Their source lives under `apps/`, and one
+> checkout builds the whole platform at one commit — see
+> [`apps/README.md`](apps/README.md) and [`docs/INTEGRATED.md`](docs/INTEGRATED.md).
+> It is behind a compose profile, so a plain `docker compose up -d` is still
+> exactly what it was; a fresh host takes it with `sudo ./install.sh --integrated`.
+> The standalone repositories are publish targets now: `tools/publish-app` sends
+> a finished change out to one.
+
 ```
                       ┌─────────────────────────────┐
    https://<host>/  → │   SLOP gateway (Caddy) +     │

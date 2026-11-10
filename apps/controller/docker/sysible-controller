@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# sysible_controller — host-side wrapper for the CONTAINERIZED Sysible Controller.
+#
+# Gives you the SAME `sysible_controller <command>` experience as a native
+# install, by forwarding the command to the control CLI running INSIDE the
+# container. So instead of:
+#
+#     docker exec -it sysible-controller sysible_controller reset-admin
+#
+# you just run, from the host:
+#
+#     sysible_controller reset-admin
+#
+# Install it once on the host (Docker host), as root:
+#
+#     sudo cp docker/sysible-controller /usr/local/bin/sysible_controller
+#     sudo chmod +x /usr/local/bin/sysible_controller
+#
+# Then: sysible_controller status | logs | restart | reset-admin | rotate-api-key | ...
+#
+# The container image must be built from a version that ships the container-aware
+# CLI (`docker exec <ctr> sysible_controller ...` works). If your running image
+# predates that, rebuild it (docker compose up -d --build) and try again.
+#
+# Override the container name with SYSIBLE_CONTAINER_NAME if you renamed it.
+set -euo pipefail
+
+NAME="${SYSIBLE_CONTAINER_NAME:-sysible-controller}"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "sysible_controller: docker is not installed / not on PATH." >&2
+  exit 1
+fi
+
+_running() { docker ps --format '{{.Names}}' | grep -qx -- "$1"; }
+
+# Resolve the target container: the configured name if it's up, else auto-detect a
+# single running container from the sysible-controller image.
+if ! _running "$NAME"; then
+  mapfile -t _found < <(docker ps --filter 'ancestor=sysible-controller:latest' --format '{{.Names}}')
+  if [ "${#_found[@]}" -eq 1 ]; then
+    NAME="${_found[0]}"
+  elif [ "${#_found[@]}" -gt 1 ]; then
+    echo "sysible_controller: multiple controller containers are running:" >&2
+    printf '  %s\n' "${_found[@]}" >&2
+    echo "Pick one with: SYSIBLE_CONTAINER_NAME=<name> sysible_controller $*" >&2
+    exit 1
+  else
+    echo "sysible_controller: no running Sysible Controller container found (looked for '$NAME')." >&2
+    echo "Start it first:  docker compose up -d      (or set SYSIBLE_CONTAINER_NAME=<name>)" >&2
+    exit 1
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# LIFECYCLE verbs run on the HOST via docker compose — NOT inside the container
+# (a container can't recreate itself). `update` is the important one: the
+# reference stack BUILDS the image from source, so the correct update is a
+# rebuild, NOT `docker compose pull` (there's no registry image to pull). We read
+# the compose project dir + file from the running container's own labels, so this
+# works no matter where the wrapper was installed.
+# -----------------------------------------------------------------------------
+case "${1:-}" in
+  update|up|down|restart|stop|start|logs|pull)
+    _wd="$(docker inspect "$NAME" --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)"
+    _cfg="$(docker inspect "$NAME" --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)"
+    if [ -n "$_wd" ] && [ -d "$_wd" ]; then cd "$_wd"; fi
+    COMPOSE=(docker compose)
+    [ -n "$_cfg" ] && COMPOSE=(docker compose -f "$_cfg")
+    verb="$1"; shift || true
+    case "$verb" in
+      update)
+        echo "== Updating Sysible Controller (host-side) =="
+        if [ -d .git ]; then
+          echo "== git pull --ff-only =="
+          git pull --ff-only || echo "(git pull failed — rebuilding from the current source)"
+        fi
+        echo "== docker compose up -d --build =="
+        exec "${COMPOSE[@]}" up -d --build "$@"
+        ;;
+      up|start) exec "${COMPOSE[@]}" up -d "$@" ;;
+      restart)  exec "${COMPOSE[@]}" restart "$@" ;;
+      stop)     exec "${COMPOSE[@]}" stop "$@" ;;
+      down)     exec "${COMPOSE[@]}" down "$@" ;;      # add -v yourself to wipe data
+      logs)     exec "${COMPOSE[@]}" logs "$@" ;;
+      pull)     exec "${COMPOSE[@]}" pull "$@" ;;      # only for a registry-image deploy
+    esac
+    ;;
+esac
+
+# Interactive TTY when we're on a terminal; a plain pipe otherwise (so it works in
+# scripts and heredocs too).
+if [ -t 0 ] && [ -t 1 ]; then
+  TTY_ARGS=(-it)
+else
+  TTY_ARGS=(-i)
+fi
+
+# Friendlier error than a bare "executable not found" when the image predates the
+# in-container CLI.
+if ! docker exec "$NAME" sh -c 'command -v sysible_controller >/dev/null 2>&1'; then
+  echo "sysible_controller: the '$NAME' image doesn't include the in-container CLI yet." >&2
+  echo "Rebuild it from a current version:  docker compose up -d --build" >&2
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# self-enroll — enrol the DOCKER HOST (this machine) as a managed host. The
+# controller runs in a container and cannot manage the host from inside it (no
+# systemd; 127.0.0.1 there is the container, not the box). So we mint a bundle
+# INSIDE the container against the advertised LAN address, then install the agent
+# HERE on the host, where it has systemd and real authority over the machine.
+# Optional explicit address:  sysible_controller self-enroll <host-LAN-IP|DNS>
+# -----------------------------------------------------------------------------
+if [ "${1:-}" = "self-enroll" ]; then
+  shift || true
+  ADDR="${1:-}"
+  if [ "$(id -u)" != 0 ]; then
+    echo "sysible_controller self-enroll: must run as root — it installs the agent and a" >&2
+    echo "systemd unit on this host.  sudo sysible_controller self-enroll" >&2
+    exit 1
+  fi
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "sysible_controller self-enroll: 'unzip' is required on the host — install it, then retry." >&2
+    exit 1
+  fi
+  if [ -z "$ADDR" ]; then
+    ADDR="$(docker exec "$NAME" printenv SYSIBLE_CONTROLLER_ADDR 2>/dev/null | head -1 | tr -d '\r' || true)"
+  fi
+  if [ -z "$ADDR" ]; then
+    echo "sysible_controller self-enroll: no reachable controller address to enrol against." >&2
+    echo "SYSIBLE_CONTROLLER_ADDR isn't set on the container, so it only knows its internal" >&2
+    echo "docker-bridge IP — which a host agent can't rely on. Fix either way:" >&2
+    echo "  • set SYSIBLE_CONTROLLER_ADDR=<host LAN IP or DNS>, then recreate the controller" >&2
+    echo "  • or pass one now:  sudo sysible_controller self-enroll <host-LAN-IP>" >&2
+    exit 1
+  fi
+  if [ -f /opt/sysible-agent/agent.py ] && systemctl is-enabled sysible-agent >/dev/null 2>&1; then
+    echo "This host already runs the Sysible agent (/opt/sysible-agent) — nothing to do." >&2
+    echo "To re-enrol: sudo systemctl disable --now sysible-agent && sudo rm -rf /opt/sysible-agent, then re-run." >&2
+    exit 0
+  fi
+
+  echo "Enrolling this Docker host as a managed host, reporting to ${ADDR} ..."
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  if ! docker exec "$NAME" sysible_controller self-enroll-bundle "$ADDR" > "$tmp/bundle.zip"; then
+    echo "sysible_controller self-enroll: could not mint the agent bundle in the container." >&2
+    echo "Check the controller is up (sysible_controller status); an older image may also lack" >&2
+    echo "this command — rebuild it:  docker compose up -d --build" >&2
+    exit 1
+  fi
+  if [ ! -s "$tmp/bundle.zip" ]; then
+    echo "sysible_controller self-enroll: the minted bundle was empty (host cap reached, or mint failed)." >&2
+    exit 1
+  fi
+  if ! ( cd "$tmp" && unzip -qo bundle.zip ) || [ ! -f "$tmp/run_agent.sh" ]; then
+    echo "sysible_controller self-enroll: could not unpack the agent bundle (missing run_agent.sh)." >&2
+    exit 1
+  fi
+  chmod +x "$tmp/run_agent.sh"
+  if ! ( cd "$tmp" && ./run_agent.sh ); then
+    echo "sysible_controller self-enroll: agent install failed." >&2
+    exit 1
+  fi
+  echo "Host self-enrolled — it will appear in the fleet shortly (Host Enrollment → Hosts)."
+  exit 0
+fi
+
+exec docker exec "${TTY_ARGS[@]}" "$NAME" sysible_controller "$@"

@@ -121,15 +121,48 @@ def test_another_products_module_key_is_its_compose_service(app_module, product)
         f"compose service renders with no state and refuses every button.")
 
 
-def test_no_slop_compose_service_is_left_without_a_section(app_module):
-    """The sections ARE the inventory. A service that ships in the stack and has
-    no section is a module an operator cannot see, which is the complaint this
-    whole screen change came from."""
+def test_no_compose_service_in_this_file_is_left_without_a_card(app_module):
+    """The cards ARE the inventory. A service that ships in the stack and has no
+    card is a service an operator cannot see, which is the complaint this whole
+    screen change came from.
+
+    Across EVERY product, not just SLOP's own. This compose file builds the three
+    vendored apps too (behind the `integrated` profile), and their services get
+    cards under their own product's row rather than under the platform's — so a
+    check that only looked at module_keys("slop") would report `controller` as
+    uncovered while its card sits on the Controller's row where it belongs.
+    """
     with app_module("updater", "backend.apps") as apps:
-        listed = set(apps.module_keys("slop"))
+        listed = set()
+        for product in apps.ALLOWLIST:
+            listed |= set(apps.module_keys(product))
     missing = _compose_services() - listed
     assert not missing, (
-        f"these SLOP services have no section on the updates screen: {sorted(missing)}")
+        f"these services are built by this compose file and have no card on "
+        f"the updates screen: {sorted(missing)}")
+
+
+def test_the_profiled_app_services_are_exactly_the_vendored_apps(app_module):
+    """The `integrated` profile is the switch between three checkouts and one.
+    What it brings up has to be the three apps and nothing else: a service that
+    slipped in behind the profile would come up on an integrated host and not on
+    a standalone one, which is the hardest kind of difference to find."""
+    import yaml
+    doc = yaml.safe_load(open(os.path.join(REPO, "docker-compose.yml"),
+                              encoding="utf-8"))
+    profiled = {k for k, v in doc["services"].items()
+                if "integrated" in (v.get("profiles") or [])}
+    assert profiled == set(_OTHER_PRODUCTS), (
+        f"the integrated profile brings up {sorted(profiled)}; the vendored "
+        f"apps are {sorted(_OTHER_PRODUCTS)}")
+    # ...and each builds from its own vendored directory, not from a sibling
+    # checkout that would only exist on the machine it was written on.
+    for key in profiled:
+        ctx = doc["services"][key]["build"]["context"]
+        assert ctx == f"./apps/{key}", (
+            f"{key} builds from {ctx!r}; it must build from ./apps/{key}")
+        assert os.path.isdir(os.path.join(REPO, "apps", key)), \
+            f"apps/{key} is not in this tree, but the compose file builds from it"
 
 
 def test_the_idp_skeleton_and_the_updater_agree(app_module):

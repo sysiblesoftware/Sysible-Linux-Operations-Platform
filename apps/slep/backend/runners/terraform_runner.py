@@ -1,0 +1,608 @@
+"""Terraform / OpenTofu runner — run `<tool> <action>` against a project's .tf.
+
+The run's `target` is the action: `plan`, `apply`, or `destroy`. State lives in
+the project workdir (terraform.tfstate), so plan/apply/destroy over the same
+project share state the way a normal checkout does. Provider credentials come
+from an attached 'cloud' credential whose secret is KEY=VALUE env lines (e.g.
+AWS_ACCESS_KEY_ID=…), injected into the run environment. extra_vars become
+`-var key=value`.
+
+The CLI can be Terraform (`terraform`) or OpenTofu (`tofu`) — OpenTofu is a
+drop-in, CLI-compatible fork, so the same project runs under either. The tool is
+chosen per run (stash_tool), or via the SLEP_TF_TOOL env, else auto-detected.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from .. import db
+from . import _common
+
+ACTIONS = {"plan", "apply", "destroy"}
+
+# Transient per-run tool choice ('terraform' | 'tofu'), set just before launch()
+# and consumed once inside it. Same-process dict, mirrors the Ansible runner.
+_TOOL: dict[int, str] = {}
+
+
+def stash_tool(run_id: int, tool: str) -> None:
+    tool = (tool or "").strip().lower()
+    if tool:
+        _TOOL[run_id] = tool
+
+
+def pop_tool(run_id: int) -> str:
+    return _TOOL.pop(run_id, "")
+
+
+# Provider/lock mismatch signatures. When a stale .terraform.lock.hcl pins a
+# provider version whose schema no longer matches the config, every argument
+# reads as "Unsupported argument" / "Missing required argument". Re-initialising
+# with -upgrade re-resolves the lock to the config's version constraints.
+_SCHEMA_MISMATCH = (
+    "Unsupported argument",
+    "Missing required argument",
+    "but no definition was found",
+    "does not match configured",
+    "no suitable version",
+    "Failed to query available provider packages",
+)
+
+# A libvirt_domain whose STATE was written with qemu_agent=true (an earlier SLEP
+# release) can't be REFRESHED when the guest agent isn't connected — plan/refresh
+# dies here before it can apply the change that removes qemu_agent. Detected so the
+# apply/destroy can be retried with -refresh=false (see self-heal tier 4).
+_AGENT_REFRESH_ERR = (
+    "Guest agent is not responding",
+    "error retrieving interface addresses",
+)
+
+
+def _orphan_cloudinit_isos(log_path) -> list[str]:
+    """Volume names from any 'storage volume '<name>' exists already' errors in the
+    run log — the cloud-init ISOs a partial apply orphaned. De-duplicated, ISOs only
+    (so we never touch a real disk even if the message shape changes)."""
+    import re
+    try:
+        text = log_path.read_text()[-12000:]
+    except OSError:
+        return []
+    names = re.findall(r"storage volume '([^']+)' exists already", text)
+    seen, out = set(), []
+    for n in names:
+        if n.endswith("-ci.iso") and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _delete_libvirt_volumes(project_id: int, names: list[str], emit) -> bool:
+    """virsh vol-delete the named volumes from the project's libvirt pool. Best-
+    effort: returns True if at least one delete succeeded (so a retry is worth it).
+    Uses the project's own connection URI and configured pool."""
+    import re
+    import shutil
+    if not shutil.which("virsh"):
+        emit("-- can't auto-clean: `virsh` isn't installed on the SLEP host. Delete the "
+             "volume(s) on the hypervisor: " + ", ".join(f"virsh vol-delete {n} --pool <pool>" for n in names))
+        return False
+    uri = _libvirt_uri_for(project_id)
+    if not uri:
+        return False
+    # Pool the cloud-init disk lands in: the project's configured pool (default).
+    pool = "default"
+    try:
+        vf = db.project_dir(project_id) / "variables.tf"
+        m = re.search(r'variable\s+"pool".*?default\s*=\s*"([^"]+)"', vf.read_text(), re.S)
+        if m:
+            pool = m.group(1)
+    except OSError:
+        pass
+    any_ok = False
+    for n in names:
+        try:
+            p = _run_quiet(["virsh", "-c", uri, "vol-delete", n, "--pool", pool])
+            if p == 0 or _run_quiet(["virsh", "-c", uri, "vol-delete", n]) == 0:
+                any_ok = True
+                emit(f"-- removed stale volume '{n}'.")
+        except Exception:  # noqa: BLE001
+            pass
+    return any_ok
+
+
+def _tf_var_default(project_id: int, name: str, fallback: str = "") -> str:
+    """Read a variable's `default` from the project's variables.tf (string or number).
+    Cheap regex — the file is SLEP-generated, so the shape is known."""
+    import re
+    try:
+        t = (db.project_dir(project_id) / "variables.tf").read_text()
+    except OSError:
+        return fallback
+    m = re.search(r'variable\s+"' + re.escape(name) + r'"\s*\{.*?default\s*=\s*"?([^"\n}]+?)"?\s*\n', t, re.S)
+    return m.group(1).strip() if m else fallback
+
+
+def _deep_destroy_libvirt(project_id: int, emit) -> int:
+    """After a libvirt `destroy`, sweep the hypervisor for THIS project's leftover
+    objects that terraform state didn't track (a partial earlier apply, the shared
+    base volume, cloud-init ISOs) and remove them — so a destroy really means a clean
+    slate and the next apply neither collides nor re-downloads. Scoped strictly to
+    the project's own name_prefix + pool, so it never touches another project's VMs.
+    virsh-only (the orphan-on-destroy behaviour is the libvirt provider's); returns
+    the count removed."""
+    import re
+    import shutil
+    uri = _libvirt_uri_for(project_id)
+    if not uri or not shutil.which("virsh"):
+        return 0
+    prefix = _tf_var_default(project_id, "name_prefix", "app")
+    pool = _tf_var_default(project_id, "pool", "default")
+    if not prefix:
+        return 0
+    removed = 0
+    # Domains named "<prefix>-<n>" — destroy (power off) then undefine (disks stay,
+    # they're swept separately below). List all and match this project's pattern.
+    try:
+        r = subprocess.run(["virsh", "-c", uri, "--readonly", "list", "--all", "--name"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        doms = [d.strip() for d in r.stdout.splitlines() if d.strip()]
+    except Exception:  # noqa: BLE001
+        doms = []
+    dom_re = re.compile(r'^' + re.escape(prefix) + r'-\d+$')
+    stale_doms = [d for d in doms if dom_re.match(d)]
+    if stale_doms and _delete_libvirt_domains(project_id, stale_doms, emit):
+        removed += len(stale_doms)
+    # Volumes: "<prefix>-base.qcow2", "<prefix>-<n>.qcow2", "<prefix>-<n>-ci.iso".
+    try:
+        r = subprocess.run(["virsh", "-c", uri, "--readonly", "vol-list", pool, "--name"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        vols = [v.strip() for v in r.stdout.splitlines() if v.strip()]
+    except Exception:  # noqa: BLE001
+        vols = []
+    vol_re = re.compile(r'^' + re.escape(prefix) + r'-(base\.qcow2|\d+\.qcow2|\d+-ci\.iso)$')
+    stale_vols = [v for v in vols if vol_re.match(v)]
+    if stale_vols and _delete_libvirt_volumes(project_id, stale_vols, emit):
+        removed += len(stale_vols)
+    if removed:
+        emit(f"-- SLEP: swept {removed} leftover libvirt object(s) for “{prefix}-*” — "
+             f"the next apply starts clean.")
+    return removed
+
+
+def _orphan_domains(log_path) -> list[str]:
+    """Domain (VM) names from any 'domain '<name>' already exists' errors in the run
+    log — VMs a partial apply defined on the hypervisor but didn't record in state,
+    so the next apply collides. De-duplicated."""
+    import re
+    try:
+        text = log_path.read_text()[-12000:]
+    except OSError:
+        return []
+    seen, out = set(), []
+    for n in re.findall(r"domain '([^']+)' already exists", text):
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _delete_libvirt_domains(project_id: int, names: list[str], emit) -> bool:
+    """Destroy + undefine orphaned libvirt domains so a re-apply can recreate them.
+    Storage is deliberately NOT removed (the disk volumes are managed by the config
+    and are cleaned separately when stale) — only the domain definition goes. Best-
+    effort; returns True if at least one was removed."""
+    import shutil
+    if not shutil.which("virsh"):
+        emit("-- can't auto-clean: `virsh` isn't installed on the SLEP host. Remove the "
+             "domain(s) on the hypervisor: "
+             + "; ".join(f"virsh destroy {n} ; virsh undefine {n} --nvram" for n in names))
+        return False
+    uri = _libvirt_uri_for(project_id)
+    if not uri:
+        return False
+    any_ok = False
+    for n in names:
+        _run_quiet(["virsh", "-c", uri, "destroy", n])   # power off if running (ok to fail)
+        # Cover UEFI nvram + managed-save + snapshot metadata, falling back to a
+        # plain undefine. NEVER --remove-all-storage — the disks must survive.
+        rc = _run_quiet(["virsh", "-c", uri, "undefine", n, "--nvram",
+                         "--managed-save", "--snapshots-metadata"])
+        if rc != 0:
+            rc = _run_quiet(["virsh", "-c", uri, "undefine", n])
+        if rc == 0:
+            any_ok = True
+            emit(f"-- removed stale domain '{n}' (its disk volumes were left intact).")
+    return any_ok
+
+
+def _cleanup_empty_infra_inventory(project_id: int, emit) -> bool:
+    """After a FAILED Create-Infrastructure apply, delete this project's inventory if
+    it was created for the provision but never got hosts (the apply died before any
+    VM came up) — so retrying doesn't pile up empty "double" inventories. Strictly
+    bounded: only an EMPTY, infra-sourced inventory is removed; one already holding
+    hosts from a prior good apply is left untouched. Returns True if it deleted one."""
+    try:
+        meta = db.get_infra(project_id)
+        iid = (meta or {}).get("inventory_id")
+        if not iid:
+            return False
+        inv = db.get_inventory(iid)
+        if inv and inv.get("source") == "infra" and not db.list_hosts(iid):
+            db.delete_inventory(iid)
+            db.set_infra_inventory(project_id, None)
+            emit(f"\n-- SLEP: removed the empty inventory “{inv.get('name')}” (#{iid}) — "
+                 f"the apply failed before any VM came up, so it had no hosts to keep.")
+            return True
+    except Exception:  # noqa: BLE001 — never let cleanup mask the real failure
+        pass
+    return False
+
+
+def _libvirt_uri_for(project_id: int) -> str:
+    """The project's libvirt connection URI (from app), or '' if unavailable."""
+    try:
+        from .. import app as _app
+        return _app._libvirt_uri_for_project(project_id)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _run_quiet(cmd) -> int:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=25,
+                              env=dict(os.environ)).returncode
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _resolve_tool(choice: str) -> str:
+    """Pick the CLI: explicit per-run choice → SLEP_TF_TOOL env → auto-detect
+    (prefer terraform, fall back to tofu). Either satisfies the same config."""
+    choice = (choice or os.environ.get("SLEP_TF_TOOL", "")).strip().lower()
+
+    def have(b):
+        return shutil.which(b) is not None
+
+    if choice in ("tofu", "opentofu"):
+        return "tofu" if have("tofu") else "terraform"
+    if choice in ("terraform", "tf"):
+        return "terraform" if have("terraform") else ("tofu" if have("tofu") else "terraform")
+    return "terraform" if have("terraform") else ("tofu" if have("tofu") else "terraform")
+
+
+def _auto_destroy_after_cancel(run: dict, tool: str, emit) -> None:
+    """A canceled APPLY may have created partial infrastructure. Launch a Destroy run so
+    the operator isn't left with orphaned/half-built VMs. It's a normal, visible run
+    (its own log + status), reusing the apply's credential and engine (terraform/tofu).
+    NOTE: destroy removes EVERYTHING in the project's state — including VMs from a prior
+    apply — so this is cleanup-after-abandon, not a partial rollback."""
+    import threading
+    did = db.create_run(run["project_id"], "terraform", "destroy",
+                        credential_id=run.get("credential_id"),
+                        created_by=(run.get("created_by") or "auto"),
+                        group_id=run.get("group_id") or "")
+    if tool:
+        stash_tool(did, tool)
+    emit(f"\n-- SLEP: apply canceled — automatically running Destroy (run #{did}) to remove "
+         f"any partially-created infrastructure.")
+    threading.Thread(target=launch, args=(did,), daemon=True).start()
+
+
+def launch(run_id: int) -> None:
+    run = db.get_run(run_id)
+    if not run:
+        return
+    log_path = db.run_log_path(run_id)
+    project = db.get_project(run["project_id"])
+    workdir = db.project_dir(run["project_id"])
+    credential = (
+        db.get_credential(run["credential_id"], include_secret=True)
+        if run.get("credential_id") else None
+    )
+    try:
+        extra_vars = json.loads(run.get("extra_vars") or "{}")
+    except (TypeError, ValueError):
+        extra_vars = {}
+    action = (run["target"] or "").strip().lower()
+    tool = _resolve_tool(pop_tool(run_id))
+    name = "OpenTofu" if tool == "tofu" else "Terraform"
+
+    db.set_run_status(run_id, "running", started=int(time.time()))
+    with log_path.open("w", buffering=1) as log:
+        def emit(m):
+            log.write(m if m.endswith("\n") else m + "\n")
+
+        emit(f"== SLEP run #{run_id} · project '{project['name']}' · {tool} {action} ==")
+        if action not in ACTIONS:
+            emit(f"!! Unknown {name} action '{action}'. Use plan, apply, or destroy.")
+            db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+            return
+        if not any(workdir.glob("*.tf")):
+            emit(f"!! No .tf files in this project — nothing for {name} to do.")
+            db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+            return
+
+        # Preflight the cloud-init ISO tool. The dmacvicar/libvirt provider builds
+        # each VM's cloud-init ISO by shelling out to `mkisofs` (or genisoimage /
+        # xorriso). If it's missing, apply fails *after* the slow base-image
+        # download — so on apply, when the config uses libvirt_cloudinit_disk,
+        # check up front and fail fast with a clear, actionable message.
+        if action == "apply":
+            tf_text = ""
+            for f in workdir.glob("*.tf"):
+                try:
+                    tf_text += f.read_text()
+                except OSError:
+                    pass
+            if "libvirt_cloudinit_disk" in tf_text and not any(
+                    shutil.which(b) for b in ("mkisofs", "genisoimage", "xorriso")):
+                emit("!! Missing cloud-init ISO tool. The libvirt provider builds each VM's")
+                emit("!! cloud-init ISO with `mkisofs` (or genisoimage / xorriso), which isn't on")
+                emit("!! PATH in the SLEP container. Install genisoimage (the image bakes it in as")
+                emit("!! of this release — run `slep update`), then re-apply. Failing now so you")
+                emit("!! don't wait on the base-image download first.")
+                db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+                return
+
+            # Keep the project's cloud-init current: ensure SLEP's managed key is
+            # authorized, so VMs this apply (re)creates accept the default "SLEP
+            # managed key" credential — even for projects generated before the key
+            # was baked in (apply reuses the on-disk cloudinit.cfg, never regens it).
+            try:
+                from .. import app as _app
+                # Rebuild the cloud-init to the current robust format (guaranteed
+                # user + keys + sshd) preserving existing keys; falls back to just
+                # patching keys in if regeneration can't run.
+                if not _app._refresh_infra_cloudinit(run["project_id"], emit):
+                    _app._ensure_managed_key_in_cloudinit(run["project_id"], emit)
+            except Exception:  # noqa: BLE001 — never block the apply over this
+                pass
+
+            # Backfill the cloud-init re-run behaviour into projects generated before it
+            # existed: fold a cloud-init hash into the NoCloud instance-id and add the
+            # domain's replace_triggered_by. Without this, editing the account/password
+            # on an OLDER project rewrites cloudinit.cfg but the VM never re-runs it
+            # (static instance-id, in-place domain update, no reboot). Idempotent — a
+            # no-op once a project is current or for non-libvirt providers.
+            try:
+                from .. import infra as _infra
+                main_tf = db.project_dir(run["project_id"]) / "main.tf"
+                if main_tf.exists():
+                    patched, notes = _infra.migrate_libvirt_main_tf(main_tf.read_text())
+                    if notes:
+                        main_tf.write_text(patched)
+                        for n in notes:
+                            emit(f"-- updated infrastructure: {n}")
+                    # If the disk-size patch put `var.disk_size` into main.tf, the
+                    # companion variables.tf must define it or terraform errors on an
+                    # undefined variable. Backfill it (default 20GB) whenever main.tf
+                    # references it — idempotent, and independent of `notes` so a project
+                    # already carrying the size but missing the var still gets repaired.
+                    if 'var.disk_size' in patched:
+                        vars_tf = db.project_dir(run["project_id"]) / "variables.tf"
+                        base = vars_tf.read_text() if vars_tf.exists() else ""
+                        new_vars, changed = _infra.ensure_disk_size_var(base)
+                        if changed:
+                            vars_tf.write_text(new_vars)
+                            emit("-- updated infrastructure: added disk_size variable "
+                                 "(default 20GB — edit variables.tf for any size)")
+                    # If main.tf references the explicit DHCP network-config (added by
+                    # patch #5 above, or by a fresh render), the file must exist or
+                    # terraform errors on the missing file. Write it for older projects.
+                    if 'network-config.cfg' in patched:
+                        ncfg = db.project_dir(run["project_id"]) / "network-config.cfg"
+                        if not ncfg.exists():
+                            ncfg.write_text(_infra._NETWORK_CONFIG)
+                            emit("-- updated infrastructure: wrote network-config.cfg "
+                                 "(explicit DHCP so RHEL-family VMs get a lease)")
+            except Exception:  # noqa: BLE001 — never block the apply over this
+                pass
+
+        env = _common.credential_env(credential, os.environ)
+        env.setdefault("TF_IN_AUTOMATION", "1")
+
+        # Pass variables through a 0600 -var-file (JSON), NOT `-var k=v` on argv: a
+        # value may be a secret and argv is visible to any local user via `ps`. The
+        # file lives in the project workdir (already access-controlled) and is written
+        # per apply; terraform reads *.auto.tfvars.json automatically, but we pass it
+        # explicitly so plan/apply/destroy all see it.
+        var_args = []
+        if extra_vars:
+            import json as _json
+            vf = workdir / "slep.auto.tfvars.json"
+            fd = os.open(str(vf), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, _json.dumps(extra_vars).encode())
+            finally:
+                os.close(fd)
+            var_args = ["-var-file", str(vf)]
+        # Secret values must not be echoed into the (viewer-readable) run log.
+        # The credential's values belong here as much as extra_vars do: the cloud
+        # secret is in this process's environment and `terraform plan` prints
+        # resource attributes, so a provider error or a printed attribute can put
+        # ARM_CLIENT_SECRET in a log any authenticated viewer can open.
+        redact = _common.secret_values(credential, extra_vars)
+
+        def run_action(upgrade: bool, refresh: bool = True) -> int:
+            init = [tool, "init", "-input=false", "-no-color"]
+            if upgrade:
+                init.append("-upgrade")
+            # init too: a backend-config failure quotes what it was given.
+            rc = _common.stream(init, workdir, env, log, redact=redact, run_id=run_id)
+            if rc != 0:
+                emit(f"\n== {tool} init failed: exit {rc} ==")
+                return rc
+            # -refresh=false skips reading current state from the hypervisor (used by
+            # the tier-4 self-heal to get past a guest-agent refresh error).
+            ref = [] if refresh else ["-refresh=false"]
+            if action == "plan":
+                cmd = [tool, "plan", "-input=false", "-no-color", *ref, *var_args]
+            elif action == "apply":
+                cmd = [tool, "apply", "-input=false", "-auto-approve", "-no-color", *ref, *var_args]
+            else:  # destroy
+                cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *ref, *var_args]
+            return _common.stream(cmd, workdir, env, log, redact=redact, run_id=run_id)
+
+        def _log_has(sigs) -> bool:
+            try:
+                tail = log_path.read_text()[-8000:]
+            except OSError:
+                tail = ""
+            return any(s in tail for s in sigs)
+
+        def _mismatch() -> bool:
+            try:
+                tail = log_path.read_text()[-8000:]
+            except OSError:
+                tail = ""
+            return any(sig in tail for sig in _SCHEMA_MISMATCH)
+
+        rc = run_action(upgrade=False)
+
+        # Self-heal tier 1 — stale provider lock: if the action failed with schema-
+        # mismatch errors and a lock file is present, re-init with -upgrade (which
+        # re-resolves the lock against the config's version constraints) and retry
+        # once. This is what makes a `destroy` work again after a provider whose
+        # schema drifted from the config got pinned in .terraform.lock.hcl.
+        if rc != 0 and (workdir / ".terraform.lock.hcl").exists() and _mismatch():
+            emit("\n-- provider schema mismatch detected (stale .terraform.lock.hcl?).")
+            emit(f"-- re-resolving providers with `{tool} init -upgrade` and retrying {action} --\n")
+            rc = run_action(upgrade=True)
+
+        # Self-heal tier 2 — poisoned provider cache: a corrupt/stub provider plugin
+        # in the project's local .terraform cache survives `-upgrade` (it still
+        # satisfies the version constraint, so init reports "using previously-
+        # installed …" and reuses it). Wipe the .terraform dir + lock and re-init
+        # from scratch so a clean provider is downloaded, then retry once. State
+        # (terraform.tfstate) is deliberately left untouched.
+        if rc != 0 and _mismatch():
+            emit("\n-- still schema-mismatched after -upgrade — the cached provider plugin looks corrupt.")
+            emit("-- clearing the local provider cache (.terraform + lock) and re-initialising clean --\n")
+            shutil.rmtree(workdir / ".terraform", ignore_errors=True)
+            (workdir / ".terraform.lock.hcl").unlink(missing_ok=True)
+            rc = run_action(upgrade=False)
+            if rc != 0 and _mismatch():
+                emit("\n-- STILL schema-mismatched after a clean re-download. This is a provider")
+                emit("-- major-version schema change, not a bad download: the config's HCL syntax")
+                emit("-- doesn't match the resolved provider version. Pin the provider to a compatible")
+                emit("-- version in required_providers (e.g. a tighter version constraint), then apply.")
+                emit("-- (dmacvicar/libvirt 0.9.x rewrote its resource schema vs 0.7/0.8.) --")
+
+        # Self-heal tier 3 — orphaned libvirt objects from a partial apply. A run
+        # that died mid-apply can leave the domain '<name>' and/or its cloud-init
+        # ISO '<name>-ci.iso' on the hypervisor WITHOUT recording them in state, so
+        # the next apply dies with "domain '<name>' already exists" or "storage
+        # volume '<name>-ci.iso' exists already". SLEP owns those names (it just
+        # tried to create them and regenerates the cloud-init every apply), so the
+        # orphans are safe to remove. Clean whatever the log names and retry — up to
+        # twice, because the domain and ISO collisions can surface one after the
+        # other (undefine the domain first, then its ISO). Disk volumes are never
+        # touched here.
+        if rc != 0 and action == "apply":
+            for _heal in range(2):
+                doms = _orphan_domains(log_path)
+                isos = _orphan_cloudinit_isos(log_path)
+                if not doms and not isos:
+                    break
+                cleaned = False
+                if doms:
+                    emit(f"\n-- stale libvirt domain(s) left by an earlier partial apply: "
+                         f"{', '.join(doms)}.")
+                    cleaned = _delete_libvirt_domains(run["project_id"], doms, emit) or cleaned
+                if isos:
+                    emit(f"\n-- stale cloud-init ISO(s) left by an earlier partial apply: "
+                         f"{', '.join(isos)}.")
+                    cleaned = _delete_libvirt_volumes(run["project_id"], isos, emit) or cleaned
+                if not cleaned:
+                    break
+                emit("-- retrying apply after cleanup --\n")
+                rc = run_action(upgrade=False)
+                if rc == 0:
+                    break
+
+        # Self-heal tier 4 — a domain whose STATE carries qemu_agent=true (baked in by
+        # an earlier SLEP release that briefly set it) cannot be REFRESHED when the
+        # guest agent isn't connected: plan/refresh dies with "Guest agent is not
+        # responding" before it can even apply the change that removes qemu_agent.
+        # Retry once with -refresh=false so terraform skips the agent query, diffs the
+        # current config (which no longer sets qemu_agent — migrate_libvirt_main_tf
+        # stripped it) against state, and applies the removal. After that, future
+        # refreshes read the VM address from the DHCP lease instead of the agent.
+        if rc != 0 and action in ("apply", "destroy") and _log_has(_AGENT_REFRESH_ERR):
+            emit("\n-- a VM's saved state still expects the QEMU guest agent (left by an")
+            emit("-- earlier release) and the agent isn't connected, so the refresh can't run.")
+            emit(f"-- retrying {action} with -refresh=false to drop that expectation --\n")
+            rc = run_action(upgrade=False, refresh=False)
+
+        # After a successful apply of a Create-Infrastructure project, read the new
+        # VMs into the project's own inventory automatically — so they're immediately
+        # targetable by Ansible with no manual "→ Inventory" step. Best-effort:
+        # a non-infra project or a not-yet-ready output just skips silently.
+        # Stopped by an operator (POST /runs/{id}/cancel killed the child): record
+        # the run as canceled, not failed, and skip the post-apply inventory build.
+        if _common.is_stopped(run_id):
+            _common.clear_stop(run_id)
+            emit("\n== canceled by operator ==")
+            db.set_run_status(run_id, "canceled", exit_code=rc or 130, finished=int(time.time()))
+            if action == "apply":
+                try:
+                    _auto_destroy_after_cancel(run, tool, emit)
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        if action == "apply" and rc == 0:
+            try:
+                from .. import app as _app
+                built = _app._autobuild_infra_inventory(run["project_id"], run=run)
+                if built:
+                    iid, iname, n = built
+                    if n > 0:
+                        emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
+                             f"the next Ansible step will target them.")
+                        # Confirm SLEP can log into the new VMs with its managed key
+                        # (through the jump host) right now, so a connect failure
+                        # shows here instead of surfacing as a confusing UNREACHABLE
+                        # on the next step.
+                        _app._verify_infra_key_access(run["project_id"], iid, emit)
+                    else:
+                        # VMs exist in the output but none had a usable address —
+                        # almost always libvirt IPs not assigned yet (DHCP / guest
+                        # agent). Say so, since an empty inventory otherwise fails
+                        # the next step with a confusing "nothing to target".
+                        emit(f"\n-- SLEP: inventory “{iname}” (#{iid}) got 0 hosts — the VMs "
+                             f"applied but have no IP yet (libvirt assigns addresses via "
+                             f"DHCP/guest-agent after boot). Wait for them to come up, then "
+                             f"re-run the Ansible step (or the '→ Inventory' action).")
+            except Exception:  # noqa: BLE001 — never fail the apply over this
+                pass
+
+        # A Create-Infrastructure apply that FAILED: drop an inventory that was
+        # created for this provision but never got hosts (see _cleanup_empty_infra_inventory).
+        if action == "apply" and rc != 0:
+            _cleanup_empty_infra_inventory(run["project_id"], emit)
+
+        # A libvirt DESTROY: terraform only removes what's in state, so sweep the
+        # hypervisor for this project's leftover domains/volumes (orphans from an
+        # earlier partial apply, the shared base volume, cloud-init ISOs) so destroy
+        # is a true clean slate. Runs whether terraform destroy succeeded or not —
+        # by-name removal is safe either way. Scoped to this project's prefix + pool.
+        if action == "destroy":
+            try:
+                swept = _deep_destroy_libvirt(run["project_id"], emit)
+                if swept and rc != 0:
+                    # terraform choked (likely on the very orphans we just removed) —
+                    # the sweep cleaned them, so the project is now actually empty.
+                    emit("-- terraform destroy reported an error, but the sweep removed the "
+                         "leftovers, so the hypervisor is now clean for this project.")
+            except Exception:  # noqa: BLE001 — never mask the destroy result
+                pass
+
+        emit(f"\n== finished: exit code {rc} ==")
+        db.set_run_status(run_id, "success" if rc == 0 else "failed",
+                          exit_code=rc, finished=int(time.time()))

@@ -1,0 +1,58 @@
+import React, { useCallback, useEffect, useState } from "react";
+import { api } from "../api.js";
+
+// Compact "Updates available" pill for the dashboard header (superuser-only —
+// /api/update-status is superuser-gated and does a live git fetch, so it's
+// fetched async/non-blocking). Renders NOTHING until it resolves and only when
+// there's actually an update, so a healthy header stays clean. Clicking opens
+// Settings → Software updates. Auto-checks on mount; also polls hourly so a
+// long-lived session eventually notices a new release without a reload.
+export default function UpdatesBadge({ onOpen }) {
+  const [avail, setAvail] = useState(null);
+
+  const check = useCallback(() => {
+    api.updateStatus().then(setAvail).catch(() => { /* stay silent on error */ });
+  }, []);
+  useEffect(() => {
+    check();
+    const t = setInterval(check, 3600_000);   // re-check hourly
+    return () => clearInterval(t);
+  }, [check]);
+
+  if (!avail) return null;
+  const c = avail.controller || {};
+  const a = avail.agents || {};
+  // restart_needed: code was pulled to disk but the running process never
+  // reloaded it — a staged update the operator must apply, so surface it like
+  // any other controller update (otherwise the box silently serves stale code).
+  const ctrlBehind = !!((c.checked && c.available) || c.restart_needed);
+  const agentsBehind = (a.outdated_count || 0) > 0;
+  if (!ctrlBehind && !agentsBehind) return null;
+  // Nothing for the operator to do: the controller is current and the agents are
+  // rolling themselves forward. Staying silent is the honest state here — a
+  // permanent "Updates available" pill for work already underway is noise.
+  if (!ctrlBehind && agentsBehind && a.auto_update) return null;
+
+  const bits = [];
+  if (c.restart_needed) bits.push("controller update pulled — restart to apply");
+  else if (ctrlBehind) bits.push("controller update available");
+  if (agentsBehind) {
+    // Auto-update is on by default: an older agent is mid-rollout, not a chore.
+    bits.push(`${a.outdated_count} agent${a.outdated_count === 1 ? "" : "s"} on an older build`
+      + (a.auto_update ? " (updating automatically)" : ""));
+  }
+
+  return (
+    <button className="btn sm" onClick={onOpen}
+      title={`Updates available — ${bits.join("; ")}. Open Software updates.`}
+      style={{ borderColor: "#e0a83a", color: "#e0a83a", whiteSpace: "nowrap",
+               display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>⬆</span>
+      Updates available
+      <span style={{ fontSize: 11, fontWeight: 700, background: "#e0a83a", color: "#1a2130",
+                     borderRadius: 9, padding: "0 6px", lineHeight: "16px" }}>
+        {(ctrlBehind ? 1 : 0) + (agentsBehind ? 1 : 0)}
+      </span>
+    </button>
+  );
+}

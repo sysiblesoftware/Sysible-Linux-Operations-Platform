@@ -296,6 +296,17 @@ services:
       # host daemon.
       SYSIBLE_SRC_DIR: ${SYSIBLE_SRC_DIR:-/opt/sysible-src}
       SYSIBLE_SLOP_DIR: ${SYSIBLE_SLOP_DIR:-/opt/sysible-src/sysible-linux-operations-platform}
+      # Whether this host runs the ONE-CHECKOUT layout: the apps built from
+      # apps/ by this compose file, rather than from three checkouts of their
+      # own. Written to .env by `install.sh --integrated`, so it survives every
+      # later recreate.
+      #
+      # An explicit marker, not "apps/ exists". The directory arrives with a
+      # git pull, and a pull must not change what Administration says is running
+      # on a host that has not migrated -- three rows would start claiming to be
+      # "built with the platform" while three standalone stacks went on serving
+      # every request.
+      SYSIBLE_INTEGRATED: ${SYSIBLE_INTEGRATED:-0}
     volumes:
       # Root-equivalent on the host. See the note above before adding anything here.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -309,8 +320,173 @@ services:
       # by construction); the target is the path it has on the HOST, because the
       # `docker compose` this service runs is resolved by the host daemon.
       - .:${SYSIBLE_SLOP_DIR:-/opt/sysible-src/sysible-linux-operations-platform}
+      # The updater's own small state: the automatic-update schedule and what
+      # the last run did. A VOLUME, not a file in the checkout -- writing to the
+      # git tree would make it dirty, and a dirty checkout is the thing that
+      # REFUSES updates. A scheduler that switches itself off the first time it
+      # runs is worse than no scheduler.
+      - updater-data:/data
     expose:
       - "8080"                     # internal only; never published
+
+  # ---- the three apps, built from this tree (profile: integrated) ----------
+  #
+  # These are the SAME three products that used to be separate git checkouts on
+  # the host, cloned by install.sh into /opt/sysible-src and brought up as three
+  # more compose projects. Their source is in apps/ now and they are built here.
+  #
+  # Behind a PROFILE, so nothing below runs unless you ask for it:
+  #
+  #     docker compose --profile integrated up -d --build
+  #
+  # A plain `docker compose up -d` is byte-for-byte what it was, which is what
+  # makes this safe to land on a host that is already running the three apps the
+  # old way: their container names and ports are taken, and two stacks competing
+  # for `sysible-controller` is not a thing to discover during an update. Migrate
+  # deliberately -- docs/INTEGRATED.md says how -- not by pulling.
+  #
+  # What changes when you do:
+  #
+  #   * SYSIBLE_BASE_PATH is a LITERAL per service, below, instead of one
+  #     variable read from whichever .env sat beside each app's compose file.
+  #     It is a BUILD argument baked into the console's JS bundle, and all three
+  #     apps read it from that one name -- one name, three different correct
+  #     answers. Getting it wrong produces a console that serves its page and
+  #     then asks for its assets at a path the gateway does not route: a blank
+  #     screen with every container healthy. That has now happened twice.
+  #
+  #   * the consoles are not published at all. The gateway reaches them over
+  #     this project's network by service name, so :8800 / :8810 / :8700 stop
+  #     existing on the host -- there is no longer an address at which the
+  #     gateway's security headers and the platform's login throttle can be
+  #     skipped. The Controller's AGENT API is still published, because managed
+  #     hosts across the network dial it.
+  #
+  #   * the Controller reaches Flashback and Baseline at flashback:8080 and
+  #     baseline:8080, on this network, instead of going back out through
+  #     host.docker.internal to ports published on the docker bridge.
+  controller:
+    profiles: ["integrated"]
+    build:
+      context: ./apps/controller
+      args:
+        # EMPTY, not "/" -- vite falls back to a relative base that is correct
+        # both at the root and under /controller/. A "/" here re-bakes an
+        # absolute /assets/... and the console comes up blank behind the gateway.
+        SYSIBLE_BASE_PATH: ""
+    image: sysible-controller:latest
+    container_name: sysible-controller
+    restart: unless-stopped
+    ports:
+      # NOT the console (8800). The gateway reaches it at controller:8800 on this
+      # network; publishing it would put a door beside the front door.
+      #
+      # This one IS published and must stay published: it is the agent + CLI API
+      # that managed hosts across the network dial. Binding it would strand the
+      # fleet.
+      - "9000:9000"
+      # The self-service webserver portal, on the same number inside and out so
+      # the address the console prints is the address that works.
+      - "${SYSIBLE_PORTAL_PORT:-8090}:${SYSIBLE_PORTAL_PORT:-8090}"
+    environment:
+      SYSIBLE_CONTROLLER_HOSTNAMES: "${SYSIBLE_CONTROLLER_HOSTNAMES:-}"
+      # The address AGENTS reach this controller at, baked into enrollment
+      # bundles. Without it the controller advertises its docker-bridge IP and
+      # the bundles strand the fleet on an unreachable address.
+      SYSIBLE_CONTROLLER_ADDR: "${SYSIBLE_CONTROLLER_ADDR:-}"
+      SYSIBLE_PORTAL_PORT: "${SYSIBLE_PORTAL_PORT:-8090}"
+      # One stack, one trust boundary: the gateway asserts the identity and the
+      # app trusts it only with the matching shared secret.
+      SYSIBLE_WEBGUI_TRUST_SSO: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # Flashback and Baseline by SERVICE NAME on this network. Two services,
+      # two tokens: Flashback holds what a host's configuration WAS, Baseline
+      # declares what it must BECOME, and one token for both would make a
+      # compromise of either a compromise of both.
+      SYSIBLE_FLASHBACK_URL: "${SYSIBLE_FLASHBACK_URL:-http://flashback:8080}"
+      SYSIBLE_FLASHBACK_AGENT_TOKEN: "${SYSIBLE_FLASHBACK_AGENT_TOKEN:-}"
+      SYSIBLE_BASELINE_URL: "${SYSIBLE_BASELINE_URL:-http://baseline:8080}"
+      SYSIBLE_BASELINE_AGENT_TOKEN: "${SYSIBLE_BASELINE_AGENT_TOKEN:-}"
+      # Relay / bastion fallbacks; the console's own setting wins over these.
+      SYSIBLE_RELAY_HOST: "${SYSIBLE_RELAY_HOST:-}"
+      SYSIBLE_RELAY_USER: "${SYSIBLE_RELAY_USER:-}"
+      SYSIBLE_RELAY_PORT: "${SYSIBLE_RELAY_PORT:-}"
+      SYSIBLE_RELAY_IDENTITY: "${SYSIBLE_RELAY_IDENTITY:-}"
+      SYSIBLE_RELAY_ALLOWLIST: "${SYSIBLE_RELAY_ALLOWLIST:-}"
+      SYSIBLE_RELAY_OS: "${SYSIBLE_RELAY_OS:-}"
+    extra_hosts:
+      # A no-op where the name already resolves; kept so an operator can still
+      # point any of the URLs above at something published on the host.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - controller-data:/data
+
+  slep:
+    profiles: ["integrated"]
+    build:
+      context: ./apps/slep
+      dockerfile: deploy/Dockerfile
+      args:
+        SYSIBLE_BASE_PATH: "/slep/"
+    image: sysible-slep:latest
+    container_name: sysible-slep
+    restart: unless-stopped
+    environment:
+      SLEP_DATA_DIR: /data
+      # TLS stays ON even on the internal network: the gateway dials it over
+      # https (tls_insecure_skip_verify), and turning it off here would mean one
+      # of the two hops in front of a root-capable automation console is plain.
+      SLEP_TLS: "1"
+      SLEP_TLS_HOSTS: ${SLEP_TLS_HOSTS:-}
+      SLEP_TRUST_GATEWAY_AUTH: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+    expose:
+      - "8810"
+    volumes:
+      - slep-data:/data
+
+  connect:
+    profiles: ["integrated"]
+    build:
+      context: ./apps/connect
+      dockerfile: deploy/Dockerfile
+      args:
+        SYSIBLE_BASE_PATH: "/connect/"
+    image: sysible-connect:latest
+    container_name: sysible-connect
+    restart: unless-stopped
+    # HOST SHELL. "Local shell" means the HOST's shell, not a shell inside this
+    # container: backend/terminals.py enters PID 1's namespaces with nsenter,
+    # which needs PID 1 to BE the host's init and the capabilities to call
+    # setns. Understand what this grants before copying it -- a superuser in the
+    # browser terminal gets root on this host. That is what an operator means by
+    # "local shell", and it is the same class of access the updater beside it
+    # already holds through the Docker socket. SYSIBLE_CONNECT_HOST_SHELL=0
+    # refuses it, and the terminal then SAYS it is the container rather than
+    # looking like the host.
+    pid: host
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      SYSIBLE_CONNECT_DATA: /data
+      SYSIBLE_CONNECT_HOST_SHELL: "${SYSIBLE_CONNECT_HOST_SHELL:-1}"
+      SYSIBLE_CONNECT_TLS: "1"
+      SYSIBLE_CONNECT_TLS_HOSTS: ${SYSIBLE_CONNECT_TLS_HOSTS:-}
+      SYSIBLE_CONNECT_TRUST_GATEWAY_AUTH: "1"
+      SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
+      # The Controller by SERVICE NAME. install.sh used to write this host's LAN
+      # IP here, from one `ip route get` at install time, and persist it -- so a
+      # host that came back on a different subnet kept pointing Connect at an
+      # address nobody answers at. A service name on this network cannot go
+      # stale. (Not localhost: Connect's SSRF guard blocks loopback, correctly.)
+      SYSIBLE_CONNECT_CONTROLLER_URL: "${SYSIBLE_CONNECT_CONTROLLER_URL:-https://controller:9000}"
+    expose:
+      - "8700"
+    volumes:
+      - connect-data:/data
 
 volumes:
   slop-idp-data:
@@ -318,3 +494,17 @@ volumes:
   slop-caddy-config:
   flashback-data:
   baseline-data:
+  # The three vendored apps' data. Only created when the `integrated` profile
+  # brings them up; a plain `up` never names them.
+  #
+  # NOTE for a migration: compose namespaces a volume by PROJECT, so these are
+  # <this project>_controller-data and NOT the sysible-controller_sysible-data
+  # the standalone stack wrote to. An integrated stack starts with empty data
+  # unless the old volume is copied across first. docs/INTEGRATED.md has the
+  # commands; doing it by surprise is how a fleet's enrollment database goes
+  # missing.
+  controller-data:
+  slep-data:
+  connect-data:
+  # The automatic-update schedule and the record of what the last run did.
+  updater-data:

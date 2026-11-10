@@ -1,0 +1,400 @@
+import React, { useEffect, useRef, useState } from 'react'
+import { api, tail, getTheme } from '../api.js'
+import { parseRun } from '../runParse.js'
+import RunViz, { PipelineFlow, stageTally } from './RunViz.jsx'
+import { RunModal } from './Ide.jsx'
+import { Modal, Field } from '../ui.jsx'
+
+// Render ANSI-coloured tool output (ansible-playbook et al. emit SGR codes) as
+// coloured spans, so the run log reads like a real terminal instead of showing
+// raw escape sequences. Text is placed in React spans (auto-escaped); only
+// recognised SGR colour/bold codes affect styling.
+const ANSI_DARK = {
+  30: '#7d8ca3', 31: '#e5534b', 32: '#63c869', 33: '#e0a83b',
+  34: '#5580ee', 35: '#c678dd', 36: '#56b6c2', 37: '#e9f0f7',
+  90: '#7d8ca3', 91: '#ff7b72', 92: '#7ee787', 93: '#f2cc60',
+  94: '#79c0ff', 95: '#d2a8ff', 96: '#76e3ea', 97: '#ffffff',
+}
+// Darker, higher-contrast variants for a light log background.
+const ANSI_LIGHT = {
+  30: '#5b6472', 31: '#c0392b', 32: '#2e7d32', 33: '#a15c00',
+  34: '#2f57c4', 35: '#8e44ad', 36: '#0e7490', 37: '#1c2430',
+  90: '#7a8496', 91: '#c0392b', 92: '#2e7d32', 93: '#a15c00',
+  94: '#2f57c4', 95: '#8e44ad', 96: '#0e7490', 97: '#111827',
+}
+function ansiToSpans(text) {
+  const ANSI_COLORS = getTheme() === 'light' ? ANSI_LIGHT : ANSI_DARK
+  const out = []
+  let cur = { color: null, bold: false }
+  const re = /\u001b\[([0-9;]*)m/g   // ESC [ ... m  (SGR colour sequences)
+  let last = 0, m, k = 0
+  const emit = (t) => {
+    if (!t) return
+    out.push(<span key={k++} style={{ color: cur.color || undefined, fontWeight: cur.bold ? 600 : undefined }}>{t}</span>)
+  }
+  while ((m = re.exec(text)) !== null) {
+    emit(text.slice(last, m.index))
+    for (const c of (m[1] || '0').split(';').map(Number)) {
+      if (c === 0) cur = { color: null, bold: false }
+      else if (c === 1) cur.bold = true
+      else if (c === 22) cur.bold = false
+      else if (c === 39) cur.color = null
+      else if (ANSI_COLORS[c] !== undefined) cur.color = ANSI_COLORS[c]
+    }
+    last = re.lastIndex
+  }
+  emit(text.slice(last))
+  return out
+}
+
+export default function Runs({ onOpen }) {
+  const [runs, setRuns] = useState([])
+  const [busy, setBusy] = useState(0)
+  const load = () => api('runs').then((d) => setRuns(d.runs))
+  useEffect(() => { load() }, [])
+  // Relaunch a past run with the same engine/target/inventory/credential/vars and
+  // jump straight to the new run's log.
+  const rerun = async (id) => {
+    setBusy(id)
+    try { const d = await api(`runs/${id}/rerun`, { method: 'POST' }); onOpen(d.run_id) }
+    catch (e) { alert('Could not re-run: ' + (e.message || e)) } finally { setBusy(0) }
+  }
+  return (
+    <>
+      <h2>Runs</h2>
+      {runs.length === 0 ? <div className="muted">No runs yet.</div> : (
+        <table>
+          <thead><tr><th>#</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th><th></th></tr></thead>
+          <tbody>
+            {runs.map((r) => (
+              <tr key={r.id}>
+                <td><a onClick={() => onOpen(r.id)}>#{r.id}</a></td>
+                <td>{r.kind}</td><td className="muted">{r.target}</td>
+                <td><span className={'pill ' + r.status}>{r.status}</span></td>
+                <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
+                <td><button className="ghost sm" disabled={busy === r.id}
+                  title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
+                  onClick={() => rerun(r.id)}>{busy === r.id ? '…' : 'Re-run'}</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  )
+}
+
+export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
+  const [rerun, setRerun] = useState(null)   // {run, failed, tasks} → opens the Run dialog
+  const [text, setText] = useState('')
+  const [status, setStatus] = useState('pending')
+  const [engine, setEngine] = useState('ansible')
+  const [seedHosts, setSeedHosts] = useState([])
+  const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
+  const [showLog, setShowLog] = useState(() => { try { return localStorage.getItem('slep_run_showlog') !== '0' } catch { return true } })
+  const userToggledLog = useRef(false)
+  const toggleLog = () => { userToggledLog.current = true; setShowLog((v) => { const n = !v; try { localStorage.setItem('slep_run_showlog', n ? '1' : '0') } catch { /* ignore */ } return n }) }
+  const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
+  const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
+  const [stages, setStages] = useState({})     // runId -> {engine, text} for every stage (stacked viz)
+  const [maxed, setMaxed] = useState(false)    // pipeline view: one stage maximized (the selected runId) vs the side-by-side overview
+  const [projectId, setProjectId] = useState(null)  // this run's project (for enroll)
+  const [controllers, setControllers] = useState([])
+  const [enrollBusy, setEnrollBusy] = useState(false)
+  const [enrollPick, setEnrollPick] = useState(false)   // Controller picker open?
+  const [pickedCtrl, setPickedCtrl] = useState('')
+  const [stopping, setStopping] = useState(false)
+  const boxRef = useRef(null)
+  const splitRef = useRef(null)
+
+  // Drag the divider: translate the pointer x into a left-pane percentage.
+  const startDrag = (e) => {
+    e.preventDefault()
+    const move = (ev) => {
+      const el = splitRef.current; if (!el) return
+      const r = el.getBoundingClientRect()
+      const pct = ((ev.clientX - r.left) / r.width) * 100
+      setLeftPct(Math.min(80, Math.max(20, pct)))
+    }
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); document.body.style.cursor = '' }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  // Run metadata drives the viz: which engine, and (for Ansible) the inventory's
+  // hosts so the "reaching hosts" grid shows every target before it reports in.
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const r = await api(`runs/${runId}`)
+        if (!alive) return
+        setEngine(r.kind || 'ansible')
+        setGroupId(r.group_id || '')
+        setProjectId(r.project_id ?? null)
+        if (r.inventory_id) {
+          try {
+            const h = await api(`inventories/${r.inventory_id}/hosts`)
+            if (alive) setSeedHosts((h.hosts || []).map((x) => x.name))
+          } catch { /* inventory may be gone */ }
+        }
+      } catch { /* run detail optional */ }
+    })()
+    return () => { alive = false }
+  }, [runId])
+
+  // Connected Controllers, for the "Enroll → Controller" action on infra runs.
+  useEffect(() => {
+    api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {})
+  }, [])
+
+  // Register this run's project VMs into a Controller. Uses the project's chosen
+  // Controller; if none is set the backend says so and we open the picker.
+  const doEnroll = async (cid) => {
+    if (!projectId) return
+    setEnrollBusy(true)
+    try {
+      const body = cid ? { controller_id: Number(cid) } : {}
+      const d = await api(`infra/${projectId}/enroll`, { method: 'POST', json: body })
+      setEnrollPick(false)
+      const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
+      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
+    } catch (e) {
+      if (/no controller was chosen/i.test(e.message) && controllers.length) {
+        setPickedCtrl(String(controllers[0].id)); setEnrollPick(true)
+      } else {
+        alert(e.message + (/no controller/i.test(e.message) ? '\n\nConnect one under Controllers first.' : ''))
+      }
+    } finally { setEnrollBusy(false) }
+  }
+
+  // Part of a launched sequence? Poll the group's runs so the step strip shows the
+  // whole pipeline advancing (queued → running → success/failed/canceled).
+  useEffect(() => {
+    if (!groupId) { setSeq([]); return }
+    let alive = true
+    const tick = async () => {
+      try { const d = await api(`pipelines/runs/${groupId}`); if (alive) setSeq(d.runs || []) } catch { /* ignore */ }
+    }
+    tick()
+    const iv = setInterval(() => {
+      const done = seq.length && seq.every((s) => ['success', 'failed', 'canceled'].includes(s.status))
+      if (done) { clearInterval(iv); return }
+      tick()
+    }, 1500)
+    return () => { alive = false; clearInterval(iv) }
+  }, [groupId])
+
+  // Fetch every stage's log so the visualizer can show ALL stages at once (stacked),
+  // not just the selected one — finished stages once, running/queued ones polled.
+  useEffect(() => {
+    if (seq.length < 2) { setStages({}); return }
+    let alive = true
+    const timers = []
+    seq.forEach((s) => {
+      const load = async () => {
+        try {
+          const r = await tail(`runs/${s.id}/log?offset=0`)
+          if (!alive) return
+          setStages((m) => ({ ...m, [s.id]: { engine: s.kind, text: r.text || '' } }))
+          if (!['success', 'failed', 'canceled'].includes(r.status)) timers.push(setTimeout(load, 1500))
+        } catch { /* stage log optional */ }
+      }
+      load()
+    })
+    return () => { alive = false; timers.forEach(clearTimeout) }
+  }, [seq.map((s) => s.id + ':' + s.status).join(',')])   // eslint-disable-line
+
+  // Auto-advance a sequence: when this step finishes successfully, follow the
+  // pipeline to the next step's run (e.g. Terraform apply → the Ansible configure
+  // screen) so the whole cadence plays out without clicking each pill. Reset the
+  // one-shot guard whenever we land on a new run.
+  const advancedRef = useRef(false)
+  useEffect(() => { advancedRef.current = false }, [runId])
+  useEffect(() => {
+    if (advancedRef.current || status !== 'success' || !groupId || seq.length < 2 || !onOpenRun) return
+    const idx = seq.findIndex((s) => s.id === runId)
+    const next = idx >= 0 ? seq[idx + 1] : null
+    if (next && ['running', 'queued'].includes(next.status)) {
+      advancedRef.current = true
+      onOpenRun(next.id)
+    }
+  }, [status, seq, runId, groupId, onOpenRun])
+
+  // A pipeline lays its stages out side by side as one window, which wants the full
+  // pane width — so default the log pane hidden for a pipeline (until the operator
+  // toggles it themselves). A lone run keeps their saved preference.
+  useEffect(() => {
+    if (seq.length > 1 && !userToggledLog.current) setShowLog(false)
+  }, [seq.length])
+
+  useEffect(() => {
+    let alive = true, offset = 0, acc = ''
+    ;(async () => {
+      while (alive) {
+        let r
+        try {
+          r = await tail(`runs/${runId}/log?offset=${offset}`)
+        } catch (e) {
+          // An expired session makes tail() throw (see api.js). Stop the loop
+          // rather than spin on a rejection until the page reloads.
+          if (alive) { acc += '\n' + (e.message || 'the log stream stopped'); setText(acc) }
+          break
+        }
+        if (!alive) break
+        if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }
+        offset = r.next; setStatus(r.status)
+        if (['success', 'failed', 'canceled'].includes(r.status)) break
+        await new Promise((res) => setTimeout(res, 1000))
+      }
+    })()
+    return () => { alive = false }
+  }, [runId])
+
+  const model = parseRun(engine, text)
+  // Hosts that failed/were unreachable, and the earliest task that broke — for a
+  // targeted "re-run failed hosts" (--limit + --start-at-task).
+  const failedHosts = engine === 'ansible'
+    ? Object.entries(model.hosts || {}).filter(([, h]) => (h.failed || 0) > 0 || (h.unreachable || 0) > 0 || h.last === 'failed' || h.last === 'unreachable').map(([n]) => n)
+    : []
+  let firstFail = Infinity
+  for (const h of failedHosts) {
+    const i = ((model.hostTasks || {})[h] || []).findIndex((s) => s === 'failed' || s === 'unreachable')
+    if (i >= 0) firstFail = Math.min(firstFail, i)
+  }
+  const startAt = firstFail < Infinity ? (model.taskList?.[firstFail]?.name || '') : ''
+  const done = ['success', 'failed', 'canceled'].includes(status)
+
+  // Stop an in-flight run — kills the engine's process and marks it canceled.
+  const stopRun = async () => {
+    if (!confirm(`Stop run #${runId}? The engine process is terminated and the run is marked canceled.`)) return
+    setStopping(true)
+    try { await api(`runs/${runId}/cancel`, { method: 'POST' }); setStatus('canceled') }
+    catch (e) { alert(e.message) } finally { setStopping(false) }
+  }
+
+  const openRerun = async () => {
+    const run = await api(`runs/${runId}`)
+    setRerun({ run, limit: failedHosts.join(','), startAt, tasks: (model.taskList || []).map((t) => t.name) })
+  }
+
+  return (
+    <>
+      <div className="row" style={{ marginBottom: 10 }}>
+        {/* Inside a maximized pipeline stage, back returns to the side-by-side pipeline
+            overview (not out to the runs list) — so "click into a stage → back" lands on
+            the whole run, matching the maximize/restore the ⤡ glyph also does. */}
+        {maxed && seq.length > 1
+          ? <button className="ghost sm" title="Back to the whole pipeline run"
+              onClick={() => setMaxed(false)}>← Pipeline</button>
+          : <button className="ghost sm" title={`Back to ${backLabel}`} onClick={onBack}>← {backLabel}</button>}
+        <h2 style={{ margin: 0 }}>Run #{runId}</h2>
+        <span className="muted">{engine}</span>
+        {(() => {
+          // On a partial failure show "1/3 failed" rather than a blanket "failed".
+          const t = status === 'failed' ? stageTally(engine, model) : null
+          return <span className={'pill ' + status} title={t ? t.title : status}>{t ? t.label : status}</span>
+        })()}
+        <div className="spacer" />
+        <button className="ghost sm" title={showLog ? 'Hide the log pane' : 'Show the log pane'}
+          onClick={toggleLog}>{showLog ? 'Hide log' : 'Show log'}</button>
+        {!done && (
+          <button className="danger sm" disabled={stopping} title="Terminate this run"
+            onClick={stopRun}>{stopping ? 'Stopping…' : 'Stop'}</button>
+        )}
+        {done && failedHosts.length > 0 && (
+          <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
+            onClick={openRerun}>Re-run failed ({failedHosts.length})</button>
+        )}
+        {projectId && ((engine === 'terraform' && done) ||
+                       seq.some((s) => s.kind === 'terraform' && ['success', 'failed'].includes(s.status))) && (
+          <button className="primary sm" disabled={enrollBusy}
+            title="Register the VMs this apply created into a connected Controller"
+            onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll hosts → Controller'}</button>
+        )}
+      </div>
+      {enrollPick && (
+        <Modal title="Enroll VMs into a Controller" onClose={() => setEnrollPick(false)}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            This project has no Controller set. Pick one to register the applied VMs into.
+          </p>
+          <Field label="Controller">
+            <select value={pickedCtrl} onChange={(e) => setPickedCtrl(e.target.value)}>
+              {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+            <button className="ghost sm" onClick={() => setEnrollPick(false)}>Cancel</button>
+            <button className="primary sm" disabled={enrollBusy || !pickedCtrl}
+              onClick={() => doEnroll(pickedCtrl)}>{enrollBusy ? 'Enrolling…' : 'Enroll →'}</button>
+          </div>
+        </Modal>
+      )}
+      {/* Visualize and Log together, with a draggable divider to size them (they
+          stack on narrow screens). Each pane scrolls on its own. */}
+      <div className="run-split" ref={splitRef}
+        style={{ gridTemplateColumns: showLog ? `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` : '1fr' }}>
+        <div className="run-pane">
+          <div className="pane-title">Visualize</div>
+          {/* The whole pipeline as a stage flow at the top (a nav + summary), then
+              EVERY stage's visualization — a lone run shows its one viz; a pipeline
+              lays all stages side by side as ONE window (columns, Terraform → Enroll),
+              so the entire run is visible at a glance rather than a long scroll. */}
+          <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
+          {seq.length > 1 ? (
+            // Overview: all stages side by side. Click a stage to MAXIMIZE it — that
+            // stage becomes the selected run (log follows) and fills the pane; the
+            // top strip still navigates, and a ⤡ restores the overview.
+            <div className={'stage-row' + (maxed ? ' maximized' : '')}>
+              {(maxed ? seq.filter((s) => s.id === runId) : seq).map((s) => {
+                const st = stages[s.id]
+                const m = st ? parseRun(st.engine, st.text) : null
+                const tally = stageTally(s.kind, m)
+                return (
+                  <div key={s.id} className={'stage-block' + (s.id === runId ? ' current' : '') + (maxed ? ' maximized' : '')}>
+                    <div className="stage-block-h"
+                      title={maxed ? 'Restore the side-by-side overview' : 'Maximize this stage'}
+                      onClick={() => {
+                        if (maxed) { setMaxed(false); return }
+                        if (s.id !== runId && onOpenRun) onOpenRun(s.id)
+                        setMaxed(true)
+                      }}>
+                      <b>{s.kind}</b><span className="muted"> · {s.target}</span>
+                      <span className={'pill ' + s.status} title={tally ? tally.title : s.status}>
+                        {tally ? tally.label : s.status}
+                      </span>
+                      <span className="stage-max" aria-hidden="true">{maxed ? '⤡' : '⤢'}</span>
+                    </div>
+                    <div className="stage-block-body">
+                      {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />
+                        : <div className="muted" style={{ padding: 8 }}>waiting…</div>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="run-scroll">
+              {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+                : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
+            </div>
+          )}
+        </div>
+        {showLog && <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />}
+        {showLog && (
+          <div className="run-pane">
+            <div className="pane-title">Log</div>
+            <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
+          </div>
+        )}
+      </div>
+      {rerun && (
+        <RunModal project={{ id: rerun.run.project_id }} onClose={() => setRerun(null)}
+          onLaunched={(id) => { setRerun(null); onOpenRun ? onOpenRun(id) : onBack() }}
+          initial={{ engine: rerun.run.kind, target: rerun.run.target, inventory_id: rerun.run.inventory_id,
+            credential_id: rerun.run.credential_id, limit: rerun.limit, start_at_task: rerun.startAt, tasks: rerun.tasks }} />
+      )}
+    </>
+  )
+}
