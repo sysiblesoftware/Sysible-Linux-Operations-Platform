@@ -18,7 +18,7 @@
       "label": "Sysible Controller",
       "repo": "https://github.com/sysiblesoftware/Sysible-Controller",
       "branch": "main",
-      "commit": "684d0fe026a4",
+      "commit": "a05150d0c59b",
       "compose_service": "controller",
       "path_prefix": ""
     },
@@ -34,7 +34,7 @@
       "label": "Sysible Connect",
       "repo": "https://github.com/sysiblesoftware/sysible-connect",
       "branch": "main",
-      "commit": "07585a6257cf",
+      "commit": "793f8082d60d",
       "compose_service": "connect",
       "path_prefix": "/connect/"
     }

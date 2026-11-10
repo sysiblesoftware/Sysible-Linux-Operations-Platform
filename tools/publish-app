@@ -81,7 +81,19 @@ def _copy_tree(src: str, dst: str) -> None:
         shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
     for name in os.listdir(src):
         s, d = os.path.join(src, name), os.path.join(dst, name)
-        shutil.copytree(s, d) if os.path.isdir(s) else shutil.copy2(s, d)
+        # symlinks=True / follow_symlinks=False, both of them. The defaults
+        # DEREFERENCE: a symlink is copied as a regular file holding its
+        # target's contents. The Controller ships deploy/sysible_ctl as a link
+        # to deploy/sysiblectl, and publishing it with the defaults turned a
+        # 10-byte link into a 93KB copy -- a 1863-line diff in a publish whose
+        # real change was 44 lines, and two files that would drift apart from
+        # then on. Caught by --dry-run, which is what it is for.
+        if os.path.islink(s):
+            os.symlink(os.readlink(s), d)
+        elif os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True)
+        else:
+            shutil.copy2(s, d, follow_symlinks=False)
 
 
 def status(doc: dict, keys: list[str]) -> int:

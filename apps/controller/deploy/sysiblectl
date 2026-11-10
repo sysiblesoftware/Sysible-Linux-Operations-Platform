@@ -72,7 +72,19 @@ _p_volume_declared() { case "$1" in
   # flashback-data is Flashback's version store and KEEPS ITS PRE-REBRAND NAME.
   # It holds every version of every config file on every host, so it was not
   # renamed with the product — see the SLOP compose file.
-  slop)          echo "slop-idp-data slop-caddy-data slop-caddy-config flashback-data baseline-data" ;;
+  #
+  # controller-data / slep-data / connect-data exist only on a host running the
+  # INTEGRATED layout, where the three apps are services of the platform's own
+  # compose project rather than three stacks of their own. They are listed here
+  # all the same: this is the fallback for when compose cannot be reached, and a
+  # volume that is not on the host simply has nothing to back up — while one
+  # that IS on the host and missing from this list is a fleet database left out
+  # of a backup that reported success. That is the exact failure baseline-data
+  # had, and it is what the test beside this file now checks for.
+  #
+  # updater-data holds the automatic-update schedule and the record of the last
+  # run. Small, and genuinely lost if it is skipped.
+  slop)          echo "slop-idp-data slop-caddy-data slop-caddy-config flashback-data baseline-data controller-data slep-data connect-data updater-data" ;;
 esac; }
 
 # The project name compose uses for $CFG. With no -p (and _compose passes none),

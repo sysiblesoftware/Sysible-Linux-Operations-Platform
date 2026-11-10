@@ -354,3 +354,55 @@ def test_the_updater_only_sees_a_vendored_app_when_the_host_opted_in(monkeypatch
     apps = _apps_module(monkeypatch, REPO, tmp_path / "empty", integrated=True)
     assert all(apps.is_vendored(k) for k in ("controller", "slep", "connect")), \
         "the host opted in and the updater still does not see the apps"
+
+
+# ---- publishing back out --------------------------------------------------
+def test_publishing_preserves_a_symlink_as_a_symlink(tmp_path):
+    """shutil's defaults DEREFERENCE.
+
+    The Controller ships deploy/sysible_ctl as a link to deploy/sysiblectl.
+    Published with copytree's defaults it arrived as a 93KB regular file -- a
+    1863-line diff in a publish whose real change was 44 lines, and two files
+    that drift apart from then on. The dry run is what caught it; this is what
+    keeps it caught.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        "publish_app",
+        importlib.machinery.SourceFileLoader(
+            "publish_app", os.path.join(REPO, "tools", "publish-app")))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "deploy").mkdir(parents=True)
+    (dst / ".git").mkdir(parents=True)
+    (dst / "stale.txt").write_text("should be removed")
+    (src / "deploy" / "real").write_text("x" * 5000)
+    os.symlink("real", src / "deploy" / "link")
+    (src / "plain.txt").write_text("hello")
+
+    mod._copy_tree(str(src), str(dst))
+
+    link = dst / "deploy" / "link"
+    assert link.is_symlink(), "a symlink was published as a regular file"
+    assert os.readlink(link) == "real"
+    assert (dst / "plain.txt").read_text() == "hello"
+    # A file REMOVED here has to disappear there too; copying over the top
+    # would leave it behind forever.
+    assert not (dst / "stale.txt").exists(), "a deleted file survived the publish"
+    assert (dst / ".git").is_dir(), "the target's git directory was wiped"
+
+
+def test_the_vendored_controller_keeps_its_cli_alias():
+    """deploy/sysible_ctl is a LINK. Vendoring that dereferenced it would put
+    two 93KB copies of the CLI in this repository, and a fix applied to one of
+    them."""
+    link = os.path.join(REPO, "apps", "controller", "deploy", "sysible_ctl")
+    assert os.path.islink(link), f"{link} is not a symlink any more"
+    assert os.readlink(link) == "sysiblectl"
+    out = subprocess.run(["git", "ls-files", "-s",
+                          "apps/controller/deploy/sysible_ctl"],
+                         cwd=REPO, capture_output=True, text=True).stdout
+    assert out.startswith("120000"), \
+        f"git is tracking the alias as a regular file: {out.strip()!r}"
