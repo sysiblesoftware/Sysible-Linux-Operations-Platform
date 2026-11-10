@@ -29,23 +29,47 @@ ALLOWLIST: dict[str, tuple[str, str, str]] = {
              "SYSIBLE_SLOP_DIR"),
 }
 
-# Products and services that ship INSIDE another product's checkout. They are
-# not separate allowlist entries, and deliberately not separately UPDATABLE:
-# they are built from one git tree by one compose file, so an "Update Flashback"
-# button would rebuild the whole stack while claiming to touch one service — the
-# kind of control that is worse than no control.
+# The services inside each product's checkout: compose service name, label, and
+# a line saying what the thing is for.
 #
-# They ARE listed, with their own section on the updates screen, because an
-# operator otherwise cannot see that Flashback and Baseline are installed at
-# all, what they do, which of them is the one that is down, or that updating
-# SLOP is what updates them.
+# EVERY product has an entry, the three that run exactly one service included.
+# That is the point of the table, not an accident of it. SLOP used to be the only
+# key here, so SLOP was the only row on Software & services that could say what
+# was inside it: its row expanded into a grid of cards with its own heading and
+# footnote while the other three were a single terse line. Reported, looking at
+# it: "Looks like we made connect, controller and slep then added slop. It
+# doesn't look unified." The page did read that way, and the cause was here — one
+# key in this dict — not in the stylesheet. A product now differs from its
+# neighbour by the NUMBER in its disclosure, never by the shape of its row.
+#
+# These are deliberately not separately UPDATABLE: a product is built from one git
+# tree by one compose file, so an "Update Flashback" button would rebuild the
+# whole stack while claiming to touch one service — the kind of control that is
+# worse than no control. Restart/stop/start/recreate ARE per-service, for a
+# product that has more than one; for a product that is one service, the
+# product's own Manage panel already runs exactly that command, so the module
+# card is informational and jobs.module_action_refusal says so.
 #
 # A module key IS its compose service name. That is what makes the lifecycle
-# actions below exact — `docker compose restart baseline` touches one service —
-# and it is checked against the real compose file by
-# tests/test_updater_modules.py, so a renamed service cannot leave a section
-# here pointing at nothing.
+# actions exact — `docker compose restart baseline` touches one service — and it
+# is checked against the real compose file: for SLOP by
+# tests/test_module_sections_name_real_services.py in this repo, and for the
+# other three by a test in each app's own repository, which is the only place
+# that app's compose file can be read. A renamed service cannot leave a section
+# here pointing at nothing without one of those failing.
 MODULES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "controller": (
+        ("controller", "Controller",
+         "The console, its API, and the agent endpoint every managed host reports to"),
+    ),
+    "slep": (
+        ("slep", "Engineering Platform",
+         "Ansible and Terraform: playbooks, inventories, and every run's output"),
+    ),
+    "connect": (
+        ("connect", "Connect",
+         "The browser terminal and file workspace, and its SSH sessions to the fleet"),
+    ),
     "slop": (
         ("gateway", "Gateway",
          "Caddy: the platform's single front door, TLS, and every app's route"),

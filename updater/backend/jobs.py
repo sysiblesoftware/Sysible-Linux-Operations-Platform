@@ -461,6 +461,18 @@ def module_action_refusal(key: str, module: str, action: str) -> str | None:
         return f"unknown action '{action}'"
     if not apps.is_module(key, module):
         return f"'{module}' is not a module of {key}"
+    # A product that IS one service. Every product now declares its services, so
+    # the Controller, SLEP and Connect each have a card — which is what makes
+    # their rows the same shape as the platform's. What they must NOT each grow
+    # is a second set of lifecycle buttons: `docker compose restart controller`
+    # in a one-service project is the same command the row's own Manage panel
+    # already runs, and two sets of buttons that do the same thing is how a
+    # console teaches an operator not to trust what it says. The card stays
+    # informational; the row acts.
+    if len(apps.module_keys(key)) < 2:
+        return (f"{key} is a single service, so this is the same command as the "
+                f"product's own Restart/Stop/Start/Recreate — use those on the "
+                f"{key} row rather than two sets of buttons for one container.")
     if module in _MODULE_NO_ACTIONS:
         return (f"the {module} is the service carrying out this request — acting on it "
                 f"from here would kill the call mid-run. Use 'sysiblectl {key} restart' "

@@ -30,6 +30,8 @@ import warnings
 
 import pytest
 
+from _browser import chromium_path
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -212,7 +214,7 @@ def test_a_missing_app_gets_a_sentence_not_a_json_dump(tmp_path):
         time.sleep(0.1)
     assert server.started, "test server did not come up"
     try:
-        chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+        chrome = chromium_path()
         with sync_playwright() as p:
             try:
                 b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))

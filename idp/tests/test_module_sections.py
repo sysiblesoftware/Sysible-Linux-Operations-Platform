@@ -31,6 +31,8 @@ import warnings
 
 import pytest
 
+from _browser import chromium_path
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -63,14 +65,57 @@ MODULES = [
     {"key": "updater", "label": "Updater", "detail": "Holds the Docker socket",
      "services": [{"service": "updater", "state": "running", "status": "Up 2 days",
                    "health": ""}],
-     "actions": []},
+     "actions": [],
+     # The reason, in the words of the table that refuses it. The console used to
+     # write this sentence itself from a guess at which rule had fired; it is
+     # carried on the payload now, so there is one copy of it.
+     "refusals": {a: ("the updater is the service carrying out the request — "
+                      "acting on it from here would kill the call mid-run. Use "
+                      "'sysiblectl slop restart' on the host.")
+                  for a in ("restart", "stop", "start", "recreate")}},
 ]
+_NO_STOP = {"stop": ("stopping it would leave no way to start it again from the "
+                     "console. Use Restart, or 'sysiblectl slop stop' on the host.")}
+for _m in MODULES:
+    if _m["key"] in ("gateway", "idp"):
+        _m["refusals"] = dict(_NO_STOP)
+    elif "refusals" not in _m:
+        _m["refusals"] = {}
+
+# A single-service product's card, with the refusal that keeps it informational:
+# `docker compose restart controller` in a one-service project is the same
+# command the row's own Manage panel already runs, and two sets of buttons doing
+# the same thing is how a console teaches an operator not to trust it.
+def _solo(key, label, detail):
+    return [{"key": key, "label": label, "detail": detail,
+             "services": [{"service": key, "state": "running",
+                           "status": "Up 2 days", "health": ""}],
+             "actions": [],
+             "refusals": {a: (f"{key} is a single service, so this is the same "
+                              "command as the product's own Restart/Stop/Start/"
+                              "Recreate — use those on the row.")
+                          for a in ("restart", "stop", "start", "recreate")}}]
+
 
 APPS = [
     {"key": "controller", "label": "Sysible Controller", "installed": True,
      "checked": True, "available": False, "current": "c0689c8", "can_update": False,
-     "actions": ["restart", "stop", "start", "recreate"], "modules": [],
-     "services": [{"service": "controller", "state": "running"}]},
+     "actions": ["restart", "stop", "start", "recreate"],
+     "modules": _solo("controller", "Controller", "The console and its API"),
+     "services": [{"service": "controller", "state": "running",
+                   "status": "Up 2 days", "health": ""}]},
+    {"key": "slep", "label": "Sysible Linux Engineering Platform", "installed": True,
+     "checked": True, "available": False, "current": "e8aaa4e", "can_update": False,
+     "actions": ["restart", "stop", "start", "recreate"],
+     "modules": _solo("slep", "Engineering Platform", "Ansible and Terraform"),
+     "services": [{"service": "slep", "state": "running",
+                   "status": "Up 2 days", "health": ""}]},
+    {"key": "connect", "label": "Sysible Connect", "installed": True,
+     "checked": True, "available": False, "current": "d5bcb9b", "can_update": False,
+     "actions": ["restart", "stop", "start", "recreate"],
+     "modules": _solo("connect", "Connect", "Browser terminal workspace"),
+     "services": [{"service": "connect", "state": "running",
+                   "status": "Up 2 days", "health": ""}]},
     {"key": "slop", "label": "Sysible Linux Operations Platform", "installed": True,
      "checked": True, "available": False, "current": "538a889", "can_update": False,
      "actions": ["restart", "start", "recreate"], "modules": MODULES,
@@ -122,11 +167,78 @@ def test_the_stale_hand_written_module_list_is_gone(page):
         "the hard-coded module list is back in the product label"
 
 
-def test_a_product_with_no_modules_gets_an_empty_hidden_container(page):
-    """Not every product has modules. Its container must exist (ensureRow and
-    paintModules both address it by id) and must not draw an empty box."""
-    assert re.search(r"class=prod-mods id='mods-connect' hidden", page), \
-        "a module-less product renders an empty section box"
+def test_every_product_gets_the_same_row_shape(page):
+    """Reported, looking at this screen: "Looks like we made connect, controller
+    and slep then added slop. It doesn't look unified."
+
+    It did not, and the cause was one key in updater/backend/apps.py:MODULES.
+    SLOP was the only product with services declared, so SLOP was the only row
+    that could say what was inside it — its row expanded into a grid of described
+    cards with its own heading and footnote while the other three were a single
+    terse line. The page read as three products with a fourth bolted on.
+
+    Every product declares its services now, so every row carries the same
+    disclosure and differs from its neighbour by the NUMBER in it.
+    """
+    for key in ("controller", "slep", "connect", "slop"):
+        assert f"id='mods-{key}'" in page, f"{key} has no services grid"
+        assert f"data-disc='{key}'" in page, f"{key} has no services disclosure"
+        assert f"id='sv-{key}'" in page, f"{key} has no count to put in it"
+    counts = dict(re.findall(r"id='sv-([a-z]+)'>Services \((\d+)\)", page))
+    assert counts == {"controller": "1", "slep": "1", "connect": "1", "slop": "6"}, \
+        f"the rows do not all carry a service count: {counts}"
+
+
+def test_every_services_grid_starts_OPEN(page):
+    """Open, not collapsed — and this is the one decision on this screen worth
+    spelling out, because collapsing is the obvious thing to do with four rows
+    and nine cards.
+
+    These cards exist because of "I don't see a flashback tile", asked twice,
+    about a screen where the only trace of Flashback was the digit 6 in
+    "6 services: all running". Shutting them by default would make the page
+    shorter and put the answer back behind a click, which is most of the way
+    back to the complaint. What makes the rows uniform is the COUNT sitting in
+    the same control on every row; what makes them useful is the cards being
+    open. An operator who wants a row quiet can shut it, and it stays shut
+    across the poll that repaints the row.
+    """
+    for key in ("controller", "slep", "connect", "slop"):
+        assert not re.search(rf"class=prod-mods id='mods-{key}' hidden", page), \
+            f"{key}'s services grid is shut before the page has been used"
+        assert re.search(rf"id='d-{key}'[^>]*aria-expanded=true", page), \
+            f"{key}'s disclosure claims to be shut while its grid is showing"
+
+
+def test_a_shut_row_is_remembered_as_shut_not_read_off_the_dom(page):
+    """The row is rebuilt on every poll, so the handler cannot ask the DOM what
+    state it was in — the node it would ask has been replaced. It has to hold
+    the answer itself, and paintModules has to re-apply it after rebuilding the
+    grid, or a collapse silently springs back open a few seconds later."""
+    assert "discShut" in page, "nothing remembers which rows were shut"
+    assert re.search(r"var open\s*=\s*!discShut\[key\]", page), \
+        "open is not derived from the remembered state"
+    # paintModules must end by re-applying it; otherwise the rebuild wins.
+    m = re.search(r"function paintModules\(a\)\{.*?\n  \}", page, re.S)
+    assert m, "paintModules is gone"
+    assert "applyDisc(a.key)" in m.group(0), \
+        "paintModules rebuilds the grid without re-applying the shut state"
+
+
+def test_the_arrow_is_drawn_from_the_state_it_claims(page):
+    """The mark turns in CSS, off aria-expanded, rather than being written by
+    the click handler. Two writers for one fact is how a shut grid ends up under
+    an arrow pointing down — and it is what lets the SERVER-rendered row show the
+    right mark with no JS having run."""
+    assert ".svc-tw[aria-expanded=true]::before" in page, \
+        "the disclosure arrow is not derived from aria-expanded"
+    # The glyph appears exactly once on the page: in that CSS declaration. A
+    # second occurrence means something is also writing it by hand. (Matching on
+    # `.textContent` instead would catch `td.textContent`, which is the status
+    # cell and has nothing to do with this.)
+    assert page.count("\u25b8") == 1, (
+        f"the arrow glyph appears {page.count(chr(0x25b8))} times; it belongs "
+        "only in the CSS rule that derives it from aria-expanded")
 
 
 # ---- no per-module update, and the page says why ---------------------------
@@ -145,8 +257,14 @@ def test_the_screen_says_why_a_module_is_filed_under_a_product(page):
     """
     assert "checkout gets its own row above" in page, \
         "nothing on the screen says why the other products are not in this list"
-    assert "Inside this checkout" in page, \
-        "the section header does not name what the modules are inside OF"
+    # The "INSIDE THE … CHECKOUT" heading is gone, deliberately. It existed when
+    # SLOP was the only product with cards and they needed saying what they were
+    # inside OF; the disclosure that opens them carries that on every row now,
+    # and a heading repeating it is a second label for one thing.
+    assert "Inside this checkout" not in page, \
+        "the SLOP-only section heading is back, beside the disclosure that says it"
+    assert "mods-h" not in page, \
+        "the heading's class is still being emitted or styled"
     # ...and the long explanation states the principle, not just the list.
     assert "what updates together" in page, \
         "the help text does not give the rule the grouping follows"
@@ -232,7 +350,7 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
         path = urlsplit(url).path
         return path == "/" or path.startswith(("/brand/", "/favicon"))
     try:
-        chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+        chrome = chromium_path()
         with sync_playwright() as p:
             try:
                 b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
@@ -289,22 +407,45 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
                 assert "No container" in vz, \
                     f"a module with no container at all reads as running: {vz!r}"
 
-                # The aggregate line above the sections must not say the same
-                # thing again: "5 services: 1 not running — baseline (exited)"
-                # directly above a Baseline section reading "Exited" is one
-                # sentence twice, and the sections are the better one.
-                agg = (pg.text_content("#s-slop") or "").strip()
-                assert "baseline" not in agg.lower(), (
-                    "the summary line repeats what the sections already say: "
-                    + repr(agg))
-                # A service with no section is the one thing this line is still
-                # for. Filtering the covered ones must not drop it.
-                assert "extra-sidecar" in agg, (
-                    "a running service with no section vanished from the page "
-                    "entirely: " + repr(agg))
-                # ...but a product WITHOUT sections still gets its summary.
-                assert "service" in (pg.text_content("#s-controller") or ""), \
-                    "a module-less product lost its service summary"
+                # The disclosure's label must not say the same thing again:
+                # "6 services: 1 not running — baseline (exited)" directly above
+                # a Baseline card reading "Exited" is one sentence twice, and the
+                # card is the better one. What the label DOES carry is the count
+                # and the rollup, which is what makes all four rows uniform.
+                lab = (pg.text_content("#sv-slop") or "").strip()
+                assert "baseline" not in lab.lower(), (
+                    "the disclosure label repeats what the cards already say: "
+                    + repr(lab))
+                # Three things are wrong in this fleet: baseline exited, the
+                # visualizer has no container at all, and extra-sidecar exited.
+                # A service that compose ps does not list never reaches the
+                # not-running filter, so the rollup used to say "2" over three
+                # visibly-bad cards, one of which says "No container" outright.
+                assert "3 not running" in lab, (
+                    "the rollup misses a declared service with no container at "
+                    f"all \u2014 missing is not better than exited: {lab!r}")
+                # A service with NO card is the one thing a line of prose is
+                # still for: it is inside the count and nowhere else, so without
+                # this it would be a number with nothing behind it. It sits
+                # beside the control (#sn-), not in it.
+                note = (pg.text_content("#sn-slop") or "").strip()
+                assert "extra-sidecar" in note, (
+                    "a running service with no card vanished from the page "
+                    "entirely: " + repr(note))
+                # The count has to AGREE with what is behind the control: six
+                # cards plus the one uncovered service.
+                assert "(7)" in lab, (
+                    "the count does not include the service that has no card, "
+                    f"so it disagrees with what the disclosure opens onto: {lab!r}")
+                # Every row carries the same control, the single-service ones
+                # included — that is the change. And its own description, which
+                # is what .prod-meta holds now that the count has moved.
+                for key, n in (("controller", 1), ("slep", 1), ("connect", 1)):
+                    one = (pg.text_content(f"#sv-{key}") or "")
+                    assert f"({n})" in one, \
+                        f"{key} has no service count in its disclosure: {one!r}"
+                    assert (pg.text_content(f"#s-{key}") or "").strip(), \
+                        f"{key}'s row has no description"
 
                 # Controls are behind the row's existing Manage toggle, not six
                 # new ones, and not on screen by default.
@@ -329,9 +470,24 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
                     assert "Stop" not in got["mod-slop-idp"], got
                     # The updater is the service running the command.
                     assert got["mod-slop-updater"] == [], got
+                    # The reason shown IS the reason the payload carried, not a
+                    # sentence the page composed from a guess at which rule had
+                    # fired. Asserted against the stub's own string rather than
+                    # against prose: the page used to hard-code two explanations,
+                    # and when a third rule appeared it stated the wrong one with
+                    # complete confidence.
                     why = pg.text_content("#mod-slop-updater")
-                    assert "carries out the request" in why, \
-                        f"a module with no controls does not say why: {why!r}"
+                    expected = next(m["refusals"]["restart"] for m in MODULES
+                                    if m["key"] == "updater")
+                    assert expected in why, (
+                        "the refusal shown is not the one the updater gave:\n"
+                        f"  shown:    {why!r}\n  expected: {expected!r}")
+                    # And the single-service products say THEIR reason, which is
+                    # a different one — the row's own buttons already run it.
+                    solo = pg.text_content("#mod-controller-controller")
+                    assert "same command as the product's own" in solo, (
+                        "a one-service product does not explain why its card has "
+                        f"no buttons: {solo!r}")
 
                     # A click posts for THAT module, not the platform.
                     pg.on("dialog", lambda d: d.accept())
@@ -431,7 +587,7 @@ def test_an_unreachable_updater_recovers_on_its_own(tmp_path):
         time.sleep(0.1)
     assert server.started
     try:
-        chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+        chrome = chromium_path()
         with sync_playwright() as p:
             try:
                 b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))

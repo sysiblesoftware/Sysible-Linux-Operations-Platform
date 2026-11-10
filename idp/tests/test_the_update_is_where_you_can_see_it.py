@@ -26,6 +26,8 @@ import warnings
 
 import pytest
 
+from _browser import chromium_path
+
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -127,7 +129,7 @@ def live(tmp_path, monkeypatch):
 
 
 def _open(pw, width=1600, height=900):
-    chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+    chrome = chromium_path()
     try:
         b = pw.chromium.launch(**({"executable_path": chrome} if chrome else {}),
                                args=["--no-sandbox"])

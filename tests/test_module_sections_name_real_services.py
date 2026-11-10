@@ -24,6 +24,8 @@ Run: pytest tests/    (from the repo root)
 import os
 import re
 
+import pytest
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -36,20 +38,90 @@ def _compose_services() -> set[str]:
     return set(re.findall(r"^  ([a-z0-9][a-z0-9_-]*):", body, re.M))
 
 
-def test_every_module_key_is_a_real_compose_service(app_module):
+# Every product has a MODULES entry now, not just SLOP, which is what gives all
+# four rows on Software & services the same shape. Only SLOP's services are
+# declared by THIS repository's compose file, though; the other three are
+# declared in their own repositories, which this test cannot read.
+#
+# So the pair is split. The strict check below covers SLOP. For the other three,
+# the compose file is read wherever it can be found on this machine — a sibling
+# checkout, the installed tree under SYSIBLE_SRC_DIR, or a vendored apps/<key>/ —
+# and when none of those exist the expected name is still pinned here, so a
+# rename in apps.py alone cannot pass unnoticed. The other half of the pair lives
+# in each app's own repository, as a test that fails there when its compose
+# service is renamed.
+_OTHER_PRODUCTS = {
+    "controller": ("controller", ("sysible-controller", "Sysible-Controller")),
+    "slep": ("slep", ("sysible-linux-engineering-platform",)),
+    "connect": ("connect", ("sysible-connect",)),
+}
+
+_COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml",
+                  "compose.yml", "compose.yaml")
+
+
+def _find_compose(key: str) -> str | None:
+    """That product's compose file on this machine, or None."""
+    import os
+    roots = []
+    # Vendored into this repo (see the apps/ layout), then siblings of it, then
+    # the installed tree.
+    roots.append(os.path.join(REPO, "apps", key))
+    parent = os.path.dirname(REPO)
+    for dirname in _OTHER_PRODUCTS[key][1]:
+        roots.append(os.path.join(parent, dirname))
+        roots.append(os.path.join(
+            os.environ.get("SYSIBLE_SRC_DIR", "/opt/sysible-src"), dirname))
+    for root in roots:
+        for sub in ("", "deploy", os.path.join("deploy", "docker")):
+            for name in _COMPOSE_NAMES:
+                cand = os.path.join(root, sub, name)
+                if os.path.isfile(cand):
+                    return cand
+    return None
+
+
+def _services_in(path: str) -> set[str]:
+    text = open(path, encoding="utf-8").read()
+    body = text.split("\nservices:", 1)[1]
+    body = re.split(r"\n(?=[a-zA-Z])", body)[0]
+    return set(re.findall(r"^  ([a-z0-9][a-z0-9_-]*):", body, re.M))
+
+
+def test_every_slop_module_key_is_a_real_compose_service(app_module):
     services = _compose_services()
     assert "baseline" in services and "flashback" in services, \
         f"the compose file this test reads has no baseline/flashback: {sorted(services)}"
     with app_module("updater", "backend.apps") as apps:
-        for product, mods in apps.MODULES.items():
-            for key, label, _detail in mods:
-                assert key in services, (
-                    f"{label} is listed inside {product} as service {key!r}, which is "
-                    f"not in docker-compose.yml ({sorted(services)}). Its section "
-                    f"would render with no state and every button would refuse.")
+        for key, label, _detail in apps.MODULES["slop"]:
+            assert key in services, (
+                f"{label} is listed inside slop as service {key!r}, which is "
+                f"not in docker-compose.yml ({sorted(services)}). Its card "
+                f"would render with no state and every button would refuse.")
 
 
-def test_no_compose_service_is_left_without_a_section(app_module):
+@pytest.mark.parametrize("product", sorted(_OTHER_PRODUCTS))
+def test_another_products_module_key_is_its_compose_service(app_module, product):
+    expected, _dirs = _OTHER_PRODUCTS[product]
+    with app_module("updater", "backend.apps") as apps:
+        keys = [k for k, _l, _d in apps.MODULES.get(product, ())]
+    assert keys == [expected], (
+        f"{product} declares services {keys} on Software & services; this test "
+        f"knows it as {[expected]}. If the product really gained or renamed a "
+        f"service, change it HERE as well — and in that product's own repo, "
+        f"where the compose file is.")
+    path = _find_compose(product)
+    if path is None:
+        pytest.skip(f"no {product} checkout on this machine to read; the name is "
+                    f"pinned above and verified in that product's own repository")
+    found = _services_in(path)
+    assert found == {expected}, (
+        f"{path} declares {sorted(found)}, but Software & services gives "
+        f"{product} one card keyed {expected!r}. A card whose key is not a "
+        f"compose service renders with no state and refuses every button.")
+
+
+def test_no_slop_compose_service_is_left_without_a_section(app_module):
     """The sections ARE the inventory. A service that ships in the stack and has
     no section is a module an operator cannot see, which is the complaint this
     whole screen change came from."""
@@ -86,9 +158,24 @@ def test_a_module_is_not_separately_updatable(app_module):
     with app_module("updater", "backend.apps") as apps:
         for product, mods in apps.MODULES.items():
             for key, _lbl, _d in mods:
+                # A product filed inside ANOTHER product. That is the real
+                # contradiction: it would get an updatable row of its own AND a
+                # card inside a row that rebuilds it, so two controls would claim
+                # the same git tree.
+                #
+                # A product sharing a name with its OWN single service is not
+                # that, and is the normal case: the Controller's compose service
+                # is called `controller` because the project has one. The check
+                # used to be a flat "no module key is in the allowlist", which
+                # was equivalent while SLOP was the only product with services
+                # declared — and started failing the moment every product
+                # declared its own, for a name collision that means nothing.
+                if key == product:
+                    continue
                 assert key not in apps.ALLOWLIST, (
-                    f"{key} is both a module of {product} and its own updatable "
-                    f"product — one of the two is wrong")
+                    f"{key} is a card inside {product} AND its own updatable "
+                    f"product — updating {product} would rebuild it behind the "
+                    f"back of its own row")
     updater_src = open(os.path.join(REPO, "updater/backend/app.py"), encoding="utf-8").read()
     assert "/api/update/{key}/{module}" not in updater_src
     idp_src = open(os.path.join(REPO, "idp/updates.py"), encoding="utf-8").read()

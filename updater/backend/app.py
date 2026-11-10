@@ -204,6 +204,17 @@ def status(request: Request, refresh: bool = False) -> dict:
             mod["services"] = by_service.get(mod["key"], [])
             mod["actions"] = (jobs.module_actions(key, mod["key"])
                               if compose is not None else [])
+            # WHY a module offers fewer buttons than its neighbour, in the words
+            # of the table that refuses them. The console used to write this
+            # explanation itself, from two hard-coded sentences about the
+            # gateway and the updater — so the moment a third reason existed
+            # (a single-service product, whose row already runs that exact
+            # command) the page confidently gave the wrong one. One refusal
+            # table, one explanation, carried here.
+            mod["refusals"] = ({a: jobs.module_action_refusal(key, mod["key"], a)
+                                for a in jobs.ACTIONS
+                                if jobs.module_action_refusal(key, mod["key"], a)}
+                               if compose is not None else {})
         out.append(row)
     return {"apps": out, "job": jobs.current()}
 

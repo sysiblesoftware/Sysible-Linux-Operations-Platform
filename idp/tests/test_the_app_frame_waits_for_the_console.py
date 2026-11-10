@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from _browser import chromium_path
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "idp"))
 
@@ -70,7 +72,7 @@ def browser():
         from playwright.sync_api import sync_playwright
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"playwright unavailable ({e})")
-    chrome = os.environ.get("SYSIBLE_TEST_CHROMIUM")
+    chrome = chromium_path()
     with sync_playwright() as p:
         try:
             b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}),

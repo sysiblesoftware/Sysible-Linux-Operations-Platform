@@ -795,16 +795,42 @@ margin-top:.45rem;padding-top:.6rem;border-top:1px dashed var(--line)}
    — one on a phone, two at the old 760px, three or four at the administration
    width — with no breakpoint to keep in step. The heading and the footnote
    span, because they describe the whole set. */
-.prod-mods{grid-column:1/-1;margin-top:.55rem;padding-top:.55rem;
-border-top:1px dashed var(--line);
+/* The services disclosure. It is on EVERY product row, which is the change:
+   the service count used to be a line of prose in .prod-meta for three products
+   and was REPLACED outright on the fourth by the card grid, so SLOP's row was
+   the one row with no count and the only one that was taller than one line. The
+   count lives in this control now, and the control is the same on all four. A
+   product differs by the number in it.
+
+   Collapsed by default, including SLOP's six: the page's length stopped being
+   decided by whichever product happens to be last. */
+.prod-disc{grid-column:1/-1;margin-top:.5rem;padding-top:.5rem;
+border-top:1px dashed var(--line);display:flex;align-items:center;
+gap:.4rem;flex-wrap:wrap}
+.svc-tw{appearance:none;background:none;border:0;padding:.15rem .1rem;margin:0;
+font:inherit;font-size:12.5px;color:var(--muted);cursor:pointer;
+display:flex;align-items:center;gap:.4rem;border-radius:6px;text-align:left}
+.svc-tw:hover{color:var(--text)}
+.svc-tw:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* The arrow is drawn from aria-expanded rather than written by the handler, so
+   the mark and the state it claims cannot drift apart — and the SERVER-rendered
+   row gets the right one without the JS having run at all. */
+.svc-tw::before{content:"▸";display:inline-block;font-size:9px;
+line-height:1;color:var(--faint);transition:transform .12s ease}
+.svc-tw[aria-expanded=true]::before{transform:rotate(90deg)}
+.prod-disc .disc-note{color:var(--faint);font-size:11.5px;line-height:1.45;
+min-width:0}
+/* No dashed border and no top padding of its own: the disclosure above it draws
+   the separator, and when the grid is collapsed there must be nothing left
+   behind to hint at a second rule. */
+.prod-mods{grid-column:1/-1;margin-top:.5rem;
 display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
 gap:.4rem;align-content:start}
 .prod-mods[hidden]{display:none}
-.prod-mods>.mods-h,.prod-mods>.mods-f{grid-column:1/-1}
-.prod-mods>.mods-h{color:var(--faint);font-size:11.5px;letter-spacing:.04em;
-text-transform:uppercase;margin-bottom:.45rem}
+.prod-mods>.mods-f{grid-column:1/-1}
 .mod{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.2rem .8rem;
-align-items:start;padding:.5rem .6rem;border-radius:9px;background:var(--panel2)}
+align-items:start;padding:.55rem .65rem;border-radius:9px;background:var(--panel2);
+border:1px solid var(--line)}
 /* The grid gap spaces them now; a sibling margin would add to it, and only
    between rows, so the columns would not line up. */
 .mod+.mod{margin-top:0}
@@ -2116,7 +2142,13 @@ _UPDATES_JS = r"""
     if(!a.installed){
       td.appendChild(st('unk','Not installed', 'on this host'));
       hide('b-'+a.key); hide('m-'+a.key);
-      paintServices(a); paintActions(a);
+      // paintModules too. The updater reports a product's services even when it
+      // is NOT installed here, deliberately \u2014 so the screen can say what
+      // would come with it rather than silently omitting it. This branch used to
+      // return before painting them, which left the server-rendered cards sitting
+      // on "checking\u2026" for as long as the page stayed open: the one state
+      // that is neither true nor ever going to change.
+      paintServices(a); paintActions(a); paintModules(a);
       return;
     }
     if(a.checked===false){
@@ -2149,43 +2181,73 @@ _UPDATES_JS = r"""
   function hide(id){ var e=document.getElementById(id); if(e)e.hidden=true; }
   // What is actually RUNNING. "Up to date" said nothing about whether the thing
   // was up, which is how a stack could sit dead behind a green row.
+  // The services summary, which is now the LABEL OF THE DISCLOSURE rather than
+  // a line of prose in the row. It used to be both: three products got
+  // "2 services: all running" in .prod-meta, and the fourth had that line
+  // replaced outright by its card grid \u2014 so the one product with the most to
+  // say was the only one that never said how many services it had, and the only
+  // one whose row was taller than a line. One control, every row, count inside.
   function paintServices(a){
-    var box=document.getElementById('s-'+a.key); if(!box)return;
-    box.innerHTML='';
+    var lbl=document.getElementById('sv-'+a.key);
+    var note=document.getElementById('sn-'+a.key);
+    if(note) note.innerHTML='';
+    if(!lbl) return;
+    lbl.innerHTML='';
     var svcs=a.services||[];
-    // Anything that has its own section below says it better there, so this line
-    // does not repeat it: "5 services: 1 not running \u2014 baseline (exited)"
-    // directly above a Baseline section reading "Exited" is the same sentence
-    // twice. What it does NOT do is drop a service silently \u2014 a compose
-    // override can add one this build has no section for, and that one is
-    // exactly the service worth naming here.
-    if((a.modules||[]).length){
-      var covered={};
-      a.modules.forEach(function(m){ covered[m.key]=1; });
-      var rest=svcs.filter(function(s){ return !covered[s.service]; });
-      if(!rest.length) return;
-      // Its own sentence rather than the counted one below: "1 service: 1 not
-      // running" reads badly, and what matters about these is their names.
-      box.appendChild(el('span',null,'Not covered by a section: '));
-      rest.forEach(function(s, i){
-        if(i) box.appendChild(el('span',null,', '));
-        var n=el('span',null, s.service+' ('+(s.state||'?')+')');
-        n.style.color = (s.state==='running') ? '#4ec07a' : '#e0a83a';
-        box.appendChild(n);
-      });
+    var mods=a.modules||[];
+    // A service the declared cards do not cover. A compose override on the host
+    // can add one, and it has to be counted or the number in the control would
+    // disagree with what is behind it \u2014 which is the specific sin this
+    // control was introduced to stop.
+    var covered={};
+    mods.forEach(function(m){ covered[m.key]=1; });
+    var extra=svcs.filter(function(s){ return !covered[s.service]; });
+    // Cards plus uncovered, NOT `compose ps` length: a declared service with no
+    // container is absent from compose ps and still has a card reading "No
+    // container", so counting rows of ps output would say "Services (5)" above
+    // six cards. The count is what the disclosure opens onto.
+    var n = mods.length ? (mods.length + extra.length) : svcs.length;
+    lbl.appendChild(el('span',null,'Services ('+n+')'));
+    if(!a.installed || !svcs.length){
+      // No count claim about a stack nothing has looked at. The disclosure still
+      // renders \u2014 the cards behind it name what WOULD be installed, which is
+      // the one thing this screen can honestly say about a product that is not.
+      lbl.appendChild(el('span','sub', ' \u00b7 '+(a.installed
+        ? 'no containers' : 'not installed')));
       return;
     }
-    if(!svcs.length){ return; }
     var bad=svcs.filter(function(s){return s.state!=='running';});
-    var txt=svcs.length+' service'+(svcs.length===1?'':'s')+': ';
-    var s1=el('span',null,txt);
-    box.appendChild(s1);
-    var lbl=el('span',null, bad.length ? (bad.length+' not running') : 'all running');
-    lbl.style.color = bad.length ? '#e0a83a' : '#4ec07a';
-    box.appendChild(lbl);
-    if(bad.length){
-      box.appendChild(el('span','sub',' \u2014 '+bad.map(function(s){
+    // A declared service with NO container is absent from `compose ps`, so it
+    // never reached this filter \u2014 and the rollup would read "2 not running"
+    // over three cards an operator can see are wrong, one of them saying "No
+    // container" in as many words. Missing entirely is not better than exited.
+    var gone=mods.filter(function(m){ return !(m.services||[]).length; });
+    var wrong=bad.length+gone.length;
+    var roll=el('span',null, wrong ? (wrong+' not running') : 'all running');
+    roll.style.color = wrong ? 'var(--amber)' : 'var(--ok)';
+    roll.style.fontWeight='600';
+    lbl.appendChild(el('span',null,' \u00b7 '));
+    lbl.appendChild(roll);
+    // Name only what has no card of its own. A card reading "Exited" directly
+    // below a label reading "\u2014 baseline (exited)" is one sentence twice, and
+    // the card is the better one: it also says what baseline IS. The rollup
+    // above still COUNTS it, so nothing is hidden \u2014 it is said once, in the
+    // place that says it best.
+    var namable = mods.length ? bad.filter(function(s){ return !covered[s.service]; })
+                             : bad;
+    if(namable.length){
+      lbl.appendChild(el('span','sub',' \u2014 '+namable.map(function(s){
         return s.service+' ('+(s.state||'?')+')';}).join(', ')));
+    }
+    // A service with no card. A compose override can add one this build has no
+    // entry for, and THAT is the service worth naming: it is in the count above
+    // and nowhere else, so without this line it would be a number with nothing
+    // behind it. Said beside the control, not inside it, so it is readable while
+    // the grid is still shut.
+    if(note && mods.length && extra.length){
+      note.appendChild(el('span',null,'\u00b7 no card for '+extra.map(function(s){
+        return s.service+' ('+(s.state||'?')+')';}).join(', ')
+        +' \u2014 added by a compose override on this host'));
     }
   }
   // Buttons come from the API's own allowlist, so a refused action can never be
@@ -2225,13 +2287,36 @@ _UPDATES_JS = r"""
   // The sections carry state and recovery controls but NO "Update now": one tree,
   // one compose file, one build. The footer line says so rather than leaving the
   // absence to be guessed at.
+  // Which product's services grid the operator has SHUT. Kept out here, not read
+  // off the DOM, because the row is REBUILT every poll: reading the old node's
+  // hidden flag would work right up until the repaint that replaced it.
+  //
+  // Shut, not open \u2014 i.e. open is the default. Collapsing every row by
+  // default would have made the page shorter at the cost of the request these
+  // cards exist to answer: "I don't see a flashback tile", asked twice, about a
+  // screen where the only trace of Flashback was the number 6. Putting the names
+  // back behind a click is most of the way back to that. The count in the
+  // control is what makes the rows uniform; the cards being open is what makes
+  // them useful, and an operator who wants a row quiet can shut it.
+  var discShut={};
+  function applyDisc(key){
+    var box=document.getElementById('mods-'+key);
+    var tw=document.getElementById('d-'+key);
+    var open=!discShut[key];
+    if(box) box.hidden=!open;
+    // The arrow is drawn from this attribute in CSS, so setting it here is all
+    // that turns the mark \u2014 one source of truth for "is it open".
+    if(tw) tw.setAttribute('aria-expanded', open?'true':'false');
+  }
   function paintModules(a){
     var box=document.getElementById('mods-'+a.key); if(!box)return;
     var mods=a.modules||[];
     box.innerHTML='';
     if(!mods.length){ box.hidden=true; return; }
-    box.hidden=false;
-    box.appendChild(el('div','mods-h','Inside the '+(a.label||a.key)+' checkout'));
+    // The "INSIDE THE … CHECKOUT" heading is gone. It was there when SLOP was
+    // the only product with cards and they needed saying what they were inside
+    // OF; the disclosure that opens them now carries that, on every row, and a
+    // heading repeating it is a second label for one thing.
     mods.forEach(function(m){ box.appendChild(modRow(a,m)); });
     // Says WHY these six are here and the other products are not. The footer
     // used to give only the consequence ("updating it updates all of them"),
@@ -2241,12 +2326,29 @@ _UPDATES_JS = r"""
     // the rule. This screen groups by WHAT UPDATES TOGETHER, which is a
     // different question from what is a product, and it is the question the
     // screen exists to answer.
-    box.appendChild(el('div','mods-f', a.installed
-      ? ('These ship inside the one ' + (a.label||a.key) + ' checkout and are '
-         + 'built by one compose file, so updating it updates all of them '
-         + 'together \u2014 there is no separate update for a module. A product '
-         + 'with its own checkout gets its own row above.')
-      : ('These come with ' + (a.label||a.key) + ', which is not installed here.')));
+    // Only where there is something to explain. The footnote answers "why is
+    // Flashback filed under another product instead of getting its own row" \u2014
+    // a fair question about SIX services built from one tree, and no question at
+    // all under a product that is one service. Printing it under every card grid
+    // would be back to the shape this screen was fixed to get rid of: boilerplate
+    // that scales with the list rather than with what the list needs said.
+    if(mods.length > 1){
+      box.appendChild(el('div','mods-f', a.installed
+        ? ('These ship inside the one ' + (a.label||a.key) + ' checkout and are '
+           + 'built by one compose file, so updating it updates all of them '
+           + 'together \u2014 there is no separate update for a module. A product '
+           + 'with its own checkout gets its own row above.')
+        : ('These come with ' + (a.label||a.key) + ', which is not installed here.')));
+    } else if(!a.installed){
+      box.appendChild(el('div','mods-f',
+        (a.label||a.key) + ' is not installed on this host.'));
+    }
+    // Collapsed unless this operator opened it, and it STAYS as they left it
+    // across the poll that repaints this row every few seconds. Owning the
+    // hidden flag here, in the one place that rebuilds the grid, is what keeps
+    // a repaint from quietly reopening six cards under someone reading the row
+    // above \u2014 or shutting the one they just opened.
+    applyDisc(a.key);
   }
   function modRow(a, m){
     var row=el('div','mod'); row.id='mod-'+a.key+'-'+m.key;
@@ -2293,17 +2395,37 @@ _UPDATES_JS = r"""
       });
       row.appendChild(box);
     }
-    // Why a module offers fewer buttons than its neighbour. Only while managing,
-    // because that is the only time the gap is visible.
+    // Why a module offers fewer buttons than its neighbour \u2014 in the words of
+    // the table that refuses them, carried on the payload. This used to be two
+    // sentences written here: one about cutting the console off, one about the
+    // service that carries out the request. Both were guesses at which rule had
+    // fired, and the moment a third rule existed (a product that IS one service,
+    // whose own row already runs that command) the page stated the wrong reason
+    // with complete confidence. Only while managing, because that is the only
+    // time the gap is visible.
     if(a.installed){
+      var why=m.refusals||{};
       var missing=['restart','stop','start','recreate'].filter(function(x){
         return acts.indexOf(x)<0; });
-      if(missing.length){
-        row.appendChild(el('div','mod-why', acts.length
-          ? ('No '+missing.join('/')+' from here \u2014 it would cut the console off '
-             + 'from this service. Use the host.')
-          : ('No controls from here \u2014 this is the service that carries out '
-             + 'the request. Use sysiblectl '+a.key+' on the host.')));
+      // Distinct reasons, in the order the buttons would have appeared. Four
+      // refused actions usually share one reason; printing it four times would
+      // be noise.
+      var seen={}, lines=[];
+      missing.forEach(function(x){
+        var r=why[x];
+        if(r && !seen[r]){ seen[r]=1; lines.push(r); }
+      });
+      if(lines.length){
+        lines.forEach(function(r){
+          row.appendChild(el('div','mod-why', 'No '+missing.filter(function(x){
+            return why[x]===r; }).join('/')+' from here \u2014 '+r));
+        });
+      } else if(missing.length){
+        // Refused with no reason given: the updater is older than this console,
+        // or newer. Say that the gap is real rather than inventing why.
+        row.appendChild(el('div','mod-why',
+          'No '+missing.join('/')+' from here \u2014 the updater did not say why. '
+          + 'Use sysiblectl '+a.key+' on the host.'));
       }
     }
     return row;
@@ -2354,6 +2476,15 @@ _UPDATES_JS = r"""
     var list=document.getElementById('updtable'); if(!list||list._bound)return;
     list._bound=true;
     list.addEventListener('click',function(ev){
+      // The services disclosure. Same delegated listener as Manage: a repaint
+      // cannot lose it and cannot stack a second one on top of it.
+      var d=ev.target.closest('button[data-disc]');
+      if(d){
+        var dk=d.getAttribute('data-disc');
+        discShut[dk]=!discShut[dk];
+        applyDisc(dk);
+        return;
+      }
       var t=ev.target.closest('button[data-manage]'); if(!t)return;
       var key=t.getAttribute('data-manage');
       var box=document.getElementById('a-'+key); if(!box)return;
@@ -2414,10 +2545,26 @@ _UPDATES_JS = r"""
     tog.hidden=true;
     act.appendChild(btn); act.appendChild(tog);
     var meta=el('div','prod-meta'); meta.id='s-'+a.key;
+    if(a.blurb) meta.textContent=a.blurb;
     var ctrls=el('div','prod-controls'); ctrls.id='a-'+a.key; ctrls.hidden=true;
-    var mods=el('div','prod-mods'); mods.id='mods-'+a.key; mods.hidden=true;
+    // Same disclosure as every server-rendered row, built the same way. A
+    // product the skeleton did not know about must not be the one row that is
+    // shaped differently \u2014 that is the defect this whole screen change is.
+    var disc=el('div','prod-disc');
+    var tw=el('button','svc-tw'); tw.id='d-'+a.key;
+    tw.setAttribute('type','button');
+    tw.setAttribute('data-disc',a.key);
+    tw.setAttribute('aria-expanded','true');
+    tw.setAttribute('aria-controls','mods-'+a.key);
+    var swrap=el('span',null); swrap.id='sv-'+a.key;
+    swrap.appendChild(el('span',null,'Services'));
+    tw.appendChild(swrap);
+    var snote=el('span','disc-note'); snote.id='sn-'+a.key;
+    disc.appendChild(tw); disc.appendChild(snote);
+    var mods=el('div','prod-mods'); mods.id='mods-'+a.key;
     row.appendChild(name); row.appendChild(state); row.appendChild(act);
-    row.appendChild(meta); row.appendChild(ctrls); row.appendChild(mods);
+    row.appendChild(meta); row.appendChild(ctrls);
+    row.appendChild(disc); row.appendChild(mods);
     list.appendChild(row);
   }
   // Shared with _PILL_POLL, which does the same thing from its own fetch on
@@ -2954,6 +3101,15 @@ _UPDATES_JS = r"""
 # only thing that can go wrong is drift; tests/test_updates_modules.py compares
 # the two tables and fails when they disagree.
 _SKELETON_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
+    "controller": (
+        ("controller", "Controller"),
+    ),
+    "slep": (
+        ("slep", "Engineering Platform"),
+    ),
+    "connect": (
+        ("connect", "Connect"),
+    ),
     "slop": (
         ("gateway", "Gateway"),
         ("idp", "Sign-in & accounts"),
@@ -2964,22 +3120,48 @@ _SKELETON_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
     ),
 }
 
+# One line per product, saying what the thing IS. Three of these rows were a bare
+# product name and the fourth was a name over a grid of six described cards, so
+# the page read as three entries and one tree rather than four peers. A name like
+# "Sysible Linux Engineering Platform" does not tell an operator what it does;
+# the row has space for a line that does.
+_BLURBS: dict[str, str] = {
+    "controller": "Fleet management console",
+    "slep": "Infrastructure automation \u2014 Ansible and Terraform",
+    "connect": "Browser terminal workspace",
+    "slop": "The single front door \u2014 gateway, sign-in and the platform's own tools",
+}
+
 
 def _skeleton_modules(key: str) -> str:
-    """The module sections as flat HTML. No state and no buttons: both come from
-    the updater, and inventing either here would mean the page claiming
-    something it has not asked anything about yet."""
+    """The services grid as flat HTML, COLLAPSED, plus the disclosure that opens
+    it. No state and no buttons: both come from the updater, and inventing either
+    here would mean the page claiming something it has not asked anything about
+    yet.
+
+    Every product gets both, the ones running a single service included. That is
+    the point: the grid used to exist for SLOP alone, so SLOP's row was the only
+    one with a shape, and this function returned an empty hidden box for the
+    other three.
+    """
     mods = _SKELETON_MODULES.get(key, ())
+    disc = (f"<div class=prod-disc>"
+            f"<button type=button class=svc-tw id='d-{key}' data-disc='{key}' "
+            f"aria-expanded=true aria-controls='mods-{key}'>"
+            f"<span id='sv-{key}'>Services"
+            + (f" ({len(mods)})" if mods else "")
+            + f"</span></button>"
+            f"<span class=disc-note id='sn-{key}'></span>"
+            f"</div>")
     if not mods:
-        return f"<div class=prod-mods id='mods-{key}' hidden></div>"
+        return disc + f"<div class=prod-mods id='mods-{key}' hidden></div>"  # nothing to open onto
     inner = "".join(
         f"<div class=mod id='mod-{key}-{mk}'>"
         f"<div class=mod-name>{escape(lbl)}</div>"
         f"<div class=mod-state><span class='st unk'><b>checking&hellip;</b></span></div>"
         f"</div>"
         for mk, lbl in mods)
-    return (f"<div class=prod-mods id='mods-{key}'>"
-            f"<div class=mods-h>Inside this checkout</div>{inner}</div>")
+    return disc + f"<div class=prod-mods id='mods-{key}'>{inner}</div>"
 
 
 def _updates_page(sess: sqlite3.Row, tok: str) -> str:
@@ -3003,7 +3185,11 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
             f"<button class='btn ghost sm' id='m-{key}' data-manage='{key}' "
             f"aria-expanded=false hidden>Manage</button>"
             f"</div>"
-            f"<div class=prod-meta id='s-{key}'></div>"
+            # The one-line description, server-rendered: it is fixed copy, not
+            # something to wait on the updater for. .prod-meta used to hold the
+            # "N services: all running" line — which is now the label of the
+            # disclosure below, on every row rather than three of them.
+            f"<div class=prod-meta id='s-{key}'>{escape(_BLURBS.get(key, ''))}</div>"
             f"<div class=prod-controls id='a-{key}' hidden></div>"
             + _skeleton_modules(key)
             + "</div>")
@@ -3029,16 +3215,20 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "back except the host. Restart it instead.</p>"
         "<p>This screen groups by <b>what updates together</b>, which is not the "
         "same question as what is a product. A row is one git checkout on this "
-        "host; <b>Inside this checkout</b> lists the services built from it. "
-        "Flashback, Baseline and the Visualizer are products in their own right "
-        "and appear there because their source ships in the Operations Platform "
-        "checkout &mdash; Connect and the Controller have checkouts of their own, "
-        "so they get rows. There is no per-module <b>Update now</b> on "
-        "purpose: they are one git tree built by one compose file, so updating "
-        "any of them is updating all of them. Their restart/stop/start/recreate "
-        "<i>are</i> per-service, and appear under <b>Manage</b> with the "
-        "product&rsquo;s own; a module whose controls would cut this console off "
-        "from itself says so in place of them.</p>"
+        "host, and its <b>Services</b> disclosure lists what that checkout "
+        "builds &mdash; one service for most rows, six for the Operations "
+        "Platform. Flashback, Baseline and the Visualizer are products in their "
+        "own right and appear inside that row because their source ships in the "
+        "Operations Platform checkout; Connect and the Controller have checkouts "
+        "of their own, so they get rows. There is no per-service <b>Update "
+        "now</b> on purpose: a checkout is one git tree built by one compose "
+        "file, so updating any of its services is updating all of them. "
+        "Restart/stop/start/recreate <i>are</i> per-service for a checkout that "
+        "builds more than one, and appear under <b>Manage</b> with the "
+        "product&rsquo;s own; where a service has none, the reason is given in "
+        "place of them &mdash; either acting on it would cut this console off "
+        "from itself, or the row&rsquo;s own buttons already run exactly that "
+        "command.</p>"
         "</details>")
     if not updates.configured():
         note += ("<p class=sub style='color:#e0a83a'>The updater service is not deployed, so "
