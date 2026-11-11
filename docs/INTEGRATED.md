@@ -17,11 +17,35 @@ of this compose project, built from `apps/`.
 
 ## An existing host
 
+**`sudo ./tools/migrate-to-integrated` does all of this.** Read on if you would
+rather drive it yourself, or want to know what the script is doing.
+
 A host that already runs the three apps has their container names and their
 ports taken. Two stacks competing for `sysible-controller` is not something to
 discover part-way through an update, so the switch is deliberate and it is not
 reversible without doing it again in the other direction. Read all of this
 first.
+
+### The short way
+
+```sh
+git -C . pull
+sudo ./tools/migrate-to-integrated --dry-run    # says exactly what it would do
+sudo ./tools/migrate-to-integrated
+```
+
+That is every step below, in the right order, with the two parts nobody can
+write down correctly done for you: what your volumes are really called, and
+getting the data into the new ones **before** anything starts. It backs up
+first, it never deletes a volume, it leaves the old checkouts alone, and
+`--rollback` puts the host back.
+
+It refuses, with nothing stopped, if the checkout has not been pulled, if the
+shared secret is missing, if a destination volume already has data in it, or if
+a backup fails.
+
+The rest of this section is the same thing by hand, for when you want to see
+each step.
 
 ### 1. Find out what your data is actually called
 

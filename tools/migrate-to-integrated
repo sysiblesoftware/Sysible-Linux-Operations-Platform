@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+# Move this host from three app checkouts to the one-checkout layout.
+#
+#   sudo ./tools/migrate-to-integrated --dry-run     # say what it would do
+#   sudo ./tools/migrate-to-integrated               # do it
+#   sudo ./tools/migrate-to-integrated --rollback    # put it back
+#
+# docs/INTEGRATED.md describes this as a sequence of commands to run by hand.
+# This is that sequence, with the two steps that are easy to get wrong done for
+# you: finding out what your volumes are really called, and getting the data
+# into the new ones before anything has written to them.
+#
+# WHAT IT TOUCHES. It stops and REMOVES the three app containers, creates three
+# new volumes, copies your data into them, and brings the platform up with its
+# apps built from apps/. It does not delete a volume, ever, and it does not
+# delete the old checkouts. Everything it does is reversible with --rollback for
+# as long as those two are still there.
+#
+# THE ORDER MATTERS. The data goes into the new volumes BEFORE the apps start,
+# not after. Started first, each app initialises its own volume -- a fresh
+# database, and a fresh TLS certificate. Agents PIN the Controller's
+# certificate, so a copy made after that would be racing an init that has
+# already broken the fleet.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APPS=(controller slep connect)
+declare -A OLD_CONTAINER=( [controller]=sysible-controller [slep]=sysible-slep [connect]=sysible-connect )
+declare -A PRETTY=( [controller]="Sysible Controller" [slep]="Engineering Platform" [connect]="Sysible Connect" )
+
+DRY=0; ROLLBACK=0; ASSUME_YES=0
+BACKUP_DIR="/var/backups/sysible/pre-integrated-$(date +%Y%m%d-%H%M%S)"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY=1 ;;
+    --rollback) ROLLBACK=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
+    --backup-dir=*) BACKUP_DIR="${arg#*=}" ;;
+    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf 'unknown argument: %s (try --help)\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
+C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+[ -t 1 ] || { C_OK=''; C_WARN=''; C_ERR=''; C_DIM=''; C_OFF=''; }
+say()  { printf '%s\n' "$*"; }
+hdr()  { printf '\n%s== %s%s\n' "$C_OK" "$*" "$C_OFF"; }
+ok()   { printf '   %sok%s  %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { printf '   %s!%s   %s\n' "$C_WARN" "$C_OFF" "$*"; }
+die()  { printf '\n%sSTOPPED:%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+# Every mutating command goes through this, so --dry-run is the SAME code path
+# with the last step removed rather than a second description of it that can
+# drift from what actually runs.
+run() {
+  if [ "$DRY" -eq 1 ]; then printf '   %s$ %s%s\n' "$C_DIM" "$*" "$C_OFF"; return 0; fi
+  "$@"
+}
+run_sh() {
+  if [ "$DRY" -eq 1 ]; then printf '   %s$ %s%s\n' "$C_DIM" "$1" "$C_OFF"; return 0; fi
+  bash -c "$1"
+}
+
+# --------------------------------------------------------------- preflight --
+preflight() {
+  hdr "Checking this host"
+  [ "$(id -u)" -eq 0 ] || die "run this with sudo: it stops containers and writes to $BACKUP_DIR"
+  command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
+  docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
+  if docker compose version >/dev/null 2>&1; then DC=(docker compose)
+  elif command -v docker-compose >/dev/null 2>&1; then DC=(docker-compose)
+  else die "neither 'docker compose' nor 'docker-compose' is available"; fi
+  ok "docker and ${DC[*]}"
+
+  [ -f "$HERE/docker-compose.yml" ] || die "$HERE is not a platform checkout (no docker-compose.yml)"
+  [ -f "$HERE/docker-compose.integrated.yml" ] \
+    || die "this checkout predates the integrated layout. Pull it first: git -C $HERE pull"
+  for a in "${APPS[@]}"; do
+    [ -d "$HERE/apps/$a" ] || die "apps/$a is missing from this checkout. Pull it first: git -C $HERE pull"
+  done
+  ok "apps/ and the integrated overlay are here"
+
+  if [ ! -f "$HERE/.env" ] || ! grep -q '^SYSIBLE_SSO_SHARED_SECRET=.' "$HERE/.env" 2>/dev/null; then
+    die "no SYSIBLE_SSO_SHARED_SECRET in $HERE/.env -- compose would refuse to start. Run install.sh first."
+  fi
+  ok "the shared secret is set"
+
+  PROJECT="$(basename "$HERE")"; PROJECT="${PROJECT,,}"; PROJECT="${PROJECT//[^a-z0-9_-]/}"
+  ok "compose project name: $PROJECT"
+}
+
+# Which volume each old app container is actually using, asked of the container
+# rather than guessed. Compose namespaces a volume by project and the project
+# name depends on the directory each stack was first brought up from, which is
+# not the same on every host -- so a name written down in a document is a name
+# that is wrong somewhere.
+discover() {
+  hdr "Finding your data"
+  FOUND=()
+  for a in "${APPS[@]}"; do
+    local c="${OLD_CONTAINER[$a]}" vol=''
+    if docker inspect "$c" >/dev/null 2>&1; then
+      vol="$(docker inspect -f \
+        '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/data")}}{{.Name}}{{end}}{{end}}' \
+        "$c" 2>/dev/null || true)"
+    fi
+    if [ -n "$vol" ]; then
+      OLD_VOL[$a]="$vol"; FOUND+=("$a")
+      ok "${PRETTY[$a]}: $vol"
+    else
+      OLD_VOL[$a]=''
+      warn "${PRETTY[$a]}: no container called $c on this host -- nothing to move"
+    fi
+  done
+  if [ "${#FOUND[@]}" -eq 0 ]; then
+    say
+    say "None of the three apps are running the old way on this host."
+    say "There is nothing to migrate: just bring the platform up integrated."
+    say
+    say "    sudo $HERE/install.sh --integrated"
+    exit 0
+  fi
+}
+
+# An image with a shell and cp in it, for the volume copy. Preferring one that
+# is ALREADY HERE: a host part-way through a migration is the worst moment to
+# discover it cannot reach a registry.
+copier_image() {
+  local img
+  for img in alpine:latest alpine busybox:latest busybox sysible-slop-idp sysible-controller:latest; do
+    if docker image inspect "$img" >/dev/null 2>&1; then printf '%s' "$img"; return 0; fi
+  done
+  if [ "$DRY" -eq 1 ]; then printf 'alpine'; return 0; fi
+  warn "no local image to copy with; pulling alpine"
+  docker pull -q alpine >/dev/null 2>&1 || die "could not pull an image to copy volumes with, and none is local"
+  printf 'alpine'
+}
+
+# ----------------------------------------------------------------- rollback --
+do_rollback() {
+  hdr "Putting this host back"
+  say "   Stopping the integrated services and starting the old stacks again."
+  say "   Your data is untouched: nothing here deleted a volume."
+  run_sh "cd '$HERE' && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated stop controller slep connect" || true
+  run_sh "cd '$HERE' && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated rm -f controller slep connect" || true
+  if [ -f "$HERE/.env" ]; then
+    run_sh "sed -i 's/^SYSIBLE_INTEGRATED=.*/SYSIBLE_INTEGRATED=0/' '$HERE/.env'"
+  fi
+  run_sh "cd '$HERE' && ${DC[*]} up -d" || true
+  for a in "${APPS[@]}"; do
+    if command -v sysiblectl >/dev/null 2>&1; then
+      run sysiblectl "$a" start || warn "could not start $a -- its checkout may be gone"
+    fi
+  done
+  say
+  ok "back on the old layout. The integrated volumes are still there if you try again."
+  exit 0
+}
+
+# ------------------------------------------------------------------- main ----
+declare -A OLD_VOL=()
+preflight
+[ "$ROLLBACK" -eq 1 ] && do_rollback
+discover
+
+NEWVOLS=()
+for a in "${FOUND[@]}"; do NEWVOLS+=("${PROJECT}_${a}-data"); done
+
+# Is a destination volume already there with something in it? Asked HERE,
+# before anything is stopped, because the answer is "stop and look at it" and
+# an operator should not have to do that with their fleet offline. A previous
+# attempt that got as far as copying is the usual reason.
+IMG="$(copier_image)"
+for i in "${!FOUND[@]}"; do
+  a="${FOUND[$i]}"; new="${NEWVOLS[$i]}"
+  docker volume inspect "$new" >/dev/null 2>&1 || continue
+  n="$(docker run --rm -v "$new":/v "$IMG" sh -c 'ls -A /v | wc -l' 2>/dev/null || echo 0)"
+  [ "${n:-0}" -gt 0 ] || continue
+  die "$new already exists and has ${n} entries in it. A previous attempt got this far.
+       NOTHING has been stopped or changed by this run.
+       Look at what is in it, or remove it with 'docker volume rm $new', then run this again.
+       Your ${PRETTY[$a]} data is still in ${OLD_VOL[$a]} and is still running."
+done
+
+hdr "What will happen"
+say "   1. back up every volume above to $BACKUP_DIR"
+say "   2. stop and REMOVE the containers ${OLD_CONTAINER[controller]}, ${OLD_CONTAINER[slep]}, ${OLD_CONTAINER[connect]}"
+say "   3. create ${NEWVOLS[*]} and copy your data into them"
+say "   4. bring the platform up with its apps built from apps/"
+say "   5. check that all of it came back"
+say
+say "   No volume is deleted and the old checkouts are left alone, so"
+say "   '$0 --rollback' undoes it."
+if [ "$DRY" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
+  say
+  read -r -p "   Type 'yes' to go ahead: " answer
+  [ "$answer" = "yes" ] || die "nothing was changed"
+fi
+
+# -- 1. back up ---------------------------------------------------------------
+hdr "Backing up"
+run mkdir -p "$BACKUP_DIR"
+for a in "${FOUND[@]}"; do
+  v="${OLD_VOL[$a]}"
+  run_sh "docker run --rm -v '$v':/from:ro -v '$BACKUP_DIR':/to '$IMG' tar czf '/to/$v.tgz' -C /from ." \
+    || die "backing up $v failed -- nothing has been changed yet"
+  ok "$v -> $BACKUP_DIR/$v.tgz"
+done
+# The platform's own volumes too. They are not being moved, but this is the one
+# moment when having them is free and the one moment it would hurt not to.
+for v in $(docker volume ls -q --filter "name=${PROJECT}_" 2>/dev/null || true); do
+  case " ${NEWVOLS[*]} " in *" $v "*) continue ;; esac
+  run_sh "docker run --rm -v '$v':/from:ro -v '$BACKUP_DIR':/to '$IMG' tar czf '/to/$v.tgz' -C /from ." || true
+  ok "$v -> $BACKUP_DIR/$v.tgz"
+done
+
+# -- 2. stop the old stacks ---------------------------------------------------
+hdr "Stopping the old app stacks"
+for a in "${FOUND[@]}"; do
+  c="${OLD_CONTAINER[$a]}"
+  run docker stop "$c" >/dev/null 2>&1 || true
+  run docker rm -f "$c" >/dev/null 2>&1 || true
+  ok "$c stopped and removed (its volume is untouched)"
+done
+
+# -- 3. new volumes, populated BEFORE anything starts -------------------------
+hdr "Moving the data"
+for a in "${FOUND[@]}"; do
+  old="${OLD_VOL[$a]}"; new="${PROJECT}_${a}-data"
+  if docker volume inspect "$new" >/dev/null 2>&1; then
+    n="$(docker run --rm -v "$new":/v "$IMG" sh -c 'ls -A /v | wc -l' 2>/dev/null || echo 0)"
+    if [ "${n:-0}" -gt 0 ]; then
+      # Unreachable unless something else filled it between the preflight check
+      # above and now. Kept because the cost of being wrong here is writing over
+      # data, and by this point the apps ARE down.
+      die "$new filled up between the check and the copy. The apps are STOPPED.
+       Nothing was deleted: your data is in $old and in $BACKUP_DIR.
+       Put this host back with:  sudo $0 --rollback"
+    fi
+  else
+    run docker volume create "$new" >/dev/null
+  fi
+  run_sh "docker run --rm -v '$old':/from:ro -v '$new':/to '$IMG' sh -c 'cd /from && cp -a . /to/'" \
+    || die "copying $old -> $new failed. Nothing was deleted: --rollback puts this host back."
+  ok "${PRETTY[$a]}: $old -> $new"
+done
+say
+say "   ${C_DIM}The TLS certificate came with it. Agents pin the Controller's,"
+say "   which is why the copy happens before anything starts.${C_OFF}"
+
+# -- 4. up --------------------------------------------------------------------
+hdr "Bringing up the integrated platform"
+if grep -q '^SYSIBLE_INTEGRATED=' "$HERE/.env" 2>/dev/null; then
+  run_sh "sed -i 's/^SYSIBLE_INTEGRATED=.*/SYSIBLE_INTEGRATED=1/' '$HERE/.env'"
+else
+  run_sh "printf 'SYSIBLE_INTEGRATED=1\n' >> '$HERE/.env'"
+fi
+ok "SYSIBLE_INTEGRATED=1 in .env -- sysiblectl and the updater read it from there"
+run_sh "cd '$HERE' && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d --build" \
+  || die "compose could not bring the platform up (the error is above).
+       Nothing was deleted. '$0 --rollback' puts this host back."
+
+# -- 5. check -----------------------------------------------------------------
+hdr "Checking"
+if [ "$DRY" -eq 1 ]; then
+  say "   ${C_DIM}(dry run: nothing was started, so there is nothing to check)${C_OFF}"
+else
+  sleep 5
+  # One `ps`, parsed nine times. Asking per service would be nine round trips,
+  # and a compose that cannot answer at all would look like nine separate
+  # problems instead of one.
+  PS_OUT="$(cd "$HERE" && "${DC[@]}" -f docker-compose.yml -f docker-compose.integrated.yml \
+            --profile integrated ps --format '{{.Service}} {{.State}}' 2>/dev/null || true)"
+  bad=0
+  if [ -z "$PS_OUT" ]; then
+    warn "compose could not list the services, so this run cannot say whether they came up."
+    warn "Check for yourself:  cd $HERE && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated ps"
+  else
+    for svc in gateway idp flashback baseline visualizer updater controller slep connect; do
+      state="$(printf '%s\n' "$PS_OUT" | awk -v s="$svc" '$1==s{print $2}')"
+      if [ "$state" = "running" ]; then ok "$svc running"
+      else warn "$svc is '${state:-not there}'"; bad=$((bad+1)); fi
+    done
+  fi
+  if [ "$bad" -gt 0 ]; then
+    say
+    warn "$bad service(s) are not running. Logs:  cd $HERE && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated logs --tail=50"
+    warn "If it will not come right, '$0 --rollback' puts this host back."
+  fi
+fi
+
+# -- done ---------------------------------------------------------------------
+hdr "Done"
+say "   Open the portal and sign in. Administration -> Software & services should"
+say "   show ONE updatable row, with the other three reading 'Built with the"
+say "   platform'."
+say
+say "   Backups:   $BACKUP_DIR"
+say "   Undo:      sudo $0 --rollback"
+say
+say "   Once you are happy, the old checkouts can go. Until then the platform"
+say "   leaves them in charge of their own rows, which is what makes this"
+say "   reversible:"
+for a in "${FOUND[@]}"; do
+  case "$a" in
+    controller) say "     /opt/sysible-src/sysible-controller" ;;
+    slep)       say "     /opt/sysible-src/sysible-linux-engineering-platform" ;;
+    connect)    say "     /opt/sysible-src/sysible-connect" ;;
+  esac
+done
+say
