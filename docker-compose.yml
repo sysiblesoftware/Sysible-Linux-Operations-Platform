@@ -419,6 +419,11 @@ services:
       # point any of the URLs above at something published on the host.
       - "host.docker.internal:host-gateway"
     volumes:
+      # The platform host's OWN /etc/hosts, read-only, so enrollment can turn a
+      # host NAME with no address into one. A container's /etc/hosts is its
+      # own; without this the names this machine resolves are unknown in here.
+      # Lookups only -- the Controller never writes it.
+      - /etc/hosts:/host/etc/hosts:ro
       - controller-data:/data
 
   slep:
