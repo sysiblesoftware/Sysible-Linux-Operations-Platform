@@ -576,8 +576,8 @@ _THEME_JS = (
 
 _CSS = """
 :root{--bg:#0d1117;--panel:#131923;--panel2:#1a212d;--line:#26303f;
---text:#e6edf5;--muted:#93a1b5;--faint:#6f7d92;
---accent:#43a047;--accent2:#5580ee;--ok:#4caf5a;--err:#e5534b;--amber:#e0a83b;
+--text:#e6edf5;--muted:#9aa7bd;--faint:#6f7d92;--on-accent:#0d1117;
+--accent:#43a047;--accent2:#5580ee;--ok:#63c869;--err:#e5534b;--amber:#e0a83b;
 --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.30);
 --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
 --field:#0d1320;
