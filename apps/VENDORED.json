@@ -34,7 +34,7 @@
       "label": "Sysible Connect",
       "repo": "https://github.com/sysiblesoftware/sysible-connect",
       "branch": "main",
-      "commit": "07a8d3279ec7",
+      "commit": "558be0646988",
       "compose_service": "connect",
       "path_prefix": "/connect/"
     }
