@@ -584,7 +584,7 @@ _CSS = """
 --fg:var(--text);--mut:var(--muted);--brand:var(--accent);--topo:url(/brand/topo-dark.svg);}
 :root[data-theme="light"]{--bg:#eef1f6;--panel:#ffffff;--panel2:#f3f5f9;--line:#dbe1ea;
 --text:#1b2431;--muted:#5b6675;--faint:#8794a4;
---accent:#2f8a37;--accent2:#2f6fe0;--ok:#2f9e4a;--err:#d23a30;--amber:#c98a12;
+--accent:#2e8736;--accent2:#2f6fe0;--ok:#2f9e4a;--err:#d23a30;--amber:#c98a12;
 --shadow:0 1px 2px rgba(20,30,50,.08),0 10px 30px rgba(20,30,50,.10);
 --field:#ffffff;--topo:url(/brand/topo-light.svg);}
 *{box-sizing:border-box}
