@@ -1967,8 +1967,19 @@ def _config_page(sess: sqlite3.Row) -> str:
 # Accounts are the exception: they are NOT hosted, they are GONE from the apps.
 # SLOP is the identity authority, so "Administrators" and "My Account" would be a
 # second account store — which is the very thing single sign-on removes.
+# EVERY product the portal offers, in the portal's order. It carried three --
+# Controller, SLEP, Connect -- while the portal showed six, so Baseline,
+# Flashback and the Visualizer had no administration here at all and the one
+# page called "each app's own administration" was quietly about half of them.
+#
+# (key, label, where its administration lives, its sections)
+#
+# A product with no sections embeds whole, which is honest: its console has no
+# separate administration to deep-link to. A product WITH sections must be able
+# to be addressed by URL -- which is why SLEP's rail became ?view= links before
+# this list could name its sections.
 _APP_ADMIN = {
-    "controller": ("Sysible Controller", "/controller/?view=settings", [
+    "controller": ("Sysible Controller", "/controller/?view=settings&tab={tab}", [
         ("controller", "Controller", "Software updates, address and port, restart."),
         ("policy", "Password policy", "Length and character classes."),
         ("enrollacl", "Enrollment access", "Which networks may enroll agents; the kill-switch."),
@@ -1976,8 +1987,18 @@ _APP_ADMIN = {
         ("license", "License", "Edition and license key."),
         ("audit", "Audit log", "Privileged Controller actions."),
     ]),
-    "slep": ("Sysible Linux Engineering Platform", "/slep/", []),
+    "slep": ("Sysible Linux Engineering Platform", "/slep/?view={tab}", [
+        ("organizations", "Organizations", "Who the work belongs to."),
+        ("users", "Users", "Membership and roles within this platform."),
+        ("credentials", "Credentials", "Stored secrets used by runs."),
+        ("jumphosts", "Jump Hosts", "Bastions runs reach hosts through."),
+        ("controllers", "Controllers", "The Controllers this platform drives."),
+        ("activity", "Activity", "What has been done here."),
+    ]),
     "connect": ("Sysible Connect", "/connect/", []),
+    "baseline": ("Sysible Baseline", "/baseline/", []),
+    "flashback": ("Sysible Flashback", "/flashback/", []),
+    "visualizer": ("Sysible Visualizer", "/visualizer/", []),
 }
 
 
@@ -2068,6 +2089,8 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
     label, base, tabs = _APP_ADMIN[app_key]
     if tabs and tab not in {t for t, _, _ in tabs}:
         tab = tabs[0][0]
+    if not tabs:
+        tab = ""
 
     # The IdP styles .chip, not .btn — a .btn here rendered as a bare blue link
     # and the tab strip read as unfinished.
@@ -2082,7 +2105,12 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
             f"href='/admin/apps?app={escape(app_key)}&amp;tab={escape(t)}' "
             f"title='{escape(desc)}'>{escape(lbl)}</a>"
             for t, lbl, desc in tabs) + "</div>"
-        src = f"{base}&tab={tab}"
+        # The app says where its section lives, with {tab} where its own query
+        # parameter goes. Appending "&tab=" here was right for the Controller
+        # and quietly wrong for everything that spells it differently: SLEP
+        # reads ?view=, so every one of its section chips would have opened
+        # the same page.
+        src = base.format(tab=tab)
     else:
         sub = ""
         src = base

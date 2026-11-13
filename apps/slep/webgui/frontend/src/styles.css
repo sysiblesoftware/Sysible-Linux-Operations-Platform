@@ -94,7 +94,11 @@ a{color:var(--accent2);cursor:pointer}
 .rail-brand{display:flex;align-items:center;gap:11px;padding:16px 14px;border-bottom:1px solid var(--line)}
 .rail-brand .name{font-weight:700;font-size:14px;line-height:1.16}
 .rail-nav{flex:1;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:2px}
-.rail-item{display:flex;align-items:center;gap:11px;width:100%;text-align:left;background:transparent;border:none;color:var(--muted);padding:9px 11px;border-radius:8px;font-size:13.5px;cursor:pointer}
+/* Rail items are LINKS now (?view=...), so they can be opened in a new tab
+   and copied out of the address bar. text-decoration and box-sizing are
+   what a <button> gave for free and an <a> does not. */
+.rail-item{display:flex;align-items:center;gap:11px;width:100%;box-sizing:border-box;text-align:left;background:transparent;border:none;color:var(--muted);padding:9px 11px;border-radius:8px;font-size:13.5px;cursor:pointer;text-decoration:none}
+.rail-item:hover{text-decoration:none}
 .rail-item:hover{background:var(--panel2);color:var(--text)}
 .rail-item svg{flex-shrink:0;opacity:.9}
 .rail-item.active{background:var(--panel2);color:var(--text);position:relative}
