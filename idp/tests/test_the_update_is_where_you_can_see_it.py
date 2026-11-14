@@ -113,6 +113,15 @@ def live(tmp_path, monkeypatch):
 
     monkeypatch.setattr(m.updates, "apply", _apply)
 
+    # The ONE product row's button posts to apply-all: one row for the whole
+    # platform, so "Update now" means every checkout on the host, SLOP last.
+    def _apply_all(*a, **k):
+        state["job"] = dict(RUNNING_JOB, app="slop")
+        return {"message": "Updating everything\u2026",
+                "products": ["slop"], "skipped": []}, None
+
+    monkeypatch.setattr(m.updates, "apply_all", _apply_all)
+
     cfg = uvicorn.Config(m.app, host="127.0.0.1", port=PORT, log_level="error")
     server = uvicorn.Server(cfg)
     threading.Thread(target=server.run, daemon=True).start()

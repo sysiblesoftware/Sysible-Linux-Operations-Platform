@@ -97,32 +97,26 @@ def _solo(key, label, detail):
                           for a in ("restart", "stop", "start", "recreate")}}]
 
 
+# ONE row. The Controller, SLEP and Connect are services under the platform's
+# row rather than products of their own -- asked for about ten times, in these
+# words: "I want everything under slop." Each keeps its own version and its own
+# update; what it does not keep is a heading, a version line and a verdict of
+# its own on a screen that was showing four of each.
+_APP_MODULES = (
+    _solo("controller", "Controller", "The console and its API")
+    + _solo("slep", "Engineering Platform", "Ansible and Terraform")
+    + _solo("connect", "Connect", "Browser terminal workspace")
+)
+
 APPS = [
-    {"key": "controller", "label": "Sysible Controller", "installed": True,
-     "checked": True, "available": False, "current": "c0689c8", "can_update": False,
-     "actions": ["restart", "stop", "start", "recreate"],
-     "modules": _solo("controller", "Controller", "The console and its API"),
-     "services": [{"service": "controller", "state": "running",
-                   "status": "Up 2 days", "health": ""}]},
-    {"key": "slep", "label": "Sysible Linux Engineering Platform", "installed": True,
-     "checked": True, "available": False, "current": "e8aaa4e", "can_update": False,
-     "actions": ["restart", "stop", "start", "recreate"],
-     "modules": _solo("slep", "Engineering Platform", "Ansible and Terraform"),
-     "services": [{"service": "slep", "state": "running",
-                   "status": "Up 2 days", "health": ""}]},
-    {"key": "connect", "label": "Sysible Connect", "installed": True,
-     "checked": True, "available": False, "current": "d5bcb9b", "can_update": False,
-     "actions": ["restart", "stop", "start", "recreate"],
-     "modules": _solo("connect", "Connect", "Browser terminal workspace"),
-     "services": [{"service": "connect", "state": "running",
-                   "status": "Up 2 days", "health": ""}]},
     {"key": "slop", "label": "Sysible Linux Operations Platform", "installed": True,
      "checked": True, "available": False, "current": "538a889", "can_update": False,
-     "actions": ["restart", "start", "recreate"], "modules": MODULES,
+     "actions": ["restart", "start", "recreate"],
+     "modules": _APP_MODULES + MODULES,
      # One service that has NO section — what a compose override on a real host
      # adds. The summary line is filtered so it does not repeat the sections; it
      # must not swallow this one, which is the only place it can be seen.
-     "services": [m["services"][0] for m in MODULES if m["services"]]
+     "services": [m["services"][0] for m in (_APP_MODULES + MODULES) if m["services"]]
                  + [{"service": "extra-sidecar", "state": "exited",
                      "status": "Exited (0) an hour ago", "health": ""}]},
 ]
@@ -177,16 +171,23 @@ def test_every_product_gets_the_same_row_shape(page):
     cards with its own heading and footnote while the other three were a single
     terse line. The page read as three products with a fourth bolted on.
 
-    Every product declares its services now, so every row carries the same
-    disclosure and differs from its neighbour by the NUMBER in it.
+    Every product declared its services, so every row carried the same
+    disclosure and differed from its neighbour by the NUMBER in it.
+
+    THERE IS ONE ROW NOW. "I want everything under slop", asked about ten
+    times. The uniformity this test was written to defend is no longer
+    something four rows have to achieve between them -- it is the only row --
+    but the shape it checks still has to be there, and it now has to carry all
+    nine services rather than six.
     """
-    for key in ("controller", "slep", "connect", "slop"):
-        assert f"id='mods-{key}'" in page, f"{key} has no services grid"
-        assert f"data-disc='{key}'" in page, f"{key} has no services disclosure"
-        assert f"id='sv-{key}'" in page, f"{key} has no count to put in it"
+    assert f"id='mods-slop'" in page, "the platform row has no services grid"
+    assert f"data-disc='slop'" in page, "the platform row has no services disclosure"
+    assert f"id='sv-slop'" in page, "there is no count to put in it"
+    for key in ("controller", "slep", "connect"):
+        assert f"id='mods-{key}'" not in page, f"{key} still has a row of its own"
     counts = dict(re.findall(r"id='sv-([a-z]+)'>Services \((\d+)\)", page))
-    assert counts == {"controller": "1", "slep": "1", "connect": "1", "slop": "6"}, \
-        f"the rows do not all carry a service count: {counts}"
+    assert counts == {"slop": "9"}, \
+        f"the one row does not carry all nine services: {counts}"
 
 
 def test_every_services_grid_starts_OPEN(page):
@@ -203,11 +204,10 @@ def test_every_services_grid_starts_OPEN(page):
     open. An operator who wants a row quiet can shut it, and it stays shut
     across the poll that repaints the row.
     """
-    for key in ("controller", "slep", "connect", "slop"):
-        assert not re.search(rf"class=prod-mods id='mods-{key}' hidden", page), \
-            f"{key}'s services grid is shut before the page has been used"
-        assert re.search(rf"id='d-{key}'[^>]*aria-expanded=true", page), \
-            f"{key}'s disclosure claims to be shut while its grid is showing"
+    assert not re.search(r"class=prod-mods id='mods-slop' hidden", page), \
+        "the services grid is shut before the page has been used"
+    assert re.search(r"id='d-slop'[^>]*aria-expanded=true", page), \
+        "the disclosure claims to be shut while its grid is showing"
 
 
 def test_a_shut_row_is_remembered_as_shut_not_read_off_the_dom(page):
@@ -387,7 +387,9 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
                 vis = pg.evaluate(
                     "() => [...document.querySelectorAll('#mods-slop .mod')]"
                     ".map(e => [e.id, e.offsetParent !== null])")
-                assert len(vis) == 6, f"{len(vis)} sections rendered, expected 6: {vis}"
+                # NINE now, not six: the platform's row is the only row, and
+                # carries the Controller, SLEP and Connect as well as its own.
+                assert len(vis) == 9, f"{len(vis)} sections rendered, expected 9: {vis}"
                 assert all(v for _i, v in vis), f"a section is not visible: {vis}"
 
                 # The one that is down is the one marked down.
@@ -432,20 +434,23 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
                 assert "extra-sidecar" in note, (
                     "a running service with no card vanished from the page "
                     "entirely: " + repr(note))
-                # The count has to AGREE with what is behind the control: six
-                # cards plus the one uncovered service.
-                assert "(7)" in lab, (
+                # The count has to AGREE with what is behind the control: NINE
+                # cards (the platform's six plus the three apps, which are
+                # services under this row now) plus the one uncovered service.
+                assert "(10)" in lab, (
                     "the count does not include the service that has no card, "
                     f"so it disagrees with what the disclosure opens onto: {lab!r}")
-                # Every row carries the same control, the single-service ones
-                # included — that is the change. And its own description, which
-                # is what .prod-meta holds now that the count has moved.
-                for key, n in (("controller", 1), ("slep", 1), ("connect", 1)):
-                    one = (pg.text_content(f"#sv-{key}") or "")
-                    assert f"({n})" in one, \
-                        f"{key} has no service count in its disclosure: {one!r}"
-                    assert (pg.text_content(f"#s-{key}") or "").strip(), \
-                        f"{key}'s row has no description"
+                # The three apps have no ROW of their own any more -- they are
+                # cards under this one. What matters is that they are still on
+                # the page, each with its own card and its own description,
+                # which is the thing a vanished row would have taken with it.
+                for key in ("controller", "slep", "connect"):
+                    assert pg.locator(f"#sv-{key}").count() == 0, \
+                        f"{key} still has a product row of its own"
+                    card = pg.locator(f"#mod-slop-{key}")
+                    assert card.count() == 1, f"{key} has no card under the platform"
+                    assert (card.text_content() or "").strip(), \
+                        f"{key}'s card is empty"
 
                 # Controls are behind the row's existing Manage toggle, not six
                 # new ones, and not on screen by default.
@@ -482,9 +487,11 @@ def test_the_sections_say_which_module_is_down_and_offer_only_real_controls(tmp_
                     assert expected in why, (
                         "the refusal shown is not the one the updater gave:\n"
                         f"  shown:    {why!r}\n  expected: {expected!r}")
-                    # And the single-service products say THEIR reason, which is
-                    # a different one — the row's own buttons already run it.
-                    solo = pg.text_content("#mod-controller-controller")
+                    # And the three apps say THEIR reason, which is a different
+                    # one. They are cards under the platform's row now, so their
+                    # ids carry that row's key -- the thing a card's id has
+                    # always said is which row it is on.
+                    solo = pg.text_content("#mod-slop-controller")
                     assert "same command as the product's own" in solo, (
                         "a one-service product does not explain why its card has "
                         f"no buttons: {solo!r}")

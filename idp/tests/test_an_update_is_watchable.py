@@ -113,6 +113,14 @@ def live(tmp_path, monkeypatch):
     monkeypatch.setattr(m.updates, "apply",
                         lambda key, *a, **k: ({"message": f"Updating {key}…"}, None))
 
+    # The ONE product row's button posts to apply-all, not apply: there is one
+    # row for the whole platform, so "Update now" means every checkout on the
+    # host, SLOP last. Stubbed alongside apply so a test that drives the button
+    # exercises the path the button really takes.
+    monkeypatch.setattr(m.updates, "apply_all",
+                        lambda *a, **k: ({"message": "Updating everything\u2026",
+                                          "products": ["slop"], "skipped": []}, None))
+
     cfg = uvicorn.Config(m.app, host="127.0.0.1", port=PORT, log_level="error")
     server = uvicorn.Server(cfg)
     threading.Thread(target=server.run, daemon=True).start()

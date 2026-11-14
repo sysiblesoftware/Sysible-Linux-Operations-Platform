@@ -196,42 +196,60 @@ def _apps_module(mp, slop_dir, src_dir, integrated=True):
     return importlib.reload(mod)
 
 
-def test_an_integrated_host_has_one_product_row(monkeypatch, tmp_path):
-    """On an integrated host the three apps are SERVICES OF THE PLATFORM.
+def test_there_is_one_product_row(monkeypatch, tmp_path):
+    """One row. Asked for about ten times: "I want everything under slop."
 
-    This test asserted the opposite until it was asked for, repeatedly, in
-    these words: "Everything should be under slop." The old reasoning was that
-    a row should not vanish because the source moved -- an operator who knows
-    there is a Controller should still find it. The name IS still there, on
-    the service card under the platform's row. What the reasoning got wrong
-    was that finding it required a PRODUCT row, which is how the screen came
-    to show three products that cannot be installed, updated or removed on
-    their own: three headings, three version lines and three verdicts for
-    things with one checkout, one compose file and one build between them.
+    This test asserted four rows, then one-row-if-integrated, and now one row
+    full stop. The middle version was the mistake worth naming: it made what
+    was asked for depend on SYSIBLE_INTEGRATED, a flag set only by
+    `install.sh --integrated` or the migration tool. A host installed with the
+    server installer does not have it, so the screen went on showing four
+    products while the change sat in the repository looking done.
+
+    Whether the Controller's source lives in its own checkout or inside SLOP's
+    is a packaging detail. It was being turned into four headings, four
+    version lines and four verdicts.
+
+    Nothing is lost: each app keeps its own version, its own update and its
+    own lifecycle buttons, on its service card. keys() still lists every
+    product, because the updater still pulls and builds each checkout.
     """
     apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
-    monkeypatch.setenv("SYSIBLE_INTEGRATED", "1")
-    assert apps.keys() == ["slop"], \
-        f"an integrated host still lists separate products: {apps.keys()}"
-    # The apps lead the platform's services: the three consoles an operator
-    # opens, then the parts that serve them.
+    for flag in ("1", "0", None):
+        if flag is None:
+            monkeypatch.delenv("SYSIBLE_INTEGRATED", raising=False)
+        else:
+            monkeypatch.setenv("SYSIBLE_INTEGRATED", flag)
+        assert apps.row_keys() == ["slop"], \
+            f"SYSIBLE_INTEGRATED={flag!r} still shows {apps.row_keys()}"
+
+
+def test_the_updater_still_manages_every_product(monkeypatch, tmp_path):
+    """row_keys() is the screen; keys() is the machinery. Folding the rows must
+    not stop the updater pulling and building the three checkouts -- that is
+    the half that makes a fix actually reach the host."""
+    apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
+    assert apps.keys() == ["controller", "slep", "connect", "slop"]
+
+
+def test_the_apps_lead_the_platforms_services(monkeypatch, tmp_path):
+    """The three consoles an operator opens, then the parts that serve them."""
+    apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
     assert apps.module_keys("slop")[:3] == ["controller", "slep", "connect"]
     assert "gateway" in apps.module_keys("slop")
-    assert all(apps.is_vendored(k) for k in ("controller", "slep", "connect"))
-    assert not apps.is_vendored("slop")
-    # Its services are SLOP's to run, so compose has to be asked in SLOP's
-    # directory — anywhere else reports no containers on a host where it runs.
-    assert apps.compose_dir_for("controller") == apps.compose_dir_for("slop")
+    assert len(apps.module_keys("slop")) == 9
 
 
-def test_a_split_host_still_has_four_rows(monkeypatch, tmp_path):
-    """Three separate checkouts with three compose projects of their own. The
-    folding above is about the INTEGRATED layout and must not reach these."""
+def test_every_service_knows_which_product_owns_it(monkeypatch, tmp_path):
+    """Nine services from four products on one row. A card showing a version or
+    offering an update has to know whose."""
     apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
-    monkeypatch.delenv("SYSIBLE_INTEGRATED", raising=False)
-    assert apps.keys() == ["controller", "slep", "connect", "slop"]
-    assert apps.module_keys("controller") == ["controller"]
-    assert "controller" not in apps.module_keys("slop")
+    assert apps.owner_of("controller") == "controller"
+    assert apps.owner_of("connect") == "connect"
+    assert apps.owner_of("gateway") == "slop"
+    assert apps.owner_of("baseline") == "slop"
+    for svc in apps.module_keys("slop"):
+        assert apps.owner_of(svc) in apps.keys(), svc
 
 
 def test_a_half_migrated_host_leaves_the_old_checkout_in_charge(monkeypatch, tmp_path):

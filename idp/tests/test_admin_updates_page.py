@@ -43,20 +43,31 @@ ADMIN_PW = "adminpassword123"
 
 # What the updater reports on a fleet with one product behind, two with dirty
 # checkouts, and everything running — the reported state.
+# ONE entry, because the page builds its rows from this payload and there is
+# one row: the Controller, SLEP and Connect are services under the platform.
 APPS = [
-    {"key": "controller", "label": "Sysible Controller", "installed": True,
-     "checked": True, "available": False, "current": "c0689c8", "can_update": False,
-     "actions": ["restart", "stop", "start", "recreate"],
-     "services": [{"service": "controller", "state": "running"}]},
-    {"key": "slep", "label": "Sysible Linux Engineering Platform", "installed": True,
-     "checked": True, "available": False, "current": "c0f7ec4", "can_update": False,
-     "reason": "the checkout has local changes — resolve them on the host first",
-     "actions": ["restart", "stop", "start", "recreate"],
-     "services": [{"service": "slep", "state": "running"}]},
     {"key": "slop", "label": "Sysible Linux Operations Platform", "installed": True,
      "checked": True, "available": True, "current": "538a889", "latest": "359854c",
      "can_update": True, "actions": ["restart", "start", "recreate"],
-     "services": [{"service": "idp", "state": "running"}]},
+     # ONE row, carrying every service. `connect` is here with NO services and
+     # no actions: a service the updater does not report, which is what the
+     # "not still saying checking…" assertion below is about.
+     "modules": [
+         {"key": "controller", "label": "Controller", "detail": "The console and its API",
+          "services": [{"service": "controller", "state": "running"}],
+          "actions": [], "refusals": {}},
+         {"key": "slep", "label": "Engineering Platform", "detail": "Ansible and Terraform",
+          "services": [{"service": "slep", "state": "running"}],
+          "actions": [], "refusals": {}},
+         {"key": "connect", "label": "Connect", "detail": "Browser terminal workspace",
+          "services": [], "actions": [], "refusals": {}},
+         {"key": "idp", "label": "Sign-in & accounts", "detail": "Sessions and SSO",
+          "services": [{"service": "idp", "state": "running"}],
+          "actions": [], "refusals": {}},
+     ],
+     "services": [{"service": "idp", "state": "running"},
+                  {"service": "controller", "state": "running"},
+                  {"service": "slep", "state": "running"}]},
 ]
 
 
@@ -229,33 +240,37 @@ def test_the_page_fits_its_card_and_the_toggle_is_inert(tmp_path):
                     "the recovery controls are showing before anyone asked for them"
 
                 # The skeleton also lists Sysible Connect, which this updater
-                # does not manage. That row must say so, not sit at
-                # "checking\u2026" on a page that has finished loading.
-                unreported = pg.text_content("#u-connect")
+                # does not report. There is ONE row now, so Connect is a CARD
+                # under it rather than a row of its own -- and the thing this
+                # test is for still holds: a service the updater never
+                # mentioned must say so, not sit at "checking\u2026" on a page
+                # that has finished loading.
+                unreported = pg.text_content("#mod-slop-connect")
                 assert "checking" not in unreported.lower(), (
-                    "a product the updater never reported is still showing "
+                    "a service the updater never reported is still showing "
                     "'checking\u2026' after the page finished loading")
-                assert "Not managed here" in unreported
                 assert pg.evaluate(
-                    "() => document.getElementById('m-connect').hidden") is True, \
-                    "a product with no actions still offers Manage"
+                    "() => document.getElementById('m-slop').hidden") is False, \
+                    "the platform row does not offer Manage"
 
                 if width == 1100:
                     posts = []
                     pg.on("request", lambda r: posts.append(r.url) if r.method == "POST" else None)
                     pg.on("dialog", lambda d: d.dismiss())
-                    for key in ("controller", "slep", "slop"):
+                    for key in ("slop",):          # one row, one Manage toggle
                         pg.click(f"#m-{key}")
                         pg.wait_for_timeout(150)
                     assert not posts, f"clicking Manage posted: {posts}"
-                    shown = pg.evaluate(
-                        "() => ['controller','slep','slop'].map("
-                        "k => document.getElementById('a-'+k).offsetParent !== null)")
-                    assert all(shown), f"Manage did not reveal the controls: {shown}"
+                    # One row, one Manage toggle, one set of controls.
                     assert pg.evaluate(
-                        "() => document.getElementById('a-connect')"
-                        ".offsetParent !== null") is False, \
-                        "an untouched row's controls opened too"
+                        "() => document.getElementById('a-slop')"
+                        ".offsetParent !== null") is True, \
+                        "Manage did not reveal the controls"
+                    # ...and no OTHER row's controls exist to be opened.
+                    assert pg.evaluate(
+                        "() => ['controller','slep','connect']"
+                        ".every(k => !document.getElementById('a-'+k))") is True, \
+                        "a product still has recovery controls of its own"
                     # exactly one product is behind, so exactly one Update button
                     vis = pg.evaluate(
                         "() => [...document.querySelectorAll('button[id^=b-]')]"

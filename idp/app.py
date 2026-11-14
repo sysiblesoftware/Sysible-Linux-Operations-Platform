@@ -3123,6 +3123,11 @@ _UPDATES_JS = r"""
     // that knows which product it belongs to" — so any NEW control given that
     // attribute silently became an update trigger.
     document.querySelectorAll('button.btn[data-app][id^=\"b-\"]').forEach(function(b){
+      // ONE ROW, so its Update button means "bring this platform forward" --
+      // every checkout on the host, SLOP last. A per-product update here would
+      // move SLOP and leave the Controller where it was, which is exactly how
+      // three pushed fixes came to be invisible on a running host.
+      if(b.dataset.all){ b.addEventListener('click',function(){ startUpdateAll(b); }); return; }
       b.addEventListener('click',function(){ startUpdate(b.getAttribute('data-app'), b); });
     });
     // The remote tip is memoised by the updater (browsing Administration would
@@ -3266,21 +3271,16 @@ def _integrated() -> bool:
 
 
 def _skeleton_products() -> tuple[tuple[str, str], ...]:
-    """The rows, in order. On an integrated host there is ONE.
+    """The rows. There is ONE.
 
-    The Controller, SLEP and Connect are not separate products there: one
-    checkout, one compose file, one build, one update. A row each claimed
-    three things that cannot be installed, updated or removed on their own.
-    They are services under the platform's row instead. Asked for in these
-    words, more than once: "Everything should be under slop."
+    Asked for about ten times, in these words: "I want everything under slop."
+
+    This was briefly conditional on the integrated layout, which made the thing
+    that was asked for depend on a flag the operator never set -- this host was
+    installed with the server installer, so the flag is off and the screen went
+    on showing four products. Mirrors updater/backend/apps.py:row_keys().
     """
-    rows = (("controller", "Sysible Controller"),
-            ("slep", "Sysible Linux Engineering Platform"),
-            ("connect", "Sysible Connect"),
-            ("slop", "Sysible Linux Operations Platform"))
-    if not _integrated():
-        return rows
-    return tuple((k, l) for k, l in rows if k not in _VENDORED_KEYS)
+    return (("slop", "Sysible Linux Operations Platform"),)
 
 
 _SKELETON_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
@@ -3328,7 +3328,7 @@ def _skeleton_modules(key: str) -> str:
     other three.
     """
     mods = _SKELETON_MODULES.get(key, ())
-    if key == "slop" and _integrated():
+    if key == "slop":
         # The apps first: the row then reads as the three consoles an operator
         # opens, then the parts that serve them.
         mods = tuple(m for k in _VENDORED_KEYS
@@ -3363,7 +3363,10 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
             f"<div class=prod-name>{escape(lbl)}</div>"
             f"<div class=prod-state id='u-{key}'><span class=sub>checking&hellip;</span></div>"
             f"<div class=prod-act>"
-            f"<button class=btn id='b-{key}' data-app='{key}' hidden disabled>Update now</button>"
+            # data-all + data-slop: one row, one button, every checkout, and the
+            # sign-out confirm because SLOP's own rebuild takes this console with it.
+            f"<button class=btn id='b-{key}' data-app='{key}' data-all=1 data-slop=1 "
+            f"hidden disabled>Update now</button>"
             # data-MANAGE, never data-app: the page binds startUpdate() to every
             # button[data-app], so a toggle carrying it would post an update —
             # on the platform row, behind the "you will be signed out" confirm.

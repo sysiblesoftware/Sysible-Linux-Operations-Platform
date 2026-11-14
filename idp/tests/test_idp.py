@@ -476,8 +476,15 @@ def test_updates_page_renders_for_a_superuser(cl):
     _login(cl, "admin", ADMIN_PW)
     r = cl.get("/admin/updates")
     assert r.status_code == 200
-    for key in ("controller", "slep", "connect", "slop"):
-        assert f"data-app='{key}'" in r.text
+    # ONE product row, carrying every product's services. The page rendered
+    # four, one per product, until that was asked to stop -- repeatedly.
+    assert "data-app='slop'" in r.text
+    for key in ("controller", "slep", "connect"):
+        assert f"data-app='{key}'" not in r.text, \
+            f"{key} still has a product row of its own"
+    # ...and they are all still ON the page, as services.
+    for label in ("Controller", "Engineering Platform", "Connect"):
+        assert label in r.text, f"{label} is not on the page at all"
     assert "Update now" in r.text
 
 
@@ -486,6 +493,14 @@ def test_apply_requires_the_csrf_token_and_origin(cl, monkeypatch):
     called = []
     monkeypatch.setattr(m.updates, "apply",
                         lambda k, u, r: (called.append(k), ({"started": True}, None))[1])
+
+    # The ONE product row's button posts to apply-all, not apply: there is one
+    # row for the whole platform, so "Update now" means every checkout on the
+    # host, SLOP last. Stubbed alongside apply so a test that drives the button
+    # exercises the path the button really takes.
+    monkeypatch.setattr(m.updates, "apply_all",
+                        lambda *a, **k: ({"message": "Updating everything\u2026",
+                                          "products": ["slop"], "skipped": []}, None))
     _login(cl, "admin", ADMIN_PW)
     # No token.
     assert cl.post("/admin/updates/apply", data={"app": "controller"},

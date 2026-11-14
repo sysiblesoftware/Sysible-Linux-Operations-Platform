@@ -154,8 +154,22 @@ def status(request: Request, refresh: bool = False) -> dict:
     on every page it renders and each product costs a network round-trip.
     """
     _authorized(request)
-    out = []
+    # Every product, keyed, so the ONE row below can take each service's state
+    # and each app's own version from the product that really owns it.
+    managed = {}
     for key in apps.keys():
+        root = apps.checkout_dir(key)
+        compose = apps.compose_dir_for(key)
+        managed[key] = {
+            "root": root,
+            "compose": compose,
+            "services": jobs.services(compose) if compose else [],
+            "git": (git.status(root, fresh=refresh) if root else {}),
+            "dirty": (git.dirty(root) if root else False),
+        }
+
+    out = []
+    for key in apps.row_keys():
         row = {"key": key, "label": apps.label(key),
                # Modules inside this checkout. Reported even when the product
                # is not installed here, so the screen can say "Flashback would
@@ -212,7 +226,40 @@ def status(request: Request, refresh: bool = False) -> dict:
                              f"`git -C {root} status` on the host shows them")
         elif compose is None:
             row["reason"] = "no compose file found in the checkout"
-        row["services"] = jobs.services(compose) if compose else []
+        # EVERY product's services, not just this row's. The row lists nine
+        # services drawn from four compose projects -- on a split host the
+        # Controller's containers are in its own project, and a `compose ps`
+        # in SLOP's directory reports nothing about them. Gathered by service
+        # name so each card finds its container wherever it actually runs.
+        seen = set()
+        services = []
+        for owner in apps.keys():
+            for svc in managed[owner]["services"]:
+                name = svc.get("service") or ""
+                if name and name not in seen:
+                    seen.add(name)
+                    services.append(svc)
+        row["services"] = services
+
+        # THE ROW'S UPDATE COVERS EVERY CHECKOUT. There is one row, so there is
+        # one Update button, and it has to mean "bring this platform forward" --
+        # not "bring SLOP forward and leave the Controller where it was", which
+        # is the shape that made three pushed fixes invisible.
+        behind, blocked = [], []
+        for owner in apps.keys():
+            m = managed[owner]
+            if m["root"] is None:
+                continue
+            if m["git"].get("available"):
+                (blocked if m["dirty"] or m["compose"] is None else behind).append(owner)
+        row["behind"] = behind
+        row["blocked"] = blocked
+        if behind or blocked:
+            row["available"] = True
+            row["can_update"] = bool(behind)
+            names = ", ".join(apps.label(k) for k in (behind or blocked))
+            row["reason"] = (f"update available: {names}" if behind else
+                             f"update available but blocked: {names}")
         # Which lifecycle actions this product will accept. The GUI renders from
         # this rather than hard-coding the rules, so the refusal and the button
         # can never disagree.
@@ -243,6 +290,11 @@ def _attach_modules(row: dict, key: str, compose) -> None:
         by_service.setdefault(svc.get("service") or "", []).append(svc)
     for mod in row["modules"]:
         mod["services"] = by_service.get(mod["key"], [])
+        # Whose service this is. The row carries nine of them from four
+        # products, so a card showing a version or offering an update has to
+        # say whose -- and the per-product rows that used to carry that are
+        # gone.
+        mod["owner"] = apps.owner_of(mod["key"])
         mod["actions"] = (jobs.module_actions(key, mod["key"])
                           if compose is not None else [])
         mod["refusals"] = ({a: jobs.module_action_refusal(key, mod["key"], a)

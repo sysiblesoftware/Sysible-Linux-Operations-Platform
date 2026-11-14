@@ -154,30 +154,36 @@ VENDORED_KEYS = ("controller", "slep", "connect")
 
 
 def keys() -> list[str]:
-    """Every product with a row of its own.
+    """Every product the updater MANAGES. Machinery, not display.
 
-    ON AN INTEGRATED HOST, three of them have none. The Controller, SLEP and
-    Connect are not separate products there -- one checkout, one compose file,
-    one build, one update -- and a row each said otherwise: three headings,
-    three version lines and three "Up to date" verdicts for things that cannot
-    be up to date independently of the platform.
-
-    They are services under the platform's row instead, which is what they are.
-    Asked for repeatedly, in these words: "Everything should be under slop."
-
-    This file previously argued the other way -- that a row should not vanish
-    because the source moved. That reasoning was about the row's NAME being
-    findable, and the name is still there: on the platform's row, on the
-    service card that carries it. What it got wrong was treating "findable" as
-    requiring a product row, which is how the screen ended up claiming three
-    products that cannot be separately installed, updated or removed.
-
-    A SPLIT host is unchanged: there the three really are separate checkouts
-    with separate compose projects, and they keep their rows.
+    Update-all walks this, each entry has its own checkout to pull and its own
+    compose project to build, and that stays true whatever the screen shows.
+    row_keys() below is what the screen shows.
     """
-    if not integrated():
-        return list(ALLOWLIST)
-    return [k for k in ALLOWLIST if k not in VENDORED_KEYS]
+    return list(ALLOWLIST)
+
+
+def row_keys() -> list[str]:
+    """The rows on Software & services. There is ONE.
+
+    Asked for about ten times, in these words: "I want everything under slop."
+
+    It was conditional on the integrated layout, which was the wrong call
+    twice over. It made the thing that was asked for depend on a flag the
+    operator never set and had no reason to know about -- this host was
+    installed with the server installer, so the flag is off and the screen
+    went on showing four products. And the distinction it was protecting is
+    not one an operator has: whether the Controller's source sits in its own
+    checkout or inside SLOP's is a packaging detail, and the screen was
+    turning it into four headings, four version lines and four verdicts.
+
+    One row. The apps are services under it, because that is how they are
+    reached, started, stopped and looked at. What they keep is everything that
+    is really theirs: their own version, their own update, their own lifecycle
+    buttons -- on their own service card rather than on a product row of their
+    own. Nothing can be done here that could be done before.
+    """
+    return ["slop"]
 
 
 def modules(key: str) -> list[dict]:
@@ -192,16 +198,12 @@ def modules(key: str) -> list[dict]:
 def _entries(key: str) -> tuple[tuple[str, str, str], ...]:
     """This product's service entries.
 
-    On an integrated host the platform's row carries the vendored apps'
-    services too, because they ARE its services: same checkout, same compose
-    file, same build. keys() drops their product rows in the same case, so
-    nothing is listed twice and no row is left empty.
-
-    The apps come FIRST in that list. The platform's row then reads as the
-    three consoles an operator opens, then the parts that serve them, rather
-    than burying the Controller below the updater sidecar.
+    The platform's row carries the three apps' services as well as its own,
+    because the platform's row is the only row. The apps come FIRST: it then
+    reads as the three consoles an operator opens, then the parts that serve
+    them, rather than burying the Controller below the updater sidecar.
     """
-    if key == "slop" and integrated():
+    if key == "slop":
         vendored_svcs = tuple(e for k in VENDORED_KEYS for e in MODULES.get(k, ()))
         return vendored_svcs + MODULES.get("slop", ())
     return MODULES.get(key, ())
@@ -276,3 +278,16 @@ def compose_dir(root: Path) -> Path | None:
             if (d / name).is_file():
                 return d
     return None
+
+
+def owner_of(service: str) -> str:
+    """Which product a compose SERVICE belongs to.
+
+    The platform's row lists nine services drawn from four products. A card
+    showing a version or offering an update has to know whose version and
+    whose update, and this is the one place that mapping lives.
+    """
+    for key, entries in MODULES.items():
+        if any(k == service for k, _lbl, _d in entries):
+            return key
+    return "slop"
