@@ -601,6 +601,20 @@ if [ "$INTEGRATED" -eq 1 ] && [ "$WANT_APPS" -eq 1 ]; then
   say "  controller, slep and connect are services of this compose project."
   WANT_APPS=0
   _upsert_kv "$ENV_FILE" SYSIBLE_INTEGRATED 1
+  # AND the profile those three sit behind, in the .env rather than on any one
+  # command line. Compose reads COMPOSE_PROFILES from the project .env, so
+  # every later `docker compose ...` run from this directory carries it --
+  # including the updater's, which runs `up -d --build` from a literal argv it
+  # deliberately does not let callers extend.
+  #
+  # Without it the three are not merely skipped at START: compose does not
+  # BUILD or RECREATE a service whose profile is off, and says nothing about
+  # having left it out. So an update pulled new code, rebuilt the six
+  # unprofiled services, left the Controller, SLEP and Connect running the
+  # image they already had, and the screen reported the platform up to date --
+  # which was true of the checkout and false of the three apps an operator
+  # actually looks at.
+  _upsert_kv "$ENV_FILE" COMPOSE_PROFILES integrated
 fi
 if [ "$WANT_APPS" -eq 1 ]; then
   # The host's LAN IP — where the Controller publishes its backend/agent API on :9000.

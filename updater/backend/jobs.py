@@ -255,6 +255,19 @@ def _update_one(key: str, root: Path, compose: Path) -> tuple[bool, str]:
     if rc != 0:
         return False, ("git pull failed — the checkout may have local changes "
                        "or its branch may have diverged.")
+    # The integrated profile goes into the .env BEFORE the build, not after:
+    # compose reads it there, and without it this very command rebuilds the
+    # platform's six services and silently leaves the Controller, SLEP and
+    # Connect on the image they already had. See wiring.repair_profile.
+    try:
+        prof_changes, prof_notes = wiring.repair_profile(root)
+    except Exception as e:                                   # pragma: no cover
+        prof_changes, prof_notes = {}, [f"! profile repair failed: {e}"]
+    for note in prof_notes:
+        _log(note)
+    if prof_changes:
+        _log(mark("profile"))
+
     # --build so the image actually picks the new code up; -d so we return.
     #
     # SYSIBLE_SLOP_REV is read by the compose file as a build arg, so each image

@@ -256,7 +256,22 @@ if grep -q '^SYSIBLE_INTEGRATED=' "$HERE/.env" 2>/dev/null; then
 else
   run_sh "printf 'SYSIBLE_INTEGRATED=1\n' >> '$HERE/.env'"
 fi
-ok "SYSIBLE_INTEGRATED=1 in .env -- sysiblectl and the updater read it from there"
+# AND the profile those three services sit behind. This script passes
+# --profile integrated on its own command lines, so the stack comes up; what it
+# did not do is leave anything behind that makes LATER commands carry it. The
+# updater runs `docker compose up -d --build` from a literal argv, and with no
+# profile that rebuilds the platform and silently skips the Controller, SLEP
+# and Connect -- new code pulled, old images left running, "Up to date" on the
+# screen. Compose reads COMPOSE_PROFILES from the project .env, so putting it
+# there makes every later command carry it.
+if grep -q '^COMPOSE_PROFILES=' "$HERE/.env" 2>/dev/null; then
+  grep -q '^COMPOSE_PROFILES=.*integrated' "$HERE/.env" \
+    || run_sh "sed -i 's/^COMPOSE_PROFILES=\(.*\)/COMPOSE_PROFILES=\1,integrated/' '$HERE/.env'"
+else
+  run_sh "printf 'COMPOSE_PROFILES=integrated\n' >> '$HERE/.env'"
+fi
+ok "SYSIBLE_INTEGRATED=1 and COMPOSE_PROFILES=integrated in .env -- every later"
+ok "  docker compose command carries the profile, the updater's included"
 run_sh "cd '$HERE' && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d --build" \
   || die "compose could not bring the platform up (the error is above).
        Nothing was deleted. '$0 --rollback' puts this host back."

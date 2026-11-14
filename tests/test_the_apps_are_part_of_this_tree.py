@@ -196,25 +196,40 @@ def _apps_module(mp, slop_dir, src_dir, integrated=True):
     return importlib.reload(mod)
 
 
-def test_an_integrated_host_keeps_every_products_row(monkeypatch, tmp_path):
-    """A vendored product is not separately updatable and does NOT vanish.
+def test_an_integrated_host_has_one_product_row(monkeypatch, tmp_path):
+    """On an integrated host the three apps are SERVICES OF THE PLATFORM.
 
-    Making the row disappear would be the easy implementation and the wrong
-    one: an operator who knows this platform has a Controller would be left to
-    work out that the row went away because the source moved to another
-    repository. It keeps its name, its description and its services, and says
-    what updates it.
+    This test asserted the opposite until it was asked for, repeatedly, in
+    these words: "Everything should be under slop." The old reasoning was that
+    a row should not vanish because the source moved -- an operator who knows
+    there is a Controller should still find it. The name IS still there, on
+    the service card under the platform's row. What the reasoning got wrong
+    was that finding it required a PRODUCT row, which is how the screen came
+    to show three products that cannot be installed, updated or removed on
+    their own: three headings, three version lines and three verdicts for
+    things with one checkout, one compose file and one build between them.
     """
     apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
-    assert apps.keys() == ["controller", "slep", "connect", "slop"], \
-        f"a product lost its row: {apps.keys()}"
+    monkeypatch.setenv("SYSIBLE_INTEGRATED", "1")
+    assert apps.keys() == ["slop"], \
+        f"an integrated host still lists separate products: {apps.keys()}"
+    # The apps lead the platform's services: the three consoles an operator
+    # opens, then the parts that serve them.
+    assert apps.module_keys("slop")[:3] == ["controller", "slep", "connect"]
+    assert "gateway" in apps.module_keys("slop")
     assert all(apps.is_vendored(k) for k in ("controller", "slep", "connect"))
     assert not apps.is_vendored("slop")
     # Its services are SLOP's to run, so compose has to be asked in SLOP's
     # directory — anywhere else reports no containers on a host where it runs.
     assert apps.compose_dir_for("controller") == apps.compose_dir_for("slop")
-    # ...and the cards stay on their own product rather than being swept into
-    # the platform's, which would leave three rows with nothing in them.
+
+
+def test_a_split_host_still_has_four_rows(monkeypatch, tmp_path):
+    """Three separate checkouts with three compose projects of their own. The
+    folding above is about the INTEGRATED layout and must not reach these."""
+    apps = _apps_module(monkeypatch, REPO, tmp_path / "empty-src")
+    monkeypatch.delenv("SYSIBLE_INTEGRATED", raising=False)
+    assert apps.keys() == ["controller", "slep", "connect", "slop"]
     assert apps.module_keys("controller") == ["controller"]
     assert "controller" not in apps.module_keys("slop")
 

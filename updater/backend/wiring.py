@@ -249,3 +249,77 @@ def recreate_controller(timeout: float = 180) -> tuple[bool, str]:
     if p.returncode != 0:
         return False, (p.stderr or p.stdout or "").strip()[:300]
     return True, "the Controller was recreated with the new settings"
+
+
+# ---------------------------------------------------------------------------
+# The profile the vendored apps sit behind
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS. On an integrated host the Controller, SLEP and Connect are
+# services of SLOP's compose file, declared `profiles: ["integrated"]`. That
+# keeps them out of a split host's stack, which is right.
+#
+# What it also does, and this is the part that cost real time: a compose
+# command with no profile does not merely decline to START them. It does not
+# BUILD them and it does not RECREATE them, and it says nothing about having
+# left them out. jobs.py runs
+#
+#     docker compose up -d --build
+#
+# from a LITERAL argv -- deliberately, so nothing in it can come from a
+# request. With no profile that command pulled new code, rebuilt the six
+# unprofiled services, left the Controller, SLEP and Connect running the image
+# they already had, and returned success. The page then said "Up to date at
+# <new commit>", which was true of the checkout and false of the three apps an
+# operator actually looks at. Reported as: "I don't see any difference."
+#
+# The fix is not another flag on that argv. Compose reads COMPOSE_PROFILES from
+# the project's .env, so putting it there makes every compose command run from
+# that directory carry the profile -- the updater's, sysiblectl's, and the
+# operator's own. install.sh writes it for new installs; this repairs the hosts
+# that were installed or migrated before it did.
+PROFILE_KEY = "COMPOSE_PROFILES"
+INTEGRATED_PROFILE = "integrated"
+
+
+def integrated_env(env: dict) -> bool:
+    """Whether this .env says the host runs the one-checkout layout."""
+    return (env.get("SYSIBLE_INTEGRATED") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def plan_profile(slop_env: dict) -> dict:
+    """What COMPOSE_PROFILES must become, or {} if it is already right.
+
+    Only ADDS the profile to whatever is there: an operator who set
+    COMPOSE_PROFILES for a reason of their own keeps it.
+    """
+    if not integrated_env(slop_env):
+        return {}
+    have = [p.strip() for p in (slop_env.get(PROFILE_KEY) or "").split(",") if p.strip()]
+    if INTEGRATED_PROFILE in have:
+        return {}
+    return {PROFILE_KEY: ",".join(have + [INTEGRATED_PROFILE])}
+
+
+def repair_profile(slop_root: Path | None = None) -> tuple[dict, list[str]]:
+    """Put the integrated profile in SLOP's .env if this host needs it."""
+    if slop_root is None:
+        slop_root = apps.checkout_dir("slop")
+        if slop_root is None:
+            return {}, []
+    slop_dir = apps.compose_dir(slop_root) or slop_root
+    slop_env_path = slop_dir / ".env"
+    if not slop_env_path.is_file():
+        return {}, []
+
+    changes = plan_profile(read_env(slop_env_path))
+    if not changes:
+        return {}, []
+    try:
+        upsert(slop_env_path, changes)
+    except OSError as e:
+        return {}, [f"! could not write {slop_env_path}: {e}"]
+    return changes, [
+        f"+ {PROFILE_KEY}={changes[PROFILE_KEY]} in {slop_env_path} — without it "
+        f"this update would have rebuilt the platform and silently skipped the "
+        f"Controller, SLEP and Connect"]

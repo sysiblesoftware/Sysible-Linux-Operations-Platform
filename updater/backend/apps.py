@@ -149,17 +149,35 @@ def is_vendored(key: str) -> bool:
             and checkout_dir(key) is None)
 
 
-def keys() -> list[str]:
-    """Every product, vendored or not.
+# The three that are built from SLOP's own tree on an integrated host.
+VENDORED_KEYS = ("controller", "slep", "connect")
 
-    A vendored product keeps its row. It is not separately UPDATABLE — there is
-    no checkout to pull and no compose project of its own to build — and the row
-    says so instead of offering a button that cannot work. What it does not do is
-    disappear: an operator who knows this platform has a Controller should not
-    have to work out that the row went away because the source moved into another
-    repository. Its services are still its own, listed under its own name.
+
+def keys() -> list[str]:
+    """Every product with a row of its own.
+
+    ON AN INTEGRATED HOST, three of them have none. The Controller, SLEP and
+    Connect are not separate products there -- one checkout, one compose file,
+    one build, one update -- and a row each said otherwise: three headings,
+    three version lines and three "Up to date" verdicts for things that cannot
+    be up to date independently of the platform.
+
+    They are services under the platform's row instead, which is what they are.
+    Asked for repeatedly, in these words: "Everything should be under slop."
+
+    This file previously argued the other way -- that a row should not vanish
+    because the source moved. That reasoning was about the row's NAME being
+    findable, and the name is still there: on the platform's row, on the
+    service card that carries it. What it got wrong was treating "findable" as
+    requiring a product row, which is how the screen ended up claiming three
+    products that cannot be separately installed, updated or removed.
+
+    A SPLIT host is unchanged: there the three really are separate checkouts
+    with separate compose projects, and they keep their rows.
     """
-    return list(ALLOWLIST)
+    if not integrated():
+        return list(ALLOWLIST)
+    return [k for k in ALLOWLIST if k not in VENDORED_KEYS]
 
 
 def modules(key: str) -> list[dict]:
@@ -174,13 +192,18 @@ def modules(key: str) -> list[dict]:
 def _entries(key: str) -> tuple[tuple[str, str, str], ...]:
     """This product's service entries.
 
-    Deliberately NOT folded into the platform's row when the product is
-    vendored. The services are built from SLOP's tree then, and the platform IS
-    what updates them — but they are still the Controller's services, and the
-    screen has a row with the Controller's name on it to put them under. Moving
-    them would make the platform's row nine cards deep and leave three rows with
-    nothing in them, which is the shape this screen was just taken out of.
+    On an integrated host the platform's row carries the vendored apps'
+    services too, because they ARE its services: same checkout, same compose
+    file, same build. keys() drops their product rows in the same case, so
+    nothing is listed twice and no row is left empty.
+
+    The apps come FIRST in that list. The platform's row then reads as the
+    three consoles an operator opens, then the parts that serve them, rather
+    than burying the Controller below the updater sidecar.
     """
+    if key == "slop" and integrated():
+        vendored_svcs = tuple(e for k in VENDORED_KEYS for e in MODULES.get(k, ()))
+        return vendored_svcs + MODULES.get("slop", ())
     return MODULES.get(key, ())
 
 

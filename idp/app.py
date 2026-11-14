@@ -3247,6 +3247,42 @@ _UPDATES_JS = r"""
 # The updater's answer REPLACES all of it on the first successful poll, so the
 # only thing that can go wrong is drift; tests/test_updates_modules.py compares
 # the two tables and fails when they disagree.
+# The three built from SLOP's own tree on an integrated host. Mirrors
+# updater/backend/apps.py:VENDORED_KEYS, which tests/test_updates_modules.py
+# compares against this file.
+_VENDORED_KEYS = ("controller", "slep", "connect")
+
+
+def _integrated() -> bool:
+    """Whether this host runs the one-checkout layout.
+
+    Set by install.sh in the compose .env, so it reaches both this process and
+    the updater's. Read here rather than asked of the updater because the
+    skeleton has to be right BEFORE the first poll -- the whole point of
+    rendering it server-side is that the page is not wrong while it waits.
+    """
+    return (os.environ.get("SYSIBLE_INTEGRATED") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _skeleton_products() -> tuple[tuple[str, str], ...]:
+    """The rows, in order. On an integrated host there is ONE.
+
+    The Controller, SLEP and Connect are not separate products there: one
+    checkout, one compose file, one build, one update. A row each claimed
+    three things that cannot be installed, updated or removed on their own.
+    They are services under the platform's row instead. Asked for in these
+    words, more than once: "Everything should be under slop."
+    """
+    rows = (("controller", "Sysible Controller"),
+            ("slep", "Sysible Linux Engineering Platform"),
+            ("connect", "Sysible Connect"),
+            ("slop", "Sysible Linux Operations Platform"))
+    if not _integrated():
+        return rows
+    return tuple((k, l) for k, l in rows if k not in _VENDORED_KEYS)
+
+
 _SKELETON_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
     "controller": (
         ("controller", "Controller"),
@@ -3292,6 +3328,11 @@ def _skeleton_modules(key: str) -> str:
     other three.
     """
     mods = _SKELETON_MODULES.get(key, ())
+    if key == "slop" and _integrated():
+        # The apps first: the row then reads as the three consoles an operator
+        # opens, then the parts that serve them.
+        mods = tuple(m for k in _VENDORED_KEYS
+                     for m in _SKELETON_MODULES.get(k, ())) + mods
     disc = (f"<div class=prod-disc>"
             f"<button type=button class=svc-tw id='d-{key}' data-disc='{key}' "
             f"aria-expanded=true aria-controls='mods-{key}'>"
@@ -3316,10 +3357,7 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
     # The SLOP row deliberately carries no "— gateway, sign-in, Flashback, …"
     # suffix any more. That list went stale the moment Baseline shipped; the
     # module sections below each row name them, and are generated from one table.
-    for key, lbl in (("controller", "Sysible Controller"),
-                     ("slep", "Sysible Linux Engineering Platform"),
-                     ("connect", "Sysible Connect"),
-                     ("slop", "Sysible Linux Operations Platform")):
+    for key, lbl in _skeleton_products():
         rows.append(
             f"<div class=prod id='p-{key}'>"
             f"<div class=prod-name>{escape(lbl)}</div>"
