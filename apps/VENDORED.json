@@ -26,7 +26,7 @@
       "label": "Sysible Linux Engineering Platform",
       "repo": "https://github.com/sysiblesoftware/sysible-linux-engineering-platform",
       "branch": "main",
-      "commit": "3e1d23ff3f4b",
+      "commit": "15c3a9c15365",
       "compose_service": "slep",
       "path_prefix": "/slep/"
     },
@@ -34,7 +34,7 @@
       "label": "Sysible Connect",
       "repo": "https://github.com/sysiblesoftware/sysible-connect",
       "branch": "main",
-      "commit": "558be0646988",
+      "commit": "a9975e8433db",
       "compose_service": "connect",
       "path_prefix": "/connect/"
     }
