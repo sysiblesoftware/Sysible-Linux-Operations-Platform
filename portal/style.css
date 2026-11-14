@@ -1,7 +1,7 @@
 /* Sysible Linux Operations Platform — portal. Matches the suite: brand green on an
    engineering-dark ground, with a light theme toggle. */
 :root {
-  --bg: #0d1117; --panel: #131923; --panel2: #1a212d; --line: #26303f;
+  --bg: #0d1117; --panel: #131923; --line: #26303f;
   --text: #e6edf5; --muted: #9aa7bd; --faint: #6f7d92;
   --accent: #43a047; --accent2: #5580ee; --green: #43a047; --red: #e5534b; --amber: #e0a83b;
   --on-accent: #0d1117;   /* text on a coloured fill; white fails AA on all of ours */
@@ -22,7 +22,7 @@
   --portal-assets: 2;
 }
 :root[data-theme="light"] {
-  --bg: #eef1f6; --panel: #ffffff; --panel2: #f3f5f9; --line: #dbe1ea;
+  --bg: #eef1f6; --panel: #ffffff; --line: #dbe1ea;
   --text: #1b2431; --muted: #5b6675; --faint: #8794a4;
   --accent: #2f8a37; --accent2: #2f6fe0; --green: #2f9e4a; --red: #d23a30;
   --shadow: 0 1px 2px rgba(20,30,50,.08), 0 10px 30px rgba(20,30,50,.10);

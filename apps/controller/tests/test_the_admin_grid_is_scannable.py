@@ -168,10 +168,33 @@ class TestTheTilesAreSizedForALabel:
         m = re.search(r"\.tool-grid \{[^}]*repeat\((\d+), 1fr\)", self.CSS_TEXT)
         assert m and int(m.group(1)) >= 4, "still three columns"
 
-    @pytest.mark.parametrize("w", [1400, 1040, 700])
-    def test_it_steps_down_for_narrow_screens(self, w):
-        assert f"max-width: {w}px" in self.CSS_TEXT, \
-            f"no breakpoint at {w}px — four columns would survive onto a phone"
+    def test_it_steps_down_for_narrow_screens(self):
+        """Four columns must not survive onto a phone.
+
+        This named the three widths -- 1400, 1040, 700 -- and so failed when
+        the console's eight ad-hoc breakpoints were consolidated into four,
+        for a grid that still steps down exactly as before. A test that
+        pins the NUMBER teaches the next person to edit the test; what
+        matters is the shape: the grid narrows as the screen does, and ends
+        at one column.
+        """
+        # `grid-template-columns: 1fr` is one column written the short way;
+        # normalising it first keeps the pattern to a single shape.
+        css = self.CSS_TEXT.replace("grid-template-columns: 1fr;",
+                                    "grid-template-columns: repeat(1, 1fr);")
+        steps = [(int(w), int(c)) for w, c in re.findall(
+            r"@media[^{]*max-width:\s*(\d+)px[^{]*\{\s*\.tool-grid\s*\{[^}]*?"
+            r"grid-template-columns:\s*repeat\((\d+), 1fr\)", css)]
+        assert len(steps) >= 3, (
+            f"the tool grid steps down {len(steps)} time(s); four columns on a "
+            f"wide screen needs three to reach one on a phone: {steps}")
+        widths = [w for w, _ in steps]
+        assert widths == sorted(widths, reverse=True), \
+            f"the step-downs are not in descending width order: {steps}"
+        cols = [c for _, c in steps]
+        assert cols == sorted(cols, reverse=True), \
+            f"a narrower screen does not get fewer columns: {steps}"
+        assert cols[-1] == 1, f"the narrowest step is {cols[-1]} columns, not 1"
 
 
 class TestTheIconsUseTheBrandRamp:
@@ -240,7 +263,15 @@ def _ramp_values(css, theme):
     selector (`:root,\n:root[data-skin="base"] {`), so matching `:root\s*\{`
     skips it entirely and the check silently finds nothing to test. Walk out
     from each declaration to its own block instead.
+
+    COMMENTS ARE STRIPPED FIRST. The dark block is the first in the file, so
+    "the text since the previous }" is everything above it -- the file header.
+    A header that merely MENTIONS [data-theme="light"], as prose explaining the
+    layers, was read as the block's own selector, and the dark ramp vanished
+    from a test that then passed on the light half and reported "found 0". A
+    comment must not be able to change what a parser believes.
     """
+    css = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
     out = {}
     for m in re.finditer(r"--ramp\d:\s*#[0-9a-f]{6}", css):
         open_brace = css.rfind("{", 0, m.start())

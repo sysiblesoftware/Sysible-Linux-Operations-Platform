@@ -1595,8 +1595,13 @@ def _admin_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = 
         "<a class=back href='/'>&larr; Portal</a>"
         f"<div class=top><h1>Administration · Accounts</h1><span class=pill>{escape(sess['username'])} · superuser</span></div>"
         + _admin_nav("accounts")
-        + "<p class=sub>One credential signs a user into all three apps, "
-        "and the role set here is the role every app enforces.</p>"
+        # "all three apps" was written when there were three. It also carries
+        # the note the Apps page used to open with: accounts are not per app,
+        # and this is the page that says so, to someone already looking for
+        # accounts rather than to everyone visiting Apps.
+        + "<p class=sub>One credential signs a user into every app, and the "
+        "role set here is the role every app enforces. Accounts and password "
+        "resets are only here &mdash; no app keeps its own.</p>"
         f"{_msg(msg, kind)}"
         f"<h2 class=sect>{n} account{'' if n == 1 else 's'}</h2>"
         f"<div class=accts>{accts}</div>"
@@ -2120,16 +2125,16 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
         f"<div class=top><h1>Administration · Apps</h1>"
         f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
         + _admin_nav("apps")
-        +         "<p class=sub>Each app&rsquo;s own administration, hosted here &mdash; you are signed "
-        "in once and stay in Administration. Accounts and password resets are NOT here per "
-        "app: SLOP owns identity, so they live under "
-        "<a href='/admin'>Accounts</a> for every app at once.</p>"
-        f"<div class=prodtabs>{prod}</div>"
+        # ONE line, not two paragraphs. The page opened with an explanation of
+        # what it is and a second one about where accounts are NOT -- both true,
+        # both above the content, every visit. The "signed in once" promise is
+        # what the page demonstrates by working; the accounts note belongs
+        # beside Accounts, where someone looking for accounts already is.
+        + f"<div class=prodtabs>{prod}</div>"
         f"{sub}"
         # The hint used to sit AFTER the iframe while saying "the panel below".
-        f"<p class=sub>This is {escape(label)}&rsquo;s own administration, embedded. "
-        f"It can also be opened "
-        f"<a href='{escape(src)}' target=_blank rel=noopener>on its own &rarr;</a>.</p>"
+        f"<p class=sub>{escape(label)}&rsquo;s own administration, embedded. "
+        f"<a href='{escape(src)}' target=_blank rel=noopener>Open on its own &rarr;</a></p>"
         # No data-label/data-src: nothing ever read them. _APPFRAME_JS works off
         # the element id and its own fetch, so the attributes were two more
         # copies of the label and the url to keep in step for no reader.
