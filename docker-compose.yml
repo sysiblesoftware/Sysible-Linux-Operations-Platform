@@ -424,6 +424,12 @@ services:
       # own; without this the names this machine resolves are unknown in here.
       # Lookups only -- the Controller never writes it.
       - /etc/hosts:/host/etc/hosts:ro
+      # The host's resolver config, so enrollment resolves a name the way this
+      # machine does. Both files: /etc/resolv.conf is the systemd-resolved stub
+      # pointer (127.0.0.53, which in here is this container), and the run file
+      # holds the real upstream servers.
+      - /run/systemd/resolve/resolv.conf:/host/run/resolv.conf:ro
+      - /etc/resolv.conf:/host/etc/resolv.conf:ro
       - controller-data:/data
 
   slep:
