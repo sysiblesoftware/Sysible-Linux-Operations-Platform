@@ -2188,7 +2188,7 @@ _UPDATES_JS = r"""
     if(row)row.classList.remove('due');
     if(!a.installed){
       td.appendChild(st('unk','Not installed', 'on this host'));
-      hide('b-'+a.key); hide('m-'+a.key);
+      hide('b-'+a.key); hide('r-'+a.key); hide('m-'+a.key);
       // paintModules too. The updater reports a product's services even when it
       // is NOT installed here, deliberately \u2014 so the screen can say what
       // would come with it rather than silently omitting it. This branch used to
@@ -2323,6 +2323,13 @@ _UPDATES_JS = r"""
     if(!box)return;
     box.innerHTML='';
     var acts=(a.installed && (a.actions||[]).length) ? a.actions : [];
+    var rst=document.getElementById('r-'+a.key);
+    if(rst){
+      rst.hidden = acts.indexOf('restart') < 0;
+      rst.onclick = function(){ runAction(a.key, 'restart', rst); };
+    }
+    // Offered once. It is on the row now, so the fold holds what is left.
+    acts = acts.filter(function(x){ return x !== 'restart'; });
     if(tog){
       tog.hidden = !acts.length;
       if(!acts.length){ box.hidden=true; tog.setAttribute('aria-expanded','false'); }
@@ -2555,16 +2562,24 @@ _UPDATES_JS = r"""
       var mods=document.getElementById('mods-'+key);
       if(mods) mods.classList.toggle('managing', open);
       t.setAttribute('aria-expanded', open?'true':'false');
-      t.textContent = open ? 'Hide' : 'Manage';
+      t.textContent = open ? 'Hide' : 'More actions';
     });
   }
   function runAction(key, act, b){
     // Stop and restart interrupt service; make that explicit before doing it.
+    // The platform's own restart takes the Controller, SLEP and Connect with
+    // it -- they are services of this compose project -- and this console too.
+    // "Restart slop? Brief downtime" undersold all three.
+    var whole = (key==='slop' && (act==='restart'||act==='recreate'));
     var warn = (act==='stop')
       ? 'Stop '+key+"? Its services will be DOWN until you start them again."
-      : (act==='restart'||act==='recreate')
-        ? (act==='restart'?'Restart ':'Recreate ')+key+'? Brief downtime while it comes back.'
-        : null;
+      : whole
+        ? (act==='restart'?'Restart':'Recreate')+' everything? Every container '
+          + 'the platform runs goes down and comes back, this page included. '
+          + 'A few seconds.'
+        : (act==='restart'||act==='recreate')
+          ? (act==='restart'?'Restart ':'Recreate ')+key+'? Brief downtime while it comes back.'
+          : null;
     if(warn && !window.confirm(warn)) return;
     b.disabled=true;
     var body=new URLSearchParams();
@@ -2600,10 +2615,12 @@ _UPDATES_JS = r"""
     var btn=el('button','btn','Update now'); btn.id='b-'+a.key;
     btn.setAttribute('data-app',a.key); btn.hidden=true; btn.disabled=true;
     btn.addEventListener('click',function(){ startUpdate(a.key, btn); });
-    var tog=el('button','btn ghost sm','Manage'); tog.id='m-'+a.key;
+    var rst=el('button','btn ghost','Restart everything'); rst.id='r-'+a.key;
+    rst.setAttribute('data-restart',a.key); rst.hidden=true;
+    var tog=el('button','btn ghost sm','More actions'); tog.id='m-'+a.key;
     tog.setAttribute('data-manage',a.key); tog.setAttribute('aria-expanded','false');
     tog.hidden=true;
-    act.appendChild(btn); act.appendChild(tog);
+    act.appendChild(btn); act.appendChild(rst); act.appendChild(tog);
     var meta=el('div','prod-meta'); meta.id='s-'+a.key;
     if(a.blurb) meta.textContent=a.blurb;
     var ctrls=el('div','prod-controls'); ctrls.id='a-'+a.key; ctrls.hidden=true;
@@ -2681,7 +2698,7 @@ _UPDATES_JS = r"""
       td.innerHTML='';
       td.appendChild(st('unk','Not managed here',
         'the updater does not track this product'));
-      hide('b-'+key); hide('m-'+key);
+      hide('b-'+key); hide('r-'+key); hide('m-'+key);
       var box=document.getElementById('a-'+key);
       if(box){ box.innerHTML=''; box.hidden=true; }
       staleModules(key);
@@ -2926,7 +2943,7 @@ _UPDATES_JS = r"""
         td.innerHTML='';
         td.appendChild(st('unk','Not known',"the updater could not be asked"));
       }
-      hide('b-'+key); hide('m-'+key);
+      hide('b-'+key); hide('r-'+key); hide('m-'+key);
       staleModules(key);
     });
     if(tries < 5){
@@ -3367,11 +3384,20 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
             # sign-out confirm because SLOP's own rebuild takes this console with it.
             f"<button class=btn id='b-{key}' data-app='{key}' data-all=1 data-slop=1 "
             f"hidden disabled>Update now</button>"
+            # Restart, in the open. It was inside the Manage disclosure, which
+            # is a reasonable place for Stop and Recreate and the wrong one for
+            # the action an operator comes to this page wanting -- "there is no
+            # way to restart everything from the GUI" was a true sentence about
+            # a button that existed. One row means one platform, so the label
+            # says what it does: the restart covers the Controller, SLEP and
+            # Connect too, because they are services of this compose project.
+            f"<button class='btn ghost' id='r-{key}' data-restart='{key}' "
+            f"hidden>Restart everything</button>"
             # data-MANAGE, never data-app: the page binds startUpdate() to every
             # button[data-app], so a toggle carrying it would post an update —
             # on the platform row, behind the "you will be signed out" confirm.
             f"<button class='btn ghost sm' id='m-{key}' data-manage='{key}' "
-            f"aria-expanded=false hidden>Manage</button>"
+            f"aria-expanded=false hidden>More actions</button>"
             f"</div>"
             # The one-line description, server-rendered: it is fixed copy, not
             # something to wait on the updater for. .prod-meta used to hold the
@@ -3394,7 +3420,11 @@ def _updates_page(sess: sqlite3.Row, tok: str) -> str:
         "the same thing <code>sysiblectl &lt;product&gt; update</code> does. A "
         "checkout with local changes is reported and refused rather than "
         "overwritten.</p>"
-        "<p><b>Manage</b> restarts, stops, starts or recreates a product's "
+        "<p><b>Restart everything</b> restarts every container the platform "
+        "runs &mdash; the Controller, SLEP and Connect included, since they are "
+        "services of this same compose project. This console goes with them, so "
+        "the page drops for a few seconds and comes back.</p>"
+        "<p><b>More actions</b> stops, starts or recreates a product's "
         "containers, so a wedged service does not need a shell on the host. "
         "<b>Recreate</b> applies a compose or environment change using the images "
         "already built, so it is much quicker than a full update.</p>"

@@ -567,6 +567,15 @@ def start_action(key: str, action: str, compose: Path, actor: str) -> tuple[bool
     if refusal:
         return False, refusal
     argv, verb = ACTIONS[action]
+    # The same repair the UPDATE path does, for the same reason. Without
+    # COMPOSE_PROFILES in SLOP's .env, `docker compose restart` restarts the
+    # platform's own services and silently leaves the Controller, SLEP and
+    # Connect alone -- they are profile-gated, and compose does not mention
+    # services it is not considering. "Restart everything" has to mean
+    # everything, so the profile is put back before the verb runs rather than
+    # only when somebody happens to update.
+    if key in SELF_AFFECTING and action in ("restart", "start", "recreate"):
+        wiring.repair_profile()
     if detached.running():
         return False, "An update of slop is already running — wait for it to finish."
     if not _lock.acquire(blocking=False):
