@@ -419,17 +419,31 @@ services:
       # point any of the URLs above at something published on the host.
       - "host.docker.internal:host-gateway"
     volumes:
-      # The platform host's OWN /etc/hosts, read-only, so enrollment can turn a
-      # host NAME with no address into one. A container's /etc/hosts is its
-      # own; without this the names this machine resolves are unknown in here.
-      # Lookups only -- the Controller never writes it.
-      - /etc/hosts:/host/etc/hosts:ro
-      # The host's resolver config, so enrollment resolves a name the way this
-      # machine does. Both files: /etc/resolv.conf is the systemd-resolved stub
-      # pointer (127.0.0.53, which in here is this container), and the run file
-      # holds the real upstream servers.
-      - /run/systemd/resolve/resolv.conf:/host/run/resolv.conf:ro
-      - /etc/resolv.conf:/host/etc/resolv.conf:ro
+      # The SERVER's /etc, read-only -- the DIRECTORY, not the single files
+      # this used to mount, so enrollment can turn a host NAME with no address
+      # into one. A container's own /etc/hosts is Docker's (the container id,
+      # host.docker.internal, ip6 boilerplate), so without this the names this
+      # machine resolves are unknown in here. Lookups only; never written.
+      #
+      # The directory is the whole point. A bind mount of a FILE is bound to
+      # that file's INODE, not its name, so the moment somebody edits
+      # /etc/hosts with vim or sed -i -- both write a new file and rename it
+      # over the old one -- this container goes on reading the inode that is
+      # no longer /etc/hosts. Forever, and silently: the mount still reports
+      # present and still reads fine. Mounting the directory resolves the name
+      # on every open, so an edit on the server shows up here at once.
+      #
+      # Read-only, and the Controller runs as uid 10001, so /etc/shadow (0640
+      # root:shadow) and the host keys stay unreadable.
+      - /etc:/host/etc:ro
+      # systemd-resolved's REAL upstream servers, so enrollment resolves a name
+      # the way this machine does. /etc/resolv.conf is the stub pointer
+      # (127.0.0.53, which in here is this container); the upstreams live here.
+      # The directory again: resolved rewrites resolv.conf by rename on every
+      # network change, so a file mount freezes the server list at container
+      # creation. Without systemd-resolved this is an empty directory and the
+      # resolver falls through to /host/etc/resolv.conf.
+      - /run/systemd/resolve:/host/run/systemd-resolve:ro
       - controller-data:/data
 
   slep:
