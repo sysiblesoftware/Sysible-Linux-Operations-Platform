@@ -272,7 +272,26 @@ else
 fi
 ok "SYSIBLE_INTEGRATED=1 and COMPOSE_PROFILES=integrated in .env -- every later"
 ok "  docker compose command carries the profile, the updater's included"
-run_sh "cd '$HERE' && ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d --build" \
+# --remove-orphans and the revision, both of which `sysiblectl <p> update` has
+# always passed and this did not.
+#
+# --remove-orphans: a container carrying THIS project's labels under a service
+# name the file no longer defines goes on running, unmanaged, still holding its
+# published ports. Flashback's is the one that bites -- the service was briefly
+# renamed, and a container left from that window holds the agent port, so the
+# real one cannot bind it and dies on startup. Compose only removes orphans: a
+# container whose service still exists in the file is never touched.
+#
+# SYSIBLE_SLOP_REV: every image takes the commit it was built from as a build
+# arg, and every console prints it. Without it they all say "version unknown",
+# which is how you end up unable to tell whether the fix you just installed is
+# the code that is running.
+MIG_REV="$(git -C "$HERE" rev-parse --short=12 HEAD 2>/dev/null || true)"
+# One string: run_sh takes `$1` and nothing else, so an `env VAR=x` prefix
+# passed as separate arguments would have run `env` on its own -- and printed
+# just that under --dry-run, which is the half of this script that is supposed
+# to show exactly what the real run does.
+run_sh "cd '$HERE' && SYSIBLE_SLOP_REV='$MIG_REV' ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d --build --remove-orphans" \
   || die "compose could not bring the platform up (the error is above).
        Nothing was deleted. '$0 --rollback' puts this host back."
 

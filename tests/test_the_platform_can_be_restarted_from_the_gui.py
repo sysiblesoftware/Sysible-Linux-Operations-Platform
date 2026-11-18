@@ -119,3 +119,53 @@ def test_restart_is_an_action_the_platform_row_accepts():
     # ...and stop must still be refused: it would take the gateway and this
     # console down with no way back but a shell on the host.
     assert jobs.action_refusal("slop", "stop") is not None
+
+
+# ---- the migration brings the stack up the way an update does --------------
+#
+# After migrating, Flashback and Baseline were dark and the footer said
+# "version unknown". `sysiblectl <p> update` has always passed --remove-orphans
+# and SYSIBLE_SLOP_REV on its `up`; this script, which is the other way the
+# whole stack gets brought up, passed neither.
+
+MIGRATE = (REPO / "tools" / "migrate-to-integrated").read_text(encoding="utf-8")
+
+
+def _bring_up_line():
+    m = re.search(r"^run_sh \"cd '\$HERE'.*?up -d --build.*$", MIGRATE, re.M)
+    assert m, "the migration's bring-up is gone or no longer in the expected shape"
+    return m.group(0)
+
+
+def test_the_migration_removes_orphans_on_the_way_up():
+    """A container carrying this project's labels under a service name the file
+    no longer defines keeps running, unmanaged, still holding its published
+    ports. Flashback's is the one that bites: the service was briefly renamed,
+    and a container left from that window holds the agent port, so the real one
+    cannot bind it and dies on startup."""
+    assert "--remove-orphans" in _bring_up_line(), _bring_up_line()
+
+
+def test_the_migration_stamps_the_revision_it_built():
+    """Every image takes the commit it was built from as a build arg and every
+    console prints it. Without it they all say "version unknown", which is how
+    you end up unable to tell whether the fix you just installed is running."""
+    line = _bring_up_line()
+    assert "SYSIBLE_SLOP_REV=" in line, line
+    assert "MIG_REV" in MIGRATE and "rev-parse" in MIGRATE
+
+
+def test_the_bring_up_is_one_string_because_run_sh_takes_one():
+    """run_sh is `bash -c "$1"`. An `env VAR=x` prefix passed as separate
+    arguments runs `env` on its own -- and prints just that under --dry-run,
+    which is the half of this script meant to show exactly what the real run
+    does."""
+    assert not re.search(r"^run_sh env ", MIGRATE, re.M), \
+        "the bring-up passes arguments run_sh will drop"
+
+
+def test_the_dry_run_still_shows_the_whole_command():
+    """--dry-run is the same code path with the last step removed. A command
+    the dry run cannot print is a command nobody can review."""
+    m = re.search(r"^run_sh\(\) \{.*?^\}", MIGRATE, re.S | re.M)
+    assert m and '"$1"' in m.group(0), m.group(0) if m else "run_sh is gone"
