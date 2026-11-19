@@ -842,7 +842,16 @@ display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
 gap:.4rem;align-content:start}
 .prod-mods[hidden]{display:none}
 .prod-mods>.mods-f{grid-column:1/-1}
-.mod{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.2rem .8rem;
+/* ONE column. The buttons used to sit in a second `auto` track beside the
+   text, and `auto` means max-content: four buttons measure ~250px, the cards
+   are ~330px wide inside, and minmax(0,1fr) let the text shrink to whatever
+   was left -- 69px. The name was clipped mid-word and the description came
+   out one word per line, 250px tall. The 640px breakpoint below stacked them,
+   but that is the VIEWPORT's width and the cards are 280-350px at every
+   viewport above it, so the broken layout was the desktop layout. Four
+   buttons do not fit beside a title in a 330px card at any window size, so
+   they go underneath at every size. */
+.mod{display:grid;grid-template-columns:minmax(0,1fr);gap:.2rem .8rem;
 align-items:start;padding:.55rem .65rem;border-radius:9px;background:var(--panel2);
 border:1px solid var(--line)}
 /* The grid gap spaces them now; a sibling margin would add to it, and only
@@ -857,7 +866,7 @@ border:1px solid var(--line)}
    away in six new places — and the sections are there to be READ. So: sections
    always visible, controls only while managing. The class is on the container,
    which a repaint does not rebuild, so toggling survives a refresh. */
-.mod-act{grid-row:1;grid-column:2;align-self:start;justify-self:end;
+.mod-act{grid-column:1;justify-self:start;margin-top:.45rem;
 display:none;gap:.3rem;flex-wrap:wrap}
 .prod-mods.managing .mod-act{display:flex}
 .mod-why{grid-column:1;color:var(--faint);font-size:11.5px;line-height:1.4;
@@ -866,10 +875,6 @@ margin-top:.2rem;display:none}
 .prod-mods>.mods-f{color:var(--faint);font-size:11.5px;line-height:1.45;
 margin-top:.45rem}
 .mod.down{background:color-mix(in srgb,#e0a83a 10%,var(--panel2))}
-@media(max-width:640px){
-  .mod{grid-template-columns:1fr}
-  .mod-act{grid-row:auto;grid-column:1;justify-self:start;margin-top:.35rem}
-}
 /* The row you came to act on. A tint, not another button. */
 .prod.due{background:color-mix(in srgb,#e0a83a 8%,transparent)}
 @media(max-width:640px){
