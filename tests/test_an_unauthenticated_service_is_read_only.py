@@ -62,29 +62,55 @@ def test_production_never_consults_it(app):
     assert f'{flag}: "1"' in compose, flag
 
 
-def test_one_of_them_for_real(monkeypatch):
-    """Source checks can agree with each other and still be wrong about what the
-    code does, so drive Baseline's module."""
-    # identity.py does `from . import env`, so it has to be imported AS part of a
-    # package. Each app ships its own `backend` package, so the name is loaded
-    # under a private alias and removed again — a bare `import backend.identity`
-    # would collide with whichever app got there first.
-    for k in ("SYSIBLE_BASELINE_TRUST_GATEWAY_AUTH", "SYSIBLE_BASELINE_LOCAL_ROLE",
-              "SYSIBLE_BASELINE_GATEWAY_SECRET", "SYSIBLE_SSO_SHARED_SECRET"):
+@pytest.mark.parametrize("app", sorted(APPS))
+def test_auditor_may_not_write_in_any_of_them(app):
+    """The default role being read-only only means something if the role itself
+    is. Nothing pinned _PRIVILEGED_ROLES, so an app that added "auditor" to it
+    would still report `_LOCAL_ROLE = "auditor"` and pass every check above
+    while handing an unauthenticated caller the right to queue a restore."""
+    src, _var = APPS[app]
+    m = re.search(r"_PRIVILEGED_ROLES\s*=\s*\{([^}]*)\}", src.read_text())
+    assert m, f"could not find _PRIVILEGED_ROLES in {src}"
+    roles = {r.strip().strip('\'"') for r in m.group(1).split(",") if r.strip()}
+    assert roles == {"superuser", "operator"}, \
+        f"{app} lets {sorted(roles)} write; expected superuser and operator"
+    assert "auditor" not in roles, f"{app} lets an auditor write"
+
+
+def _drive_identity(app, monkeypatch):
+    """Load one app's identity module and ask it who an unauthenticated caller is.
+
+    identity.py does `from . import env`, so it has to be imported AS part of a
+    package. Each app ships its own `backend` package, so the name is loaded
+    under a private alias and removed again — a bare `import backend.identity`
+    would collide with whichever app got there first.
+    """
+    upper = app.upper()
+    for k in (f"SYSIBLE_{upper}_TRUST_GATEWAY_AUTH", f"SYSIBLE_{upper}_LOCAL_ROLE",
+              f"SYSIBLE_{upper}_GATEWAY_SECRET", "SYSIBLE_SSO_SHARED_SECRET"):
         monkeypatch.delenv(k, raising=False)
-    pkg = "slop_baseline_pkg_localrole"
+    pkg = f"slop_{app}_pkg_localrole"
     pkg_spec = importlib.util.spec_from_file_location(
-        pkg, APPS["baseline"][0].parent / "__init__.py",
-        submodule_search_locations=[str(APPS["baseline"][0].parent)])
+        pkg, APPS[app][0].parent / "__init__.py",
+        submodule_search_locations=[str(APPS[app][0].parent)])
     pkg_mod = importlib.util.module_from_spec(pkg_spec)
     sys.modules[pkg] = pkg_mod
     if pkg_spec.loader is not None:
         pkg_spec.loader.exec_module(pkg_mod)
     monkeypatch.setitem(sys.modules, pkg, pkg_mod)
-    spec = importlib.util.spec_from_file_location(pkg + ".identity", APPS["baseline"][0])
+    spec = importlib.util.spec_from_file_location(pkg + ".identity", APPS[app][0])
     mod = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, mod)
     spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("app", sorted(APPS))
+def test_all_three_for_real(app, monkeypatch):
+    """Source checks can agree with each other and still be wrong about what the
+    code does. This used to drive Baseline only, which left the other two
+    covered by pattern-matching alone."""
+    mod = _drive_identity(app, monkeypatch)
 
     class _Req:
         headers = {}
@@ -93,3 +119,17 @@ def test_one_of_them_for_real(monkeypatch):
     assert who is not None, "the local fallback identity should still exist"
     assert who.role == "auditor", who.role
     assert who.can_write is False, "an unauthenticated caller must not be able to write"
+
+
+@pytest.mark.parametrize("app", sorted(APPS))
+def test_a_header_is_not_believed_without_the_gateways_secret(app, monkeypatch):
+    """Trust is off, so X-Sysible-Role is just something the caller typed. If any
+    of them read it here, anyone who can reach the port is a superuser."""
+    mod = _drive_identity(app, monkeypatch)
+
+    class _Req:
+        headers = {"X-Sysible-User": "attacker", "X-Sysible-Role": "superuser"}
+
+    who = mod.current(_Req())
+    assert who is None or (who.role == "auditor" and not who.can_write), \
+        f"{app} believed an unsigned X-Sysible-Role header: {who and who.role}"
