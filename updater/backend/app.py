@@ -200,14 +200,23 @@ def status(request: Request, refresh: bool = False) -> dict:
             _attach_modules(row, key, compose)
             out.append(row)
             continue
-        root = apps.checkout_dir(key)
-        if root is None:
-            # Not every SLOP host runs every product; say so plainly rather than
-            # showing it as broken.
+        # ONE ROW NOW, so every fact on it is a fact about the PLATFORM, not
+        # about one checkout. A host carrying the Controller, SLEP and Connect
+        # but no SLOP checkout used to report the single row as "not
+        # installed", which blanked a screen listing nine running services.
+        present = [k for k in apps.keys() if apps.checkout_dir(k) is not None]
+        if not present:
+            # Not every SLOP host runs every product; say so plainly rather
+            # than showing it as broken.
             row.update({"installed": False, "checked": False,
                         "reason": "not installed on this host"})
             out.append(row)
             continue
+        # The row's own git facts come from SLOP's checkout when it is here,
+        # and from the first product that IS here when it is not -- so a
+        # platform installed without the SLOP checkout still reports as
+        # checked rather than as never looked at.
+        root = apps.checkout_dir(key) or apps.checkout_dir(present[0])
         row["installed"] = True
         # WHICH checkout this is. When a pull on the host disagrees with what this
         # panel says, the first thing to establish is whether they are even looking
@@ -245,21 +254,60 @@ def status(request: Request, refresh: bool = False) -> dict:
         # one Update button, and it has to mean "bring this platform forward" --
         # not "bring SLOP forward and leave the Controller where it was", which
         # is the shape that made three pushed fixes invisible.
-        behind, blocked = [], []
+        behind, blocked, missing, unchecked = [], [], [], []
         for owner in apps.keys():
             m = managed[owner]
             if m["root"] is None:
+                # NOT silently skipped. Under the old four-row screen a product
+                # with no checkout had a row of its own that said "not
+                # installed"; folded into one row it simply stopped being
+                # mentioned, so a half-installed platform looked like a
+                # complete one with fewer services. The row carries the list.
+                missing.append(owner)
+                continue
+            if not m["git"].get("checked"):
+                # "Could not check" is not "up to date". A checkout with no
+                # upstream used to get its own row saying so; folded in, it
+                # matched neither behind nor blocked and vanished -- leaving a
+                # product nobody had looked at indistinguishable from one that
+                # had been looked at and was current.
+                unchecked.append(owner)
                 continue
             if m["git"].get("available"):
                 (blocked if m["dirty"] or m["compose"] is None else behind).append(owner)
         row["behind"] = behind
         row["blocked"] = blocked
+        row["missing"] = missing
+        row["unchecked"] = unchecked
         if behind or blocked:
             row["available"] = True
             row["can_update"] = bool(behind)
-            names = ", ".join(apps.label(k) for k in (behind or blocked))
-            row["reason"] = (f"update available: {names}" if behind else
-                             f"update available but blocked: {names}")
+            parts = []
+            if behind:
+                parts.append("update available: "
+                             + ", ".join(apps.label(k) for k in behind))
+            if blocked:
+                # WHY each one is blocked, not just that it is. "update
+                # available but blocked: Controller" used to overwrite the
+                # "local changes" line, so the one row said an update was
+                # stuck and gave the operator nothing to act on.
+                why = []
+                for k in blocked:
+                    m = managed[k]
+                    cause = ("local changes to tracked files"
+                             if m["dirty"] else "no compose file in the checkout")
+                    why.append(f"{apps.label(k)} ({cause})")
+                parts.append("update available but blocked: " + ", ".join(why))
+            row["reason"] = " · ".join(parts)
+        if unchecked:
+            names = ", ".join(apps.label(k) for k in unchecked)
+            row["checked"] = False
+            row["reason"] = ((row.get("reason", "") + " · ") if row.get("reason") else "") \
+                + f"could not check for updates: {names}"
+        if missing:
+            gone = ", ".join(apps.label(k) for k in missing)
+            row["reason"] = ((row.get("reason", "") + " · ") if row.get("reason") else "") \
+                + f"not installed on this host: {gone}"
         # Which lifecycle actions this product will accept. The GUI renders from
         # this rather than hard-coding the rules, so the refusal and the button
         # can never disagree.

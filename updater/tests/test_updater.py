@@ -151,14 +151,23 @@ def test_checkout_dir_only_returns_a_git_checkout(env):
 
 # ---- status ----------------------------------------------------------------
 def test_status_reports_installed_and_missing_products(client):
+    """ONE row -- the platform -- since the screen was folded into one. The
+    per-product facts did not go away with the rows: what is behind, what is
+    blocked and what is not installed at all are named on it, because a
+    half-installed platform that simply shows fewer services looks exactly
+    like a complete one."""
     d = client.get("/api/status", headers=_hdrs()).json()
     by = {a["key"]: a for a in d["apps"]}
-    assert set(by) == {"controller", "slep", "connect", "slop"}
-    assert by["controller"]["installed"] is True
-    assert by["controller"]["checked"] is True
-    assert by["controller"]["available"] is False        # freshly cloned == current
-    assert by["slep"]["installed"] is False
-    assert "not installed" in by["slep"]["reason"]
+    assert set(by) == {"slop"}, by
+    row = by["slop"]
+    assert row["installed"] is True
+    assert row["checked"] is True
+    assert row["available"] is False        # freshly cloned == current
+    # The Controller is here and current; SLEP has no checkout on this host.
+    assert "slep" in row["missing"], row
+    assert "controller" not in row["missing"], row
+    assert "not installed on this host" in row["reason"], row["reason"]
+    assert "Engineering Platform" in row["reason"], row["reason"]
 
 
 def test_an_update_is_detected_when_the_remote_moves_ahead(env, client, tmp_path):
@@ -169,10 +178,13 @@ def test_an_update_is_detected_when_the_remote_moves_ahead(env, client, tmp_path
     subprocess.run(["git", "-C", str(up), "add", "-A"], env=e, capture_output=True)
     subprocess.run(["git", "-C", str(up), "commit", "-qm", "next"], env=e, capture_output=True)
 
+    # ONE row for the platform, so "the Controller has moved ahead" is
+    # reported by NAMING it, not by a row of its own.
     row = next(a for a in client.get("/api/status", headers=_hdrs()).json()["apps"]
-               if a["key"] == "controller")
+               if a["key"] == "slop")
     assert row["checked"] is True and row["available"] is True
-    assert row["current"] != row["latest"]
+    assert "controller" in row["behind"], row
+    assert "Controller" in row["reason"], row["reason"]
     assert row["can_update"] is True
 
 
@@ -181,12 +193,34 @@ def test_a_dirty_checkout_is_reported_and_refused(env, client, tmp_path):
     starting a job that destroys work."""
     (tmp_path / "src" / "sysible-controller" / "docker-compose.yml").write_text("services: {x: 1}\n")
     row = next(a for a in client.get("/api/status", headers=_hdrs()).json()["apps"]
-               if a["key"] == "controller")
+               if a["key"] == "slop")
     assert row["dirty"] is True and row["can_update"] is False
-    assert "local changes" in row["reason"]
+    assert "local changes" in row["reason"], row["reason"]
 
     r = client.post("/api/update/controller", headers=_hdrs())
     assert r.status_code == 409 and "local changes" in r.json()["detail"]
+
+
+def test_a_blocked_update_says_what_is_blocking_it(env, client, tmp_path):
+    """Behind AND dirty at once. The folded row used to replace the "local
+    changes" line with "update available but blocked: Controller", which tells
+    the operator an update is stuck and nothing about what to do."""
+    up = tmp_path / "upstream"
+    (up / "new.txt").write_text("x")
+    e = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+    subprocess.run(["git", "-C", str(up), "add", "-A"], env=e, capture_output=True)
+    subprocess.run(["git", "-C", str(up), "commit", "-qm", "next"], env=e, capture_output=True)
+    # ...and the operator has edited the checkout.
+    (tmp_path / "src" / "sysible-controller" / "docker-compose.yml").write_text("services: {x: 1}\n")
+
+    row = next(a for a in client.get("/api/status", headers=_hdrs()).json()["apps"]
+               if a["key"] == "slop")
+    assert row["available"] is True
+    assert "controller" in row["blocked"] and row["behind"] == [], row
+    assert row["can_update"] is False
+    assert "Controller" in row["reason"], row["reason"]
+    assert "local changes" in row["reason"], row["reason"]
 
 
 def test_a_product_that_is_not_installed_cannot_be_updated(client):
@@ -198,12 +232,13 @@ def test_couldnt_check_never_looks_like_up_to_date(env, client, tmp_path):
     """A checkout with no upstream must report a reason, not a green verdict."""
     _make_repo(tmp_path / "src" / "sysible-connect")          # no remote configured
     row = next(a for a in client.get("/api/status", headers=_hdrs()).json()["apps"]
-               if a["key"] == "connect")
+               if a["key"] == "slop")
     assert row["installed"] is True
-    assert row["checked"] is False
-    assert "upstream" in row["reason"]
-    assert row.get("available") is None or row.get("available") is False
-    assert row["can_update"] is False
+    # The one that matters: a product nobody could look at must not be
+    # indistinguishable from one that was looked at and is current.
+    assert "connect" in row["unchecked"], row
+    assert row["checked"] is False, row
+    assert "could not check" in row["reason"], row["reason"]
 
 
 # ---- running one at a time -------------------------------------------------
