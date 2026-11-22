@@ -32,7 +32,29 @@ HERE = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 SLOP = HERE.parent
 SIBLINGS = SLOP.parent
-SLEP = SIBLINGS / "sysible-linux-engineering-platform"
+VENDORED = SLOP / "apps"
+
+
+def _upstream(relative, *roots):
+    """The first root that actually has this file.
+
+    These checks used to look ONLY beside this repo, so on every machine that
+    installs SLOP the way the installer does -- one checkout, products vendored
+    under apps/ -- the SLEP rows skipped and Connect was written off as "not
+    part of this checkout". That is most of the cross-app surface this file
+    exists to check, and it was quietly unchecked. A sibling checkout still
+    wins when there is one, since that is the tree a developer is editing.
+    """
+    for root in roots:
+        if root is not None and (root / relative).is_file():
+            return root / relative
+    return None
+
+
+SLEP = _upstream("backend/app.py",
+                 SIBLINGS / "sysible-linux-engineering-platform",
+                 VENDORED / "slep")
+SLEP_ROOT = SLEP.parents[1] if SLEP else (SIBLINGS / "sysible-linux-engineering-platform")
 
 ROUTE = re.compile(r'@(?:app|router)\.(?:get|post|put|delete|patch|api_route)\(\s*"([^"]+)"')
 CALL_DIRECT = re.compile(r'_url\((_[A-Z]+),\s*"https?"\)\s*\+\s*f?"([^"]+)"')
@@ -42,11 +64,15 @@ BASE_SET = re.compile(r'base = _url\((_[A-Z]+)')
 # Which file declares the routes each upstream answers on the port we dial, and
 # whether that port strips an /api prefix before handling.
 UPSTREAMS = {
-    "_CONTROLLER": (SIBLINGS / "Sysible-Controller" / "webgui" / "server.py", False),
-    "_SLEP": (SLEP / "backend" / "app.py", True),
+    "_CONTROLLER": (_upstream("webgui/server.py",
+                              SIBLINGS / "Sysible-Controller",
+                              VENDORED / "controller"), False),
+    "_SLEP": (SLEP, True),
     "_FLASHBACK": (SLOP / "flashback" / "backend" / "app.py", False),
     "_BASELINE": (SLOP / "baseline" / "backend" / "app.py", False),
-    "_CONNECT": (None, False),          # not part of this checkout
+    # Connect's backend IS the port the console dials (:8700) and it declares
+    # its own routes under /api, so nothing strips the prefix on the way in.
+    "_CONNECT": (_upstream("backend/app.py", VENDORED / "connect"), False),
 }
 
 
@@ -115,9 +141,10 @@ def test_the_slep_console_proxy_still_strips_the_api_prefix():
     """The assumption the SLEP rows above rest on. If that proxy is ever changed
     or removed, every SLEP call here starts returning the SPA's HTML and this is
     where it should be noticed."""
-    if not (SLEP / "webgui" / "server.py").is_file():
-        pytest.skip("SLEP is not checked out beside this repo")
-    src = (SLEP / "webgui" / "server.py").read_text(encoding="utf-8")
+    proxy = _upstream("webgui/server.py", SLEP_ROOT, VENDORED / "slep")
+    if proxy is None:
+        pytest.skip("no SLEP checkout to read, beside this repo or vendored")
+    src = proxy.read_text(encoding="utf-8")
     assert '@app.api_route("/api/{path:path}"' in src, \
         "SLEP's console no longer proxies /api/* to its backend"
     assert re.search(r'url\s*=\s*f"\{BACKEND\}/\{path\}"', src), \
