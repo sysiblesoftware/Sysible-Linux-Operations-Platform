@@ -18,7 +18,7 @@
       "label": "Sysible Controller",
       "repo": "https://github.com/sysiblesoftware/Sysible-Controller",
       "branch": "main",
-      "commit": "0066dc19667d",
+      "commit": "0cd3ee323359",
       "compose_service": "controller",
       "path_prefix": ""
     },
