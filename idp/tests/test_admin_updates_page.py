@@ -283,36 +283,78 @@ def test_the_page_fits_its_card_and_the_toggle_is_inert(tmp_path):
         t.join(timeout=10)
 
 
-def test_a_finished_update_reloads_the_page():
+def test_a_finished_self_update_hands_the_operator_to_the_sign_in_page():
     """When THIS page's own code was replaced, and only then.
 
     A SLOP update recreates the container serving this page, so the document and
     every asset it is holding come from the build that was just replaced — the
-    operator would be told it updated while still looking at the old one.
+    operator would be told it updated while still looking at the old one. Both
+    confirm dialogs promise they will be signed out; this is where that is kept.
 
-    An update of something else is different, and this used to reload for that
-    too. The progress panel is the record of what just happened, and reloading
-    throws it away: for a product whose update did not touch this page, re-reading
-    the table is enough and the result stays on screen.
+    An update of something else is different, and this used to fire for that
+    too. The progress panel is the record of what just happened, and navigating
+    away throws it away: for a product whose update did not touch this page,
+    re-reading the table is enough and the result stays on screen.
     """
     import re
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
     block = src[src.index("function finishJob"):]
     block = block[:block.index("\n  }")]
-    assert "location.reload()" in block, "a finished update never refreshes the page"
     # Guarded by BOTH, and checked as one expression. Asserting that the words
-    # appear somewhere in the function passes just as happily when the reload is
+    # appear somewhere in the function passes just as happily when the handoff is
     # unconditional — the comment above it mentions success and SLOP by name,
     # which is how an earlier version of this test stayed green through exactly
     # that regression.
-    m = re.search(r"if\(ok\s*&&\s*selfJob\)\{\s*"
-                  r"setTimeout\(function\(\)\{location\.reload\(\);\},(\d+)\);\s*\}",
-                  block)
-    assert m, ("the reload is not guarded by the update having SUCCEEDED and "
-               "having been a self-update")
-    # Not instant: the outcome has to be readable first.
-    assert int(m.group(1)) >= 1500, "reloads before the result can be read"
+    assert re.search(r"if\(ok\s*&&\s*selfJob\)\{\s*signOutWhenBack\(\);\s*\}", block), \
+        ("the sign-in handoff is not guarded by the update having SUCCEEDED and "
+         "having been a self-update")
+
+
+def test_the_handoff_waits_for_the_console_to_answer():
+    """A finished job does NOT mean this console is back.
+
+    The work runs in a detached helper that compose never touches, which is the
+    whole reason the result survives the restart — so `succeeded` arrives while
+    the gateway may still be rebuilding. This used to navigate on a four-second
+    timer, which can land the operator on the browser's own cannot-connect page:
+    an update that worked, reported as a dead site.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    block = src[src.index("function signOutWhenBack"):]
+    block = block[:block.index("\n  function finishJob")]
+    assert "fetch('/login'" in block, "it does not probe anything before navigating"
+    assert "no-store" in block, "a cached probe can answer for a console that is down"
+    # r.ok, not "it replied". The gateway serves its own HTML for 502/503/504
+    # while the stack comes up, so a reply is not the console being back — and
+    # a truthy-response check would navigate straight into that error page.
+    assert "if(r.ok)" in block, "any reply counts as the console being back"
+    assert "backoffMs" in block, "it retries without backing off"
+    # No deadline. Something on the other side is still holding the result, and
+    # the rest of this page is built on never giving up on it.
+    assert "clearTimeout" not in block or "give" not in block.lower()
+
+
+def test_the_handoff_signs_out_rather_than_reloading():
+    """A reload is not a sign-out. Sessions live in the IdP's data volume and
+    outlive the rebuild, so a reload with a surviving session is redirected back
+    out of /login by login_get — leaving the operator signed in on the page they
+    started from, after being told twice that they would not be."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    block = src[src.index("function goToSignIn"):]
+    block = block[:block.index("\n  function signOutWhenBack")]
+    assert "f.method='POST'" in block and "f.action='/logout'" in block, \
+        "it does not actually end the session"
+    assert "f.submit()" in block, \
+        "a fetch would follow the redirect and never leave this document"
+    # The token this document holds predates the restart. logout_post checks a
+    # token only when supplied and always honours a same-origin click, so a
+    # stale one is strictly worse than none: it redirects to / and strands the
+    # operator on a signed-in page, which is the failure this exists to prevent.
+    assert "csrf" not in block.replace("# ", "").split("var f=")[1], \
+        "a stale CSRF token is sent with the sign-out"
 
 
 def test_update_all_offers_only_what_is_updatable():

@@ -2897,6 +2897,11 @@ _UPDATES_JS = r"""
             'This console is part of what is being updated, so it goes away '
             +'and comes back on its own. A full rebuild is usually a few '
             +'minutes, and the work carries on without this page. '));
+        } else if(note[0]==='signout'){
+          w.appendChild(el('b',null,'Update finished \u2014 signing you out. '));
+          w.appendChild(document.createTextNode(
+            'This console was rebuilt by the update, so you are handed back to '
+            +'the sign-in page as soon as it answers again. '));
         } else {
           w.appendChild(el('b',null,'Lost contact with the updater. '));
           w.appendChild(document.createTextNode(
@@ -3073,6 +3078,73 @@ _UPDATES_JS = r"""
       })
       .catch(function(e){ unreachableJob(String(e.message||e)); });
   }
+  // ---- handing the operator back to the sign-in page -----------------------
+  //
+  // Both confirm dialogs promise the operator they will be signed out. This is
+  // where that promise is kept, and it used to be kept by luck: a four-second
+  // timer and a location.reload(). Two ways that lands somewhere other than the
+  // sign-in page.
+  //
+  // THE TIMER IS A GUESS. A self-affecting job runs in a detached helper that
+  // compose never touches -- that is exactly why its result survives the
+  // restart -- so a finished job says the WORK is done, NOT that the gateway
+  // and this console are back. Reloading on a timer can hit a stack still
+  // coming up, and the operator lands on the browser's own cannot-connect page,
+  // which says nothing about an update having just succeeded.
+  //
+  // AND A RELOAD IS NOT A SIGN-OUT. Sessions live in the IdP's data volume, so
+  // they outlive the rebuild. login_get sends a request that still carries a
+  // valid session straight back out again, so reloading leaves the operator on
+  // the admin page they started from -- signed in, after being told twice that
+  // they would not be.
+  //
+  // So: wait until this console actually answers, then sign out for real.
+  var signingOut=false, signOutSince=0, signOutTries=0;
+
+  function signOutNote(){
+    if(!lastJob)return;
+    var s=Math.max(0,Math.round((Date.now()-signOutSince)/1000));
+    var waited=(s<90)?(s+'s'):(Math.floor(s/60)+'m '+(s%60)+'s');
+    showJob(lastJob,['signout','Waiting for it \u2014 '+waited+'.']);
+  }
+
+  function goToSignIn(){
+    // A real POST, submitted as a FORM so the browser navigates and follows the
+    // 302 to /login. fetch() would follow that redirect itself and hand back the
+    // sign-in HTML without ever leaving this document.
+    //
+    // No csrf field, deliberately. The token this page holds was issued before
+    // the restart, and logout_post verifies a token only WHEN SUPPLIED while
+    // always honouring a same-origin click. A stale token would be rejected and
+    // redirect to /, stranding the operator on a signed-in page -- the precise
+    // failure this function exists to prevent. Sending none takes the path the
+    // portal's own static sign-out button already uses.
+    var f=document.createElement('form');
+    f.method='POST'; f.action='/logout';
+    document.body.appendChild(f);
+    f.submit();
+  }
+
+  function signOutWhenBack(){
+    if(signingOut)return;
+    signingOut=true; signOutSince=Date.now(); signOutTries=0;
+    stopWatch();
+    var probe=function(){
+      signOutTries++;
+      signOutNote();
+      fetch('/login',{cache:'no-store'})
+        .then(function(r){
+          // r.ok is the test, not "it answered". The gateway renders 502/503/504
+          // as its own HTML page while the stack comes up, so a reply is not the
+          // same as the console being back.
+          if(r.ok){ goToSignIn(); return; }
+          setTimeout(probe,backoffMs(signOutTries));
+        })
+        .catch(function(){ setTimeout(probe,backoffMs(signOutTries)); });
+    };
+    probe();
+  }
+
   function finishJob(j){
     stopWatch();
     var ok=(j.state==='succeeded');
@@ -3087,7 +3159,7 @@ _UPDATES_JS = r"""
     // build that was just replaced, and looking at it is not the same as
     // having updated it.
     if(ok && selfJob){
-      setTimeout(function(){location.reload();},4000);
+      signOutWhenBack();
     }
     selfJob=false;
   }
