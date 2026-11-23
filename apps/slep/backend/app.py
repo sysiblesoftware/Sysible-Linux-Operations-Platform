@@ -1919,6 +1919,24 @@ def _assert_step_org(project_org, credential_id=None, inventory_id=None):
             raise HTTPException(status_code=403, detail="That inventory belongs to a different organization.")
 
 
+def _assert_runnable_playbook(project, kind, target):
+    """Refuse an Ansible step whose target cannot be a playbook.
+
+    At LAUNCH, where the operator is still looking. The same check from inside
+    the runner would be a red run with a parse error in it -- which is how this
+    was reported: an Ansible step pointed at main.tf, zero tasks, and a panel
+    with nothing to say. The schedule path takes it too, for the same reason
+    the template check beside it exists: a bad target discovered at 02:00 is
+    discovered by nobody.
+    """
+    if kind != "ansible":
+        return
+    from .runners import ansible_runner
+    why = ansible_runner.why_not_a_playbook(db.project_dir(project["id"]), target)
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+
+
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
                   become_password="", limit="", start_at_task="", tf_tool="",
                   job_opts=None, survey_secrets=None):
@@ -2025,6 +2043,9 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
         # Same cross-tenant guard the per-run path enforces: a step must not reference
         # another org's credential/inventory (pipelines bypassed this before).
         _assert_step_org(_porg, s.get("credential_id"), s.get("inventory_id"))
+        # AFTER the template expansion above, so a template's resolved playbook
+        # is checked rather than the template id that stood in for it.
+        _assert_runnable_playbook(project, kind, str(s.get("target") or "").strip())
         target = str(s.get("target") or "").strip() or (
             "from VMs" if kind == "inventory" else "→ Controller" if kind == "enroll" else "")
         rid = db.create_run(
@@ -2658,6 +2679,7 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
         what = {"ansible": "playbook path", "terraform": "action (plan/apply/destroy)",
                 }.get(kind, "target")
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
+    _assert_runnable_playbook(project, kind, target)
     run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
                            body.get("credential_id"), body.get("extra_vars") or {}, user,
                            become_password=str(body.get("become_password") or ""),
@@ -2825,6 +2847,9 @@ def schedules_create(request: Request, body: dict = Body(...), user: str = Depen
             raise HTTPException(status_code=400, detail="Pick a saved pipeline to schedule.")
         if pl["project_id"] != pid:
             raise HTTPException(status_code=400, detail="That pipeline belongs to a different project.")
+    # Same reason the template check above exists: a target that cannot run is
+    # discovered at 02:00, by nobody, every night.
+    _assert_runnable_playbook(project, kind, target)
     cadence = str(body.get("cadence") or "daily")
     if cadence not in _CADENCES:
         raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")
