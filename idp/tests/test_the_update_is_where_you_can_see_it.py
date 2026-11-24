@@ -253,9 +253,21 @@ def test_every_administration_tab_uses_the_same_width(live, path):
         try:
             pg.goto(BASE + path, wait_until="domcontentloaded")
             pg.wait_for_selector(".card", timeout=10000)
-            w = pg.evaluate("() => document.querySelector('.card').getBoundingClientRect().width")
+            # Derived from the DECLARED cap, not a literal copy of it. This
+            # read `<= 1240` and so had to be edited every time the cap moved
+            # -- which is twice now -- while saying nothing about whether the
+            # new value was being applied. What matters is the RULE:
+            # min(96vw, --admin-max), the same on every tab.
+            w, want = pg.evaluate("""() => {
+                const el = document.querySelector('.card');
+                const cap = parseFloat(getComputedStyle(document.documentElement)
+                                 .getPropertyValue('--admin-max'));
+                return [el.getBoundingClientRect().width,
+                        Math.min(window.innerWidth * 0.96, cap)];
+            }""")
+            assert abs(w - want) <= 1, \
+                f"{path} is {w:.0f}px, not the min(96vw, cap) of {want:.0f}px"
             assert w > 1000, f"{path} is only {w:.0f}px wide in a 1600px window"
-            assert w <= 1240 + 1, f"{path} is {w:.0f}px — wider than the cap"
         finally:
             b.close()
 
@@ -331,5 +343,30 @@ def test_a_text_field_does_not_stretch_to_the_card(live):
             w = pg.eval_on_selector("input[name=username]",
                                     "e => e.getBoundingClientRect().width")
             assert w <= 561, f"a text field is {w:.0f}px wide"
+        finally:
+            b.close()
+
+
+@pytest.mark.parametrize("width,least", [(1600, 0.90), (2165, 0.75), (2560, 0.60)])
+def test_administration_uses_the_window_it_is_given(live, width, least):
+    """Reported twice: "why is administration so compact and not using the
+    entirety of the window". The cap is a judgement, so what is guarded is the
+    SHARE it leaves on the table, not the number.
+
+    At a normal window it is nearly all of it. At the 2165px window this was
+    last reported on, the old 1240px cap used 57% -- below every floor here.
+    """
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        b, pg = _open(pw, width=width)
+        try:
+            pg.goto(BASE + "/admin", wait_until="domcontentloaded")
+            pg.wait_for_selector(".card", timeout=10000)
+            share = pg.evaluate(
+                "() => document.querySelector('.card').getBoundingClientRect().width"
+                " / window.innerWidth")
+            assert share >= least, (
+                f"at {width}px the panel uses only {share:.0%} of the window "
+                f"(want at least {least:.0%})")
         finally:
             b.close()

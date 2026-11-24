@@ -601,6 +601,18 @@ radial-gradient(70% 60% at 100% 110%,rgba(85,128,238,.09),transparent 55%)}
 .card{width:min(94vw,420px);background:var(--panel);border:1px solid var(--line);
 border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
 .wide{width:min(94vw,760px)}
+/* The administration cap, named because it is a JUDGEMENT and has now been
+   wrong twice. 760 was set for a 1600px window; 1240 replaced it for the same
+   reason; on a 2165px window 1240 is 57% and the report was the same again --
+   "why is administration so compact and not using the entirety of the window".
+   Raising it is not the whole answer either: dropping the cap entirely leaves
+   the sparse tabs (Accounts, Configuration) stretched, with a single account
+   row spanning the window and its controls marooned from its name.
+   So: a cap, set where a normal desktop window is nearly filled and an
+   ultrawide does not spread a four-column table across 3000px. If this is
+   reported a third time the answer is structural -- see the per-tab and
+   app-shell options -- not a bigger number. */
+:root{--admin-max:1700px}
 /* Administration is not a login form, and it was wearing the login form's card.
    These pages carry a four-column product table, a module list per product, a
    progress panel and an embedded app console — all capped at 760px, which is
@@ -608,7 +620,7 @@ border-radius:16px;padding:28px 26px;box-shadow:var(--shadow)}
    row down the middle of the page, status text wrapping to three lines beside a
    column of nothing, and a whole app console squeezed into 760px on the Apps
    tab. `wide` stays for the pages that are a paragraph and a form. */
-.wide.xl{width:min(96vw,1240px)}
+.wide.xl{width:min(96vw,var(--admin-max))}
 /* Two things must NOT take the new width. A text field is no more usable at
    1240px than at 560 — and this is a max, not a width, so a field inside a
    table cell or a grid column still fills it. Prose keeps a readable measure;
