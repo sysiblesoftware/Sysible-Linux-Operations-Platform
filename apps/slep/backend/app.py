@@ -1515,6 +1515,78 @@ def _validate_base_image_url(url: str) -> None:
                                 detail=f"Refusing a base image URL that resolves to {ip} (loopback/link-local/metadata).")
 
 
+def _hypervisor_arch(uri: str) -> str:
+    """The machine architecture a libvirt hypervisor actually runs, via nodeinfo.
+
+    NOT platform.machine(). SLEP drives remote hypervisors over qemu+ssh:// and
+    qemu+tls://, so the SLEP host's own architecture says nothing at all about
+    where the VM will run -- the whole point of asking is that the two differ.
+
+    Read-only, short timeout, and returns "" for every kind of don't-know:
+    virsh not installed, host unreachable, output in an unexpected shape.
+    Callers MUST treat "" as unknown and let the operator through, because a
+    hypervisor that merely cannot be probed right now is not a hypervisor that
+    is known to be wrong.
+    """
+    import re
+    import shutil
+    if not uri or not shutil.which("virsh"):
+        return ""
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "--readonly", "nodeinfo"],
+                           capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001 — unreachable/timed out is "unknown", not an error
+        return ""
+    if p.returncode != 0:
+        return ""
+    m = re.search(r"^CPU model:\s*(\S+)", p.stdout, re.M)
+    return infra.normalize_arch(m.group(1) if m else "")
+
+
+def _reject_mismatched_image_arch(options: dict) -> None:
+    """Refuse a cloud image built for a different machine than the hypervisor.
+
+    A cloud image is a disk image for ONE architecture. Handing an x86_64 image
+    to an aarch64 hypervisor (or the reverse) produces a domain that is created,
+    starts, and then simply never boots: no console output, no installer, no
+    error from the download, and nothing anywhere that names the architecture.
+    It looks exactly like a broken image or a bad network.
+
+    Nothing checked this before. The catalog offered was x86_64-only while the
+    hypervisor URI -- which is what says where the VM runs, and may be a remote
+    machine of any architecture -- was never consulted.
+
+    Fails closed only on a mismatch it is SURE of: both the image URL and the
+    hypervisor have to state an architecture, and they have to disagree. An
+    unprobeable hypervisor or a URL with no arch token in it is allowed
+    through, so this cannot break a working setup.
+    """
+    uri = str(options.get("uri") or "").strip()
+    if not uri:
+        return
+    urls = [str(options.get("base_image") or "").strip()]
+    if isinstance(options.get("groups"), list):
+        urls += [str((g or {}).get("base_image") or "").strip() for g in options["groups"]]
+    wanted = {infra.image_arch(u) for u in urls if u}
+    wanted.discard("")
+    if not wanted:
+        return                      # no image states an arch; nothing to contradict
+    host = _hypervisor_arch(uri)
+    if not host:
+        return                      # cannot be probed, so not known to be wrong
+    bad = sorted(a for a in wanted if a != host)
+    if not bad:
+        return                      # every stated arch matches the hypervisor
+    raise HTTPException(
+        status_code=400,
+        detail=(f"The hypervisor at {uri} is {host}, but "
+                f"{'an image' if len(bad) == 1 else 'images'} built for "
+                f"{', '.join(bad)} {'was' if len(bad) == 1 else 'were'} chosen. "
+                f"A {bad[0]} disk image cannot boot on {host}: the VM would be "
+                f"created and then never boot, with nothing to say why. Pick a "
+                f"{host} image, or point the URI at a {bad[0]} hypervisor."))
+
+
 def _validate_bastion(bastion: str) -> str:
     """A jump host is `[user@]host[:port]`. Strictly validate each part: the user and
     host against a safe charset (no shell metacharacters, spaces, or leading '-') and
@@ -3387,6 +3459,11 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         if not ok:
             return {"ok": False, "output": out or "connection failed"}
         out = out or "connected."
+        # Say which machine this hypervisor is, because it decides which cloud
+        # images can boot on it and the operator otherwise has no way to see it.
+        hv_arch = _hypervisor_arch(uri)
+        if hv_arch:
+            out += f"\n• architecture: {hv_arch} — cloud images must be built for {hv_arch}"
 
         def avail_names(listsub):
             try:
@@ -4020,6 +4097,13 @@ def infra_create(request: Request, body: dict = Body(...), user: str = Depends(r
             bi = str((g or {}).get("base_image") or "").strip()
             if bi:
                 _validate_base_image_url(bi)
+    # A cloud image is built for one machine architecture, and the hypervisor URI
+    # is the only thing that says which machine the VM will run on -- it may be a
+    # remote host of a different architecture from SLEP itself. Mismatched, the VM
+    # is created and then never boots, silently. Checked here so it is refused in
+    # the wizard rather than discovered as a dead domain.
+    if provider == "libvirt":
+        _reject_mismatched_image_arch(options)
 
     controller_key = ""
     if controller_id:
