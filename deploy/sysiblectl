@@ -7,9 +7,23 @@
 # which is relative to the Controller repo — run from THIS (SLOP) repo that path
 # wouldn't exist. This shim makes the natural first-time command work here too:
 #
+#   sudo ./deploy/sysiblectl first-run   # a fresh host: EVERYTHING, integrated
 #   sudo ./deploy/sysiblectl install     # = sudo ./install.sh  (the whole stack)
 #   sudo ./deploy/sysiblectl apps        # only the three apps
 #   sudo ./deploy/sysiblectl gateway     # only the gateway + IdP
+#
+# first-run is the one to use on a new box. It differs from `install` in one
+# way that matters: it passes --integrated, the one-checkout profile that
+# install.sh's own comment says "a FRESH host should" use and that
+# docs/INTEGRATED.md documents under "A fresh host". Plain `install` does not,
+# so a new host that followed the README got the legacy layout -- three cloned
+# repositories at three commits -- unless it knew to add a flag.
+#
+# It is also the only verb here that REFUSES to run. A host already running the
+# three apps the old way has their container names and ports taken, and
+# switching it by surprise is, in install.sh's words, "how a fleet's Controller
+# database goes missing". That host needs tools/migrate-to-integrated, which
+# moves the data first; first-run says so and stops rather than guessing.
 #
 # After install, use the real `sysiblectl` on your PATH to manage everything
 # (sysiblectl status | update all | logs …). Any management verb given here is
@@ -30,11 +44,49 @@ for c in $(command -v -a sysiblectl 2>/dev/null || true) \
   esac
 done
 
-case "${1:-install}" in
+ENV_FILE="$HERE/.env"
+
+# Already the one-checkout layout? Then first-run is simply a re-run, which is
+# what you want after editing .env or pulling.
+_already_integrated() {
+  [ -f "$ENV_FILE" ] && grep -q '^SYSIBLE_INTEGRATED=1' "$ENV_FILE"
+}
+
+# Containers an OLD-layout host has running. Their names are taken, so starting
+# the integrated stack over the top is a collision, not an upgrade.
+_legacy_containers() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker ps -a --format '{{.Names}}' 2>/dev/null \
+    | grep -xE 'sysible-controller|sysible-slep|sysible-connect' | head -3
+}
+
+case "${1:-first-run}" in
+  first-run | firstrun | first_run)
+    [ $# -gt 0 ] && shift || :
+    if ! _already_integrated; then
+      _found=$(_legacy_containers || true)
+      if [ -n "$_found" ]; then
+        echo "This host already runs the apps the old way:" >&2
+        printf '    %s\n' $_found >&2
+        echo >&2
+        echo "Those container names and ports are taken, so bringing up the" >&2
+        echo "one-checkout stack over the top would collide with them. Migrating" >&2
+        echo "moves the DATA first, and that is not something to improvise:" >&2
+        echo >&2
+        echo "    sudo ./tools/migrate-to-integrated --dry-run   # says what it would do" >&2
+        echo "    sudo ./tools/migrate-to-integrated" >&2
+        echo >&2
+        echo "See docs/INTEGRATED.md. If this host is genuinely meant to start" >&2
+        echo "clean, remove those containers first, then run first-run again." >&2
+        exit 1
+      fi
+    fi
+    exec "$INSTALL" all --integrated "$@"
+    ;;
   install | "" | all)
     # First-time bootstrap of the whole stack (installs Docker/git if missing,
     # the apps, the gateway + IdP, and the real sysiblectl on your PATH).
-    shift 2>/dev/null || true
+    [ $# -gt 0 ] && shift || :
     exec "$INSTALL" all
     ;;
   apps)
@@ -50,7 +102,7 @@ case "${1:-install}" in
       exec "$REAL" "$@"
     fi
     echo "sysiblectl is not installed yet. Bootstrap SLOP first:" >&2
-    echo "    sudo ./install.sh        (or: sudo ./deploy/sysiblectl install)" >&2
+    echo "    sudo ./deploy/sysiblectl first-run" >&2
     echo "Then use 'sysiblectl $*' from anywhere." >&2
     exit 127
     ;;

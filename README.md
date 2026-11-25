@@ -14,7 +14,7 @@ separate consoles on three ports, you run the apps and put SLOP in front.
 > checkout builds the whole platform at one commit — see
 > [`apps/README.md`](apps/README.md) and [`docs/INTEGRATED.md`](docs/INTEGRATED.md).
 > It is behind a compose profile, so a plain `docker compose up -d` is still
-> exactly what it was; a fresh host takes it with `sudo ./install.sh --integrated`.
+> exactly what it was; a fresh host takes it with `sudo sysiblectl first-run`.
 > The standalone repositories are publish targets now: `tools/publish-app` sends
 > a finished change out to one.
 
@@ -83,19 +83,33 @@ Connect as containers, with the SLOP gateway in front of them:
 cp .env.example .env
 
 # 2. Install everything (installs Docker + git if missing, plus sysiblectl):
-sudo ./install.sh                 # the whole stack (apps + gateway + IdP)
+sudo sysiblectl first-run         # a fresh host: EVERYTHING, one checkout
+#   ...from this checkout, before anything is on your PATH:
+#   sudo ./deploy/sysiblectl first-run
+#
+#   Other shapes, if you want only part of it:
 #   sudo ./install.sh apps        # only Controller + SLEP + Connect
 #   sudo ./install.sh gateway     # only the gateway + IdP (apps already running)
-#   sudo ./deploy/sysiblectl install   # same thing, if you reach for sysiblectl
 
 # 3. Open the portal at this host's IP — no domain, no subdomains, no DNS:
 open https://<server-ip>/
 ```
 
-`install.sh` clones each app from its own official repo, builds it, and manages
-everything through the unified `sysiblectl` (`sysiblectl status | update all |
-logs …`). Already have the apps running and only want the front door? Use
-`sudo ./install.sh gateway`.
+`first-run` is the one command a new box needs. It passes `--integrated`, the
+one-checkout profile that `docs/INTEGRATED.md` documents under "A fresh host":
+the Controller, SLEP and Connect are built from `apps/` in this repository, at
+one commit, rather than cloned from three repositories at three commits. A plain
+`sudo ./install.sh` does **not** pass it, so a new host that followed this README
+got the older layout unless it knew to add a flag.
+
+On a host that is already running the three apps the old way, `first-run`
+refuses and points at `sudo ./tools/migrate-to-integrated`, which moves the data
+first. Their container names and ports are taken, and switching by surprise is
+how a Controller database goes missing.
+
+Afterwards everything is managed through the unified `sysiblectl`
+(`sysiblectl status | update all | logs …`). Already have the apps running and
+only want the front door? Use `sudo ./install.sh gateway`.
 
 **To pick up a new release, use `sysiblectl slop update`** — not a bare
 `git pull && docker compose up -d --build`. The gateway is the stock Caddy image
@@ -115,7 +129,7 @@ the by-hand route are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Path | What |
 |---|---|
-| `install.sh` | One-command installer: the three apps + this gateway + IdP (`sudo ./install.sh`). Generates the SSO shared secret into `.env`. |
+| `install.sh` | The installer `sysiblectl first-run` drives: the three apps + this gateway + IdP. Generates the SSO shared secret into `.env`. |
 | `docker-compose.yml` | The front door: the gateway (Caddy) + the IdP service. |
 | `idp/` | The identity provider — the user store, login, `/account`, and `/admin` (accounts + password resets). Python deps in `idp/requirements.txt`; tests in `idp/tests/`. |
 | `gateway/Caddyfile` | Reverse-proxy on ONE origin: portal at `/`, the apps under `/controller` `/slep` `/connect` (prefix-stripped), TLS, health proxying, and the SSO `forward_auth` + shared-secret enforcement. |

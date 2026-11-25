@@ -9,8 +9,11 @@ A plain `docker compose up -d` in this directory is exactly what it always was.
 ## A fresh host
 
 ```sh
-sudo ./install.sh --integrated
+sudo sysiblectl first-run
 ```
+
+(From this checkout, before anything is on your PATH: `sudo ./deploy/sysiblectl
+first-run`. It is the same thing — `first-run` IS `install.sh --integrated`.)
 
 That is the whole thing. It does not clone anything: the three apps are services
 of this compose project, built from `apps/`.
