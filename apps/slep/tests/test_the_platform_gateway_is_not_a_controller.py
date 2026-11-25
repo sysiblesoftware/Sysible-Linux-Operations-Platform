@@ -112,11 +112,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def _serve(tmp_path, cn):
     addr = _local_address()
     key, crt = _cert(tmp_path, cn, addr)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Handler)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Handler)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -244,11 +247,14 @@ def trusted_gateway(tmp_path, monkeypatch):
     # Trust it, the way a real platform with a real certificate would be trusted.
     for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         monkeypatch.setenv(var, ca)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Handler)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Handler)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -300,11 +306,14 @@ def answers_nothing(tmp_path, monkeypatch):
     key, crt, ca = _ca_signed_as(d, "controller.example", addr)
     for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         monkeypatch.setenv(var, ca)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Absent)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Absent)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
