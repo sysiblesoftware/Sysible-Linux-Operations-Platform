@@ -540,16 +540,25 @@ def test_pipeline_auto_inventory_step_backfills_following_steps(client, monkeypa
 
 
 def test_hypervisor_key_is_managed_and_idempotent(client):
-    """SLEP mints/returns a persistent managed SSH key for hypervisor connections;
-    the public half + in-container keyfile path come back, and a second call
-    returns the same key (no churn)."""
+    """SLEP mints/returns a persistent managed SSH key; the public half +
+    in-container keyfile path come back, and a second call returns the same key
+    (no churn).
+
+    The file is slep_ed25519, NOT a per-purpose "hypervisor" key. That is the
+    documented design -- /infra/hypervisor-key's own docstring: "SLEP's ONE
+    managed SSH key ... One key installed once -- no per-purpose keys to keep in
+    sync." This assertion still named the pre-consolidation path, and the only
+    machines that run it are ones with ssh-keygen, so it skipped on the
+    developer container and nothing ran it anywhere else: this repository had no
+    CI at all until the commit that added it.
+    """
     import shutil
     if not shutil.which("ssh-keygen"):
         import pytest
         pytest.skip("ssh-keygen not available")
     d = client.post("/infra/hypervisor-key", json={}).json()
     assert d["public_key"].startswith("ssh-ed25519 ")
-    assert d["keyfile"].endswith("/ssh/hypervisor")
+    assert d["keyfile"].endswith("/ssh/slep_ed25519")
     d2 = client.post("/infra/hypervisor-key", json={}).json()
     assert d2["public_key"] == d["public_key"]     # stable across calls
 

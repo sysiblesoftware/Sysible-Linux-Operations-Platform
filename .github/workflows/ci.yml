@@ -51,7 +51,8 @@ jobs:
           # rather than being hunted per app. A MISSING one must fail the install
           # here, not surface later as a collection error that reads like a
           # broken test.
-          pip install pytest pyyaml fastapi httpx starlette requests paramiko cryptography
+          pip install pytest pyyaml fastapi httpx starlette requests paramiko \
+                      cryptography python-multipart
           for r in ${{ matrix.reqs }}; do
             if [ -f "$r" ]; then
               echo "::group::pip install -r $r"
@@ -70,4 +71,12 @@ jobs:
           # checkout makes `backend` resolve to the wrong app's package and the
           # whole suite dies at collection.
           PYTHONPATH: ''
-        run: python -m pytest -q -p no:cacheprovider tests
+        # AS ROOT, like the Server and Workstation suites, because some of these
+        # bind PRIVILEGED PORTS. tests/support/fakedns.py binds 127.0.0.2:53 --
+        # deliberately port 53, because resolv.conf cannot express a port, so a
+        # test using any other port would exercise a path the product can never
+        # take. As the `runner` user that is PermissionError at fixture setup and
+        # ten tests error out before running.
+        #
+        # -E keeps PYTHONPATH='' above, which sudo would otherwise strip.
+        run: sudo -E env "PATH=$PATH" python -m pytest -q -p no:cacheprovider tests
