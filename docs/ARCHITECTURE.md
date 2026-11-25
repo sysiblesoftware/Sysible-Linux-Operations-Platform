@@ -36,7 +36,21 @@ Caddy owns TLS for every site. Three options:
 2. **Public ACME.** Point external DNS at this IP, give the `:443` site a real
    public name, set an ACME email in the global block — Caddy fetches Let's Encrypt
    certs automatically. Nothing else in the config needs to know the address.
-3. **Bring your own.** Mount a cert/key and use `tls /path/cert.pem /path/key.pem`.
+3. **Bring your own — Administration · TLS.** Paste the certificate and its key
+   into the console; it checks the pair with the same OpenSSL the gateway uses,
+   writes them to the `slop-tls` volume the gateway mounts read-only, and asks
+   the updater to restart the gateway. The `:443` site imports
+   `/etc/caddy/tls/*.caddy`, so with nothing installed the glob matches nothing
+   (a valid import) and option 1 applies. Removing it there goes back to the
+   internal CA.
+
+   Order matters and the console enforces it: a snippet naming files that are
+   not present does not degrade — Caddy refuses to start, which is `:443` for
+   the whole platform, including the page you would use to undo it. So the pair
+   is proven loadable, the files are written, and the snippet last; on the way
+   out the snippet goes first. Doing it by hand is still possible — drop a
+   `tls` line in a `.caddy` file on that volume — but there is nothing to gain
+   from it.
 
 The apps keep serving their own self-signed HTTPS internally; the gateway proxies
 to them over HTTPS with `tls_insecure_skip_verify` (they're reached on loopback /

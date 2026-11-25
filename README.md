@@ -106,8 +106,10 @@ one. `sysiblectl` validates the new config, loads it, proves the deny path still
 fires, and waits for :443 to actually answer before it reports success.
 
 TLS is Caddy's **internal CA** by default (self-signed, like the apps today) — your
-browser warns once; trust the CA or proceed. For public certs, see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+browser warns once; trust the CA or proceed. To stop the warning, install a real
+certificate in **Administration · TLS**: SLOP terminates TLS for the whole
+platform, so that is the only certificate a browser ever judges. Public ACME and
+the by-hand route are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Layout
 
