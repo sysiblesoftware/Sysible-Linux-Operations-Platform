@@ -64,6 +64,19 @@ jobs:
             fi
           done
 
+      - name: Allow unprivileged binds below 1024
+        # tests/support/fakedns.py binds 127.0.0.2:53, and the note above it
+        # explains why it must be 53: resolv.conf has no syntax for a port --
+        # `#` is its comment character -- so a test on any other port would
+        # exercise a path the product can never take. As the `runner` user that
+        # bind is PermissionError and ten tests error at fixture setup.
+        #
+        # Lower the threshold instead of raising the process's privileges, so
+        # every test that asserts on what an UNPRIVILEGED caller can do keeps
+        # its meaning. Harmless on a throwaway runner; it is not a change to
+        # anything the product ships.
+        run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+
       - name: Run the ${{ matrix.name }} suite
         working-directory: ${{ matrix.dir }}
         env:
@@ -71,12 +84,18 @@ jobs:
           # checkout makes `backend` resolve to the wrong app's package and the
           # whole suite dies at collection.
           PYTHONPATH: ''
-        # AS ROOT, like the Server and Workstation suites, because some of these
-        # bind PRIVILEGED PORTS. tests/support/fakedns.py binds 127.0.0.2:53 --
-        # deliberately port 53, because resolv.conf cannot express a port, so a
-        # test using any other port would exercise a path the product can never
-        # take. As the `runner` user that is PermissionError at fixture setup and
-        # ten tests error out before running.
+        # UNPRIVILEGED, deliberately -- see the sysctl step above for how the
+        # one suite that needs a low port gets it. Running the whole suite under
+        # sudo was tried and is WRONG in both directions:
         #
-        # -E keeps PYTHONPATH='' above, which sudo would otherwise strip.
-        run: sudo -E env "PATH=$PATH" python -m pytest -q -p no:cacheprovider tests
+        #   * the Controller's firewall tests assert that driving ufw as an
+        #     ordinary user FAILS. As root the runner's real ufw succeeds
+        #     ("Skipping adding existing rule"), so `assert p.returncode != 0`
+        #     became `assert 0 != 0` and five tests inverted.
+        #   * two Connect tests (trust-mode terminal, websocket gateway
+        #     identity) went the same way.
+        #
+        # Those tests are about what an unprivileged caller can do, so the
+        # runner must stay unprivileged. Privilege is granted to the PORT, not
+        # to the process.
+        run: python -m pytest -q -p no:cacheprovider tests
