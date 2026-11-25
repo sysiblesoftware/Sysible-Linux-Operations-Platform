@@ -1,0 +1,73 @@
+name: CI
+
+# THIS REPOSITORY HAD NO WORKFLOWS AT ALL.
+#
+# 345 test files across nine suites, 4844 passing tests, and nothing anywhere
+# ran a single one of them. Every guard in this tree was a comment with a .py
+# extension -- including the ones that describe how the apps talk to the
+# Controller, which is the seam that actually breaks.
+#
+# ONE JOB PER SUITE, each running from its OWN directory. That is not cosmetic:
+# every app has a top-level package called `backend`, so a single pytest over
+# the whole tree resolves `backend` to whichever app sorted first and 46 modules
+# fail at import. Each conftest.py expects to be the root of its own run, and an
+# inherited PYTHONPATH breaks the same way -- hence the explicit empty value.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false        # one red suite must not hide the state of the other eight
+      matrix:
+        include:
+          - { name: platform,   dir: ".",               reqs: "" }
+          - { name: slep,       dir: "apps/slep",       reqs: "backend/requirements.txt backend/requirements-dev.txt" }
+          - { name: connect,    dir: "apps/connect",    reqs: "requirements.txt" }
+          - { name: controller, dir: "apps/controller",  reqs: "requirements.txt requirements-dev.txt" }
+          - { name: updater,    dir: "updater",         reqs: "requirements.txt" }
+          - { name: visualizer, dir: "visualizer",      reqs: "requirements.txt" }
+          - { name: baseline,   dir: "baseline",        reqs: "requirements.txt" }
+          - { name: flashback,  dir: "flashback",       reqs: "requirements.txt" }
+          - { name: idp,        dir: "idp",             reqs: "requirements.txt" }
+    name: tests (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.dir }}
+        run: |
+          python -m pip install --upgrade pip
+          # The suites import these directly regardless of which app they belong
+          # to (starlette's TestClient needs httpx), so they go in everywhere
+          # rather than being hunted per app. A MISSING one must fail the install
+          # here, not surface later as a collection error that reads like a
+          # broken test.
+          pip install pytest pyyaml fastapi httpx starlette requests paramiko cryptography
+          for r in ${{ matrix.reqs }}; do
+            if [ -f "$r" ]; then
+              echo "::group::pip install -r $r"
+              pip install -r "$r"
+              echo "::endgroup::"
+            else
+              echo "::error::${{ matrix.dir }}/$r is listed in the CI matrix but does not exist"
+              exit 1
+            fi
+          done
+
+      - name: Run the ${{ matrix.name }} suite
+        working-directory: ${{ matrix.dir }}
+        env:
+          # Empty, deliberately. Inheriting a PYTHONPATH that names another
+          # checkout makes `backend` resolve to the wrong app's package and the
+          # whole suite dies at collection.
+          PYTHONPATH: ''
+        run: python -m pytest -q -p no:cacheprovider tests
