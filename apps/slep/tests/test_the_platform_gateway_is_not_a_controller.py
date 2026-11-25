@@ -96,11 +96,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _not_found(self):
+        """404, correctly.
+
+        A server that answers before READING the request body leaves the
+        client still writing into a socket the server has stopped draining,
+        and the client sees
+
+            BrokenPipeError: [Errno 32] Broken pipe
+
+        instead of the 404 the test is about. Over TLS, with a body big enough
+        to fill a buffer, that is the usual outcome rather than a rare one --
+        and the assertion then fails on a transport error that looks exactly
+        like the product failing to reach the Controller.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        while length > 0:
+            chunk = self.rfile.read(min(length, 65536))
+            if not chunk:
+                break
+            length -= len(chunk)
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         if self.path.split("?")[0] == "/auth/api-key":
             self._json({"api_key": API_KEY})
         else:
-            self.send_response(404); self.end_headers()
+            self._not_found()
 
     def do_GET(self):
         body = {"/agents": {"agents": []}, "/remote/hosts": {}}.get(self.path.split("?")[0])
@@ -291,7 +315,7 @@ class _Absent(_Handler):
     """Answers 404 to everything, as the gateway's IdP does to /auth/api-key."""
 
     def do_POST(self):
-        self.send_response(404); self.end_headers()
+        self._not_found()
 
 
 @pytest.fixture()
