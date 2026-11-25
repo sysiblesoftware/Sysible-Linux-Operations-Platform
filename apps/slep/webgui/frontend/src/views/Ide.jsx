@@ -989,7 +989,8 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       )}
       <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State (or “highstate”)'}>
         {engine === 'terraform'
-          ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
+          ? <select value={target} onChange={(e) => setTarget(e.target.value)}
+                    title="Terraform runs the whole project directory, not one file -- main.tf, variables.tf and outputs.tf are read together -- so this is an action, not a file to pick. plan shows what would change and changes nothing; apply is what builds the VMs; destroy removes them."><option>plan</option><option>apply</option><option>destroy</option></select>
           : <FileTarget value={target} onChange={setTarget} files={targetFiles}
                         placeholder={'playbook.yml'} />}
       </Field>
@@ -1237,7 +1238,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
               </>)
             : (<>
                 {st.kind === 'terraform'
-                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
+                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Terraform runs the whole project directory, not one file -- main.tf, variables.tf and outputs.tf are read together -- so this is an action, not a file to pick. plan shows what would change and changes nothing; apply is what builds the VMs; destroy removes them." style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
                   : <FileTarget value={st.target} onChange={(v) => upd(i, { target: v })} files={filesFor(st.kind)}
                                 placeholder={'playbook.yml'} />}
                 {st.kind === 'terraform'
