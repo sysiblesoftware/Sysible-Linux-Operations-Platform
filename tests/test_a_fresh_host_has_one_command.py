@@ -206,3 +206,41 @@ def test_the_docs_lead_with_first_run(doc):
     # silently gives the older layout.
     for bad in ("sudo ./install.sh --integrated\n```", "sudo ./install.sh                 #"):
         assert bad not in text, f"{doc} still tells a fresh host to run: {bad!r}"
+
+
+# --- the hand-off to the installed CLI --------------------------------------
+
+def _code_only(path):
+    """Comments stripped: the shim's comment NAMES the broken option in order to
+    explain why it is not used."""
+    return "\n".join(l for l in path.read_text().splitlines()
+                     if not l.lstrip().startswith("#"))
+
+
+def test_the_shim_can_find_the_installed_cli_at_all():
+    """It used `command -v -a`, which exists in NEITHER dash nor bash -- it is a
+    zsh/ksh spelling. Under this file's own #!/bin/sh it failed outright, and the
+    `|| true` after it made the result silently empty. So REAL was always empty
+    and every management verb reported "sysiblectl is not installed yet" on a
+    host where it plainly was."""
+    assert "command -v -a" not in _code_only(SHIM), \
+        "command -v -a fails in dash AND bash; the lookup is always empty"
+
+
+def test_a_management_verb_reaches_the_real_cli(host, tmp_path):
+    real = tmp_path / "realbin"
+    real.mkdir()
+    (real / "sysiblectl").write_text('#!/bin/sh\necho "REAL-CLI: $*"\n')
+    os.chmod(real / "sysiblectl", 0o755)
+    grep_dir = str(pathlib.Path(shutil.which("grep")).parent)
+    r = subprocess.run(
+        [SH, "./deploy/sysiblectl", "status"], cwd=host.path, capture_output=True,
+        text=True, timeout=60,
+        env={**os.environ, "PATH": f"{real}:{grep_dir}:/usr/bin:/bin"})
+    assert r.returncode == 0, f"{r.stdout!r} {r.stderr!r}"
+    assert "REAL-CLI: status" in r.stdout, r.stdout
+
+
+def test_two_shims_on_path_do_not_exec_each_other_forever():
+    """Each shim skips ITSELF, which is not enough once the OS ships one too."""
+    assert "SYSIBLE_CTL_HANDOFF" in SHIM.read_text(), "no one-hop guard"

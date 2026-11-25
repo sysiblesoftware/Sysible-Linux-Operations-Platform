@@ -33,16 +33,37 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 INSTALL="$HERE/install.sh"
 
-# The real, installed CLI (installed by install.sh), if present — and never this
-# very shim (avoid a self-exec loop if this repo's deploy/ is on PATH).
-REAL=""
-for c in $(command -v -a sysiblectl 2>/dev/null || true) \
-         $(command -v -a sysible_ctl 2>/dev/null || true); do
-  case "$c" in
-    "$HERE"/deploy/sysiblectl) : ;;   # skip ourselves
-    *) REAL="$c"; break ;;
-  esac
-done
+# The real, installed CLI (installed by install.sh) — never this very shim.
+#
+# NOT `command -v -a`. That option does not exist in dash OR bash (it is a
+# zsh/ksh spelling), so under #!/bin/sh it fails outright; with `|| true` after
+# it the result is silently empty and the hand-off below never happens, which
+# reads as "the platform is not installed" on a host where it plainly is.
+# Walk PATH instead, and compare resolved paths so a symlink to the same script
+# is recognised as ourselves.
+_real() {
+    # ONE HOP ONLY. Each shim skips ITSELF, which is not enough: if two of them
+    # can see each other on PATH (SLOP's deploy/ shim and the OS one), A execs B,
+    # B skips itself, finds A, and execs it back -- forever. The sentinel makes a
+    # hand-off happen at most once per process chain.
+    [ -n "${SYSIBLE_CTL_HANDOFF:-}" ] && return 1
+    _self=$0
+    case $_self in */*) : ;; *) _self=$(command -v "$_self" 2>/dev/null || printf '%s' "$_self") ;; esac
+    _self=$(readlink -f "$_self" 2>/dev/null || printf '%s' "$_self")
+    _oldifs=$IFS; IFS=:
+    for _d in $PATH; do
+        [ -n "$_d" ] || _d=.
+        for _n in sysiblectl sysible_ctl; do
+            [ -x "$_d/$_n" ] || continue
+            _c=$(readlink -f "$_d/$_n" 2>/dev/null || printf '%s' "$_d/$_n")
+            [ "$_c" = "$_self" ] && continue
+            IFS=$_oldifs; printf '%s\n' "$_d/$_n"; return 0
+        done
+    done
+    IFS=$_oldifs
+    return 1
+}
+REAL=$(_real || true)
 
 ENV_FILE="$HERE/.env"
 
@@ -99,7 +120,7 @@ case "${1:-first-run}" in
     # A management verb (status/start/update/logs/…). Forward to the real CLI if it's
     # been installed; otherwise point the user at the first-time bootstrap.
     if [ -n "$REAL" ]; then
-      exec "$REAL" "$@"
+      SYSIBLE_CTL_HANDOFF=1 exec "$REAL" "$@"
     fi
     echo "sysiblectl is not installed yet. Bootstrap SLOP first:" >&2
     echo "    sudo ./deploy/sysiblectl first-run" >&2
