@@ -129,7 +129,14 @@ CLOUD_IMAGES = [
     {"label": "AlmaLinux 8", "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2", "arch": "x86_64"},
     {"label": "CentOS Stream 9", "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2", "arch": "x86_64"},
     {"label": "Fedora 40 Cloud", "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2", "arch": "x86_64"},
-    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2", "arch": "x86_64"},    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img", "arch": "aarch64"},
+    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2", "arch": "x86_64"},
+    # Arch's official cloud image, from the arch-boxes project. "latest" is a
+    # stable unversioned alias beside the dated builds, so this tracks releases
+    # instead of pinning one; verified, it answers 206 to a ranged request. Arch
+    # proper is x86_64 only -- Arch Linux ARM is a separate project and ships no
+    # equivalent cloud-init qcow2 -- so there is no aarch64 entry to pair with it.
+    {"label": "Arch Linux", "url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2", "arch": "x86_64"},
+    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img", "arch": "aarch64"},
     {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img", "arch": "aarch64"},
 ]
 
