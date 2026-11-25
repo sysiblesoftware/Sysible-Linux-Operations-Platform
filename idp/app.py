@@ -45,6 +45,7 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+import tlsconfig
 import updates
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1114,7 @@ _ADMIN_SECTIONS = (
     ("accounts", "/admin", "Accounts"),
     ("apps", "/admin/apps", "Apps"),
     ("settings", "/admin/settings", "Configuration"),
+    ("tls", "/admin/tls", "TLS"),
     ("updates", "/admin/updates", "Software &amp; services"),
 )
 
@@ -3795,6 +3797,138 @@ def admin_updates_module_action(request: Request, csrf: str = Form(""),
     if error:
         return JSONResponse({"detail": error}, status_code=409)
     return JSONResponse(data)
+
+
+# ---- Administration · TLS ---------------------------------------------------
+# The certificate the platform's front door presents. See idp/tlsconfig.py for
+# why this lives here and why the write order matters.
+_TA = ("width:100%;min-height:9em;font-family:ui-monospace,SFMono-Regular,Menlo,"
+       "Consolas,monospace;font-size:12px;background:var(--panel2);color:var(--text);"
+       "border:1px solid var(--line);border-radius:10px;padding:10px")
+
+
+def _tls_current() -> str:
+    """What the gateway is serving, said plainly."""
+    info = tlsconfig.describe()
+    if info.get("broken"):
+        return ("<p class=sub style='color:var(--err)'><b>A certificate is configured but "
+                "its files are missing.</b> The gateway cannot start in this state. "
+                "Remove it below to go back to the platform's own certificate.</p>")
+    if not info:
+        return ("<p class=sub>The platform is using the certificate the gateway mints for "
+                "itself. It works, and every browser shows a warning on first visit "
+                "because nothing issued it. Install a certificate for the name people "
+                "actually reach this server by to stop that.</p>")
+    warn = (" <b style='color:var(--err)'>This certificate has expired.</b>"
+            if info.get("expired") else "")
+    names = escape(", ".join(info.get("names") or [])) or "&mdash;"
+    return ("<table class=cfg>"
+            f"<tr><td>Subject</td><td>{escape(info.get('subject') or '')}</td></tr>"
+            f"<tr><td>Issued by</td><td>{escape(info.get('issuer') or '')}</td></tr>"
+            f"<tr><td>Valid until</td><td>{escape(info.get('not_after') or '')}{warn}</td></tr>"
+            f"<tr><td>Covers</td><td>{names}</td></tr>"
+            "</table>")
+
+
+def _tls_page(sess, msg: str = "", kind: str = "err", csrf: str = "") -> str:
+    installed = tlsconfig.installed()
+    remove = ""
+    if installed:
+        remove = ("<fieldset><legend>Remove it</legend>"
+                  "<p class=sub>Goes back to the certificate the gateway mints for itself. "
+                  "The installed certificate and its private key are deleted.</p>"
+                  "<form method=post action='/admin/tls/remove'>"
+                  f"{_hidden_csrf(csrf)}"
+                  "<button class='btn danger' type=submit>Remove the installed certificate"
+                  "</button></form></fieldset>")
+    body = (
+        "<a class=back href='/'>&larr; Portal</a>"
+        f"<div class=top><h1>Administration · TLS</h1>"
+        f"<span class=pill>{escape(sess['username'])} · superuser</span></div>"
+        + _admin_nav("tls")
+        + "<p class=sub>SLOP terminates TLS for the whole platform. A browser only ever "
+        "talks to this gateway &mdash; every app lives behind it on one origin, reached by "
+        "path &mdash; so this is the only certificate anyone's browser judges, and the only "
+        "one that decides whether they see a warning. The apps' own certificates are on the "
+        "inside of that boundary and are never shown to a browser.</p>"
+        + _msg(msg, kind)
+        + "<fieldset><legend>What the front door is serving now</legend>"
+        + _tls_current() + "</fieldset>"
+        + "<fieldset><legend>Install a certificate</legend>"
+        "<p class=sub>Paste the full chain (your certificate first, then any intermediates) "
+        "and its private key, both PEM. The pair is checked before anything is changed, and "
+        "the gateway is restarted to pick it up. A key with a passphrase cannot be used: the "
+        "gateway starts unattended and has nobody to ask.</p>"
+        "<form method=post action='/admin/tls/install'>"
+        f"{_hidden_csrf(csrf)}"
+        "<label>Certificate (PEM, full chain)</label>"
+        f"<textarea name=cert style=\"{_TA}\" spellcheck=false required "
+        "placeholder='-----BEGIN CERTIFICATE-----'></textarea>"
+        "<label>Private key (PEM)</label>"
+        f"<textarea name=key style=\"{_TA}\" spellcheck=false required "
+        "placeholder='-----BEGIN PRIVATE KEY-----'></textarea>"
+        "<button type=submit>Install and restart the gateway</button></form></fieldset>"
+        + remove
+    )
+    return _page("TLS · SLOP", body, wide=True)
+
+
+def _tls_restart(sess) -> str:
+    """Ask the updater to restart the gateway. Returns a sentence to append.
+
+    The IdP holds no Docker socket on purpose; the updater sidecar does, with
+    its own secret. Same path Software & services uses.
+    """
+    if not updates.configured():
+        return (" The gateway must be restarted to serve it &mdash; run "
+                "<code>sysiblectl slop restart gateway</code> on the host.")
+    _data, error = updates.module_action("slop", "gateway", "restart",
+                                         sess["username"], "superuser")
+    if error:
+        return (f" The gateway could not be restarted automatically ({escape(error)}); "
+                "run <code>sysiblectl slop restart gateway</code> on the host.")
+    return (" Restarting the gateway now &mdash; this page may drop for a moment, "
+            "which is the front door reloading.")
+
+
+@app.get("/admin/tls", response_class=HTMLResponse)
+def admin_tls(request: Request):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    tok = _csrf_token(request)
+    return _csrf_html(_tls_page(sess, csrf=tok), tok)
+
+
+@app.post("/admin/tls/install")
+def admin_tls_install(request: Request, cert: str = Form(""), key: str = Form(""),
+                      csrf: str = Form("")):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
+    ok, message = tlsconfig.install(cert, key)
+    if not ok:
+        return _csrf_html(_tls_page(sess, message, "err", csrf=tok), tok, 400)
+    return _csrf_html(_tls_page(sess, message + _tls_restart(sess), "ok", csrf=tok), tok)
+
+
+@app.post("/admin/tls/remove")
+def admin_tls_remove(request: Request, csrf: str = Form("")):
+    sess, err = _require_super(request)
+    if err:
+        return err
+    tok = _csrf_token(request)
+    blocked = _admin_guard(request, sess, csrf, tok)
+    if blocked:
+        return blocked
+    ok, message = tlsconfig.revert()
+    if not ok:
+        return _csrf_html(_tls_page(sess, message, "err", csrf=tok), tok, 400)
+    return _csrf_html(_tls_page(sess, message + _tls_restart(sess), "ok", csrf=tok), tok)
 
 
 @app.get("/admin/settings", response_class=HTMLResponse)

@@ -237,6 +237,19 @@ sysible.slop {
 # https://<this server's IP>/ (accept the one-time self-signed warning). Point
 # external DNS at the IP if you want a name; nothing here needs to know about it.
 :443 {
+	# An operator-supplied certificate, installed from Administration -> TLS and
+	# written to a volume this container mounts read-only. SLOP terminates TLS for
+	# the whole platform -- a browser only ever talks to this gateway -- so this is
+	# the only certificate anybody's browser judges, and until now it was the one
+	# with no way to replace it. Nothing installed means no file here, and a glob
+	# matching nothing is a valid import, so the internal certificate above keeps
+	# being used. (Checked against a real caddy, both ways.)
+	#
+	# A snippet naming files that are NOT there does not degrade -- caddy refuses
+	# to start, which is :443 for the entire platform including the page used to
+	# undo it. The writer therefore proves the pair loads, puts the files in place,
+	# and writes this file last; see idp/tlsconfig.py.
+	import /etc/caddy/tls/*.caddy
 	encode gzip
 
 	# Security headers on EVERY response from this origin. The single-origin SLOP

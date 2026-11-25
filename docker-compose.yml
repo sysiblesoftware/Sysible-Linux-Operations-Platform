@@ -61,6 +61,9 @@ services:
       SYSIBLE_SSO_SHARED_SECRET: ${SYSIBLE_SSO_SHARED_SECRET:?set SYSIBLE_SSO_SHARED_SECRET (run install.sh, or put it in .env) so SSO can reach the apps}
     volumes:
       - slop-idp-data:/data     # the user store (SQLite) — persist across restarts
+      # Administration -> TLS writes the platform's certificate here; the
+      # gateway mounts the same volume read-only. Writable on this side only.
+      - slop-tls:/tls
     expose:
       - "8080"                  # internal only; the gateway is the sole front door
 
@@ -106,6 +109,12 @@ services:
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./portal:/srv/portal:ro
+      # An operator-supplied TLS certificate, written by Administration -> TLS.
+      # READ-ONLY here: the gateway consumes it and never writes it, and the
+      # private key should not be writable by the process that serves the
+      # internet. Empty until a certificate is installed, which is a valid
+      # import (see the Caddyfile).
+      - slop-tls:/etc/caddy/tls:ro
       - slop-caddy-data:/data      # issued certs + the internal CA (persist across restarts)
       - slop-caddy-config:/config
     extra_hosts:
@@ -517,6 +526,11 @@ volumes:
   slop-idp-data:
   slop-caddy-data:
   slop-caddy-config:
+  # The front door's operator-supplied certificate. Its own volume rather than a
+  # corner of slop-caddy-data, which holds the certificates Caddy ISSUES and its
+  # internal CA: one is the platform's own state, the other is a thing an
+  # operator installed and expects to find again.
+  slop-tls:
   flashback-data:
   baseline-data:
   # The three vendored apps' data. Only created when the `integrated` profile
