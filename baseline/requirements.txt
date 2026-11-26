@@ -6,8 +6,8 @@
 # (see backend/salt.py) — it composes a `salt-call --local` command and the HOST
 # runs it. Installing salt here would add a large dependency tree, a C toolchain
 # for timelib, and no capability: this container never evaluates a state.
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
 # httpx is the one addition, and only for the console's "Apply now" button,
 # which asks the CONTROLLER to run a state (Baseline never talks to hosts).
 # backend/controller.py imports it DEFENSIVELY: if it is ever missing, the
@@ -22,4 +22,4 @@ httpx==0.28.1
 # as text — a path with a colon, a value that reads as a boolean, a file body
 # whose first line starts "- " each produce a different document otherwise, and
 # the first anyone knows about it is a state that fails on every host.
-pyyaml==6.0.3
+pyyaml==6.0.4
