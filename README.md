@@ -30,6 +30,12 @@ separate consoles on three ports, you run the apps and put SLOP in front.
 
 ## What it gives you
 
+> **First sign-in is `admin` / `sysible`.** That is the shipped default and it is
+> public — change it at `/account` the first time you sign in. For a host
+> reachable from outside, set `SLOP_ADMIN_PASSWORD=random` before the first run:
+> a password is generated into `$SLOP_DATA_DIR/initial-password` (mode `0600`)
+> and never written to the container log.
+
 - **One URL + one portal** — a branded landing page with a card per app and a
   **live health dot** for each, so you see at a glance what's up.
 - **One TLS front door** — Caddy terminates HTTPS for the single origin (internal
