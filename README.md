@@ -144,3 +144,7 @@ the by-hand route are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **EE SLOP** will front the Enterprise builds (PostgreSQL Controller, SSO/MFA,
   HA) with the same gateway/portal and real single sign-on. The gateway config is
   edition-agnostic — only the upstreams and the auth backend differ.
+
+## License
+
+Sysible Linux Operations Platform is released under the **MIT License** — see [LICENSE](LICENSE).
