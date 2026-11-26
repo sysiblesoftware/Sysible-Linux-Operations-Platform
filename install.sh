@@ -164,10 +164,39 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
 fi
 
 dirname_for() { basename "$1"; }
-clone_one() {  # clone_one <repo-url>
+
+# Where a product's source ACTUALLY is, which is not always where it would be
+# cloned to.
+#
+# THIS checkout vendors the Controller, SLEP and Connect under apps/<product>,
+# so a host with no route out already holds every one of them. Cloning a second
+# copy of what this repo is carrying is pointless everywhere and impossible
+# there -- and it was not optional: the Controller clone below is what installs
+# the CLI, so it ran even for `install.sh gateway`, and that is the step an
+# airgapped install died on. A standalone checkout still wins when it exists, so
+# a host that cloned keeps tracking what it cloned.
+dir_for() {  # dir_for <product> <repo-url>
+  _std="$SRC_DIR/$(dirname_for "$2")"
+  if [ -d "$_std/.git" ]; then printf '%s\n' "$_std"; return 0; fi
+  _vnd="$HERE/apps/$1"
+  if [ -d "$_vnd/deploy" ] || [ -f "$_vnd/docker-compose.yml" ]; then
+    printf '%s\n' "$_vnd"; return 0
+  fi
+  printf '%s\n' "$_std"
+}
+
+clone_one() {  # clone_one <repo-url> [product]
   _d="$SRC_DIR/$(dirname_for "$1")"
   if [ -d "$_d/.git" ]; then
-    say "== updating $(dirname_for "$1") =="; git -C "$_d" pull --ff-only || true
+    say "== updating $(dirname_for "$1") =="
+    if ! git -C "$_d" pull --ff-only >/dev/null 2>&1; then
+      # Not an error: an unreachable remote means this host keeps the code it
+      # already has. Said plainly rather than letting git's raw "fatal: unable
+      # to access" read as a failed install.
+      say "  could not reach the remote — using the version already on disk."
+    fi
+  elif [ -n "${2:-}" ] && [ "$(dir_for "$2" "$1")" != "$_d" ]; then
+    say "== using the $2 source vendored in this checkout =="
   else
     say "== cloning $(dirname_for "$1") =="; git clone --depth 1 "$1" "$_d"
   fi
@@ -177,8 +206,8 @@ mkdir -p "$SRC_DIR"
 
 # The Controller checkout ships the unified sysiblectl — clone it regardless (we
 # need the CLI to drive every product, including this gateway) and put it on PATH.
-CTL_DIR="$SRC_DIR/$(dirname_for "$CTL_REPO")"
-clone_one "$CTL_REPO" || die "could not clone the Controller repo (check network/DNS) — nothing was installed."
+CTL_DIR="$(dir_for controller "$CTL_REPO")"
+clone_one "$CTL_REPO" controller || die "could not clone the Controller repo (check network/DNS) — nothing was installed."
 # `sysiblectl` is the name; `sysible_ctl` is linked beside it because it is in
 # every runbook, every shell history and this installer's own older copies. A
 # Controller checkout from before the rename only ships the underscore name, so
@@ -635,10 +664,10 @@ if [ "$WANT_APPS" -eq 1 ]; then
     say "============================================================"
     say " $p — cloning the code, then building + starting its container(s)"
     say "============================================================"
-    if [ "$p" != "controller" ] && ! clone_one "$repo"; then
+    if [ "$p" != "controller" ] && ! clone_one "$repo" "$p"; then
       FAILED="$FAILED $p(clone)"; say "  WARNING: could not clone $p — skipping it."; continue
     fi
-    _dir="$SRC_DIR/$(dirname_for "$repo")"
+    _dir="$(dir_for "$p" "$repo")"
     # PERSIST the SSO secret + trust flag + base path into the app's OWN compose
     # .env, so they survive EVERY future recreate. Without this the values only
     # existed in the ambient env of the single install-time `up` below; any later
