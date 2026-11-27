@@ -1,0 +1,303 @@
+"""Making a plain Linux host into a hypervisor, and keeping its storage usable.
+
+Two failures drove this. First, SLEP could drive a hypervisor but not MAKE one:
+a freshly installed host had no storage pool, no network and usually no libvirt,
+and the first sign of it was a Terraform apply dying partway through. Second, and
+reported from a real host:
+
+    error creating libvirt domain: internal error: process exited while connecting
+    to monitor: qemu-system-x86_64: -blockdev {"driver":"file","filename":
+    "/var/lib/libvirt/images/arch-base.qcow2","node-name":"libvirt-3-storage",
+    "auto-read-only":true,...}: Could not open '...': Permission denied
+
+Who fails there is the point: qemu-system-x86_64, not libvirtd. libvirtd is root
+and creates the files perfectly. The VM process runs unprivileged and must open
+its disk's whole backing chain -- and every VM is a COW clone over one shared base
+image. The modes can look perfectly fine (0644, in a 0711 directory) and the open
+still fail, because libvirt hands the base back to its original owner when another
+VM stops.
+"""
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from backend import hypervisor as h
+
+HERE = Path(__file__).resolve().parents[1]
+SCRIPTS = {"PROVISION_SH": h.PROVISION_SH, "DIAGNOSE_SH": h.DIAGNOSE_SH, "REPAIR_SH": h.REPAIR_SH}
+
+
+# ------------------------------------------------------------ distro-agnostic
+
+@pytest.mark.parametrize("id_,id_like,want", [
+    ("debian", "", "debian"),
+    ("ubuntu", "debian", "debian"),
+    ("linuxmint", "ubuntu debian", "debian"),     # the user's example, by name
+    ("sysible", "debian", "debian"),              # our own ISOs set exactly this
+    ("pop", "ubuntu debian", "debian"),
+    ("zorin", "ubuntu debian", "debian"),
+    ("rocky", "rhel centos fedora", "rhel"),
+    ("almalinux", "rhel centos fedora", "rhel"),
+    ("fedora", "", "rhel"),
+    ("opensuse-leap", "suse opensuse", "suse"),
+    ("sles", "", "suse"),
+    ("arch", "", "arch"),
+    ("manjaro", "arch", "arch"),
+    ("alpine", "", "alpine"),
+])
+def test_the_distro_does_not_have_to_be_named(id_, id_like, want):
+    """'Being linux mint or sysible server it shouldn't matter what the remote host is.'
+    A derivative reaches its parent through ID_LIKE without ever being listed."""
+    assert h.family_for(id_, id_like) == want
+
+
+def test_an_unknown_distro_is_said_so_not_guessed():
+    assert h.family_for("plan9", "") == ""
+    assert "Unrecognised distribution" in h.PROVISION_SH
+
+
+def test_our_own_isos_still_set_the_id_like_this_detector_relies_on():
+    """If a build ever drops ID_LIKE=debian, Sysible stops being detectable --
+    by its own tooling. Pin it from here so that change cannot pass unnoticed."""
+    found = []
+    for repo in ("sysible-server", "sysible-workstation"):
+        hook = Path("/home/user") / repo / "live-build/config/hooks/normal/9000-sysible-system.hook.chroot"
+        if hook.exists():
+            found.append(repo)
+            assert "ID_LIKE=debian" in hook.read_text(encoding="utf-8"), (
+                "%s no longer sets ID_LIKE=debian in /etc/os-release, so SLEP cannot "
+                "identify its own distribution on a remote host" % repo)
+    if not found:
+        pytest.skip("ISO repos not checked out beside this one")
+
+
+# ---------------------------------------------------------------- the scripts
+
+@pytest.mark.parametrize("name", sorted(SCRIPTS))
+def test_every_script_is_posix_sh(name, tmp_path):
+    """/bin/sh is dash on Debian and ash on Alpine. A bashism here fails on the
+    host, at the far end of an SSH connection, with nothing useful to show."""
+    if not _has("dash"):
+        pytest.skip("dash not available to check with")
+    f = tmp_path / (name + ".sh")
+    f.write_text(SCRIPTS[name])
+    p = subprocess.run(["dash", "-n", str(f)], capture_output=True, text=True)
+    assert p.returncode == 0, "%s is not valid POSIX sh:\n%s" % (name, p.stderr)
+
+
+def _has(prog):
+    import shutil
+    return shutil.which(prog) is not None
+
+
+def test_the_password_is_read_from_stdin_exactly_once():
+    """It must not be in argv (ps on the host shows that), and leaving it unread
+    would hand it to whatever ran next on the same stdin."""
+    for name, src in SCRIPTS.items():
+        assert "read -r SUDOPW" in src, "%s does not consume the password" % name
+        assert src.count("read -r SUDOPW") == 1, "%s reads stdin more than once" % name
+        assert "SUDOPW=''" in src.split("read -r SUDOPW", 1)[1], (
+            "%s never clears the password after using it" % name)
+
+
+def test_a_cpu_without_virtualisation_is_refused_not_emulated():
+    """Decided: refuse to build rather than fall back to TCG emulation."""
+    assert "no hardware virtualisation" in h.PROVISION_SH
+    assert "exit 12" in h.PROVISION_SH
+    # and the refusal must come BEFORE anything is installed
+    assert h.PROVISION_SH.index("exit 12") < h.PROVISION_SH.index("apt-get install")
+
+
+def test_provisioning_covers_every_family_it_claims_to_detect():
+    for fam in h.FAMILIES:
+        assert re.search(r"^\s*%s\)" % fam, h.PROVISION_SH, re.M), (
+            "family %r is detected but has no install branch" % fam)
+
+
+def test_the_repair_and_the_check_resolve_the_qemu_identity_the_same_way():
+    """The repair used to group-own volumes to `id -gn $QU` while the check read the
+    group out of qemu.conf -- so the repair could hand a file to a group the VM
+    process is not in and report success. One resolver, shared, or it drifts again."""
+    assert h._QEMU_ID_SH in h.DIAGNOSE_SH
+    assert h._QEMU_ID_SH in h.REPAIR_SH
+    assert "id -gn" not in h.REPAIR_SH, (
+        "the repair is resolving the group from the USER again instead of qemu.conf")
+
+
+def test_the_probe_does_not_hand_the_vm_user_groups_it_does_not_have():
+    """libvirt starts qemu with qemu.conf's user AND group and adds no supplementary
+    groups. A probe via plain `su` gets the account's own groups, so a file can
+    probe readable and still be denied in the real thing."""
+    assert "--clear-groups" in h._QEMU_ID_SH
+    assert "setpriv" in h._QEMU_ID_SH
+
+
+def test_the_repair_verifies_by_opening_the_file_not_by_chmod_returning_zero():
+    body = h.REPAIR_SH.split("fixed_vols", 1)[0]
+    assert "as_qemu" in h.REPAIR_SH.split("# 2.", 1)[1].split("# 3.", 1)[0], (
+        "the repair never re-probes as the VM process, so it can report success "
+        "while the open is still denied -- which is exactly what it did")
+    assert "STILL cannot read" in h.REPAIR_SH
+
+
+def test_remember_owner_is_explained_not_just_toggled():
+    """It is why this works once and then stops: stopping one VM restores its disks'
+    original owner, handing a shared base image back to root while others need it."""
+    for src in (h.DIAGNOSE_SH, h.REPAIR_SH):
+        assert "remember_owner" in src
+    assert "restores" in h.DIAGNOSE_SH or "restore" in h.DIAGNOSE_SH
+    assert "qemu.conf.sysible-bak" in h.REPAIR_SH, "the repair edits qemu.conf without keeping a copy"
+
+
+def test_the_pool_directory_is_made_searchable_not_readable():
+    """o+x is all a path open needs; o+r on the DIRECTORY would publish a listing of
+    every disk on the host. The volumes themselves are a separate decision below."""
+    assert 'chmod o+x "$POOLDIR"' in h.REPAIR_SH
+    assert 'chmod o+r "$POOLDIR"' not in h.REPAIR_SH
+    assert "chmod 777" not in h.REPAIR_SH and "chmod a+rwx" not in h.REPAIR_SH
+
+
+def test_the_volume_fix_does_not_rely_on_a_group_libvirt_will_overwrite():
+    """The first attempt chgrp'd each volume to qemu.conf's group and set g+r. libvirt
+    re-chowns a disk when the domain starts -- on a real host to libvirt-qemu:
+    libvirt-qemu, not kvm -- so the group was overwritten and the 0640 file was then
+    readable by nobody that mattered. It kept failing in exactly the same way."""
+    vol_loop = h.REPAIR_SH.split("# 2.", 1)[1].split("# 3.", 1)[0]
+    # Strip comments: the explanation of why chgrp is wrong must not read as chgrp.
+    code = "\n".join(l for l in vol_loop.splitlines() if not l.strip().startswith("#"))
+    assert "chmod a+r" in code, "the volumes are not made world-readable"
+    assert "chgrp" not in code, (
+        "the repair is group-owning volumes again -- libvirt overwrites that group "
+        "on domain start, so the fix does not survive")
+
+
+def test_the_repair_clears_the_owner_libvirt_saved():
+    """With remember_owner on, libvirt stores each file's original owner in
+    trusted.libvirt.security.* and RESTORES it every time a domain starts -- which
+    silently undoes a chown done by hand. That is why this kept coming back."""
+    assert "setfattr -x" in h.REPAIR_SH
+    for a in ("dac", "ref_dac", "selinux", "ref_selinux"):
+        assert a in h.REPAIR_SH, "trusted.libvirt.security.%s is not cleared" % a
+
+
+def test_the_check_reports_the_owner_libvirt_saved():
+    assert "getfattr" in h.DIAGNOSE_SH
+    assert "saved_owner" in h.DIAGNOSE_SH
+    assert "saved_owner" in h.PERM_STEP_LABELS
+
+
+# -------------------------------------------------------------- step reporting
+
+def test_steps_are_parsed_and_junk_is_not():
+    out = ("Reading package lists...\n"
+           "SYSIBLE_STEP|os|ok|Linux Mint 22 -> debian\n"
+           "E: some apt noise|with|pipes\n"
+           "SYSIBLE_STEP|virt|failed|no vmx/svm\n")
+    steps = h.parse_steps(out)
+    assert [s["step"] for s in steps] == ["os", "virt"]
+    assert steps[0]["label"] == "Identify the distribution"
+    assert steps[1]["status"] == "failed"
+
+
+def test_every_step_the_scripts_emit_has_a_human_label():
+    """An unlabelled step shows the operator a bare key like 'fixed_vols'."""
+    known = set(h.STEP_LABELS) | set(h.PERM_STEP_LABELS)
+    for name, src in SCRIPTS.items():
+        for key in re.findall(r"^\s*S ([a-z_]+) ", src, re.M):
+            assert key in known, "step %r emitted by %s has no label" % (key, name)
+
+
+# ------------------------------------------- the behaviour, actually exercised
+
+@pytest.fixture
+def pool(tmp_path):
+    """A pool directory in the exact reported state: base image 0600 root:root."""
+    d = tmp_path / "images"
+    d.mkdir()
+    (d / "arch-base.qcow2").write_bytes(b"qcow2")
+    (d / "arch-base.qcow2").chmod(0o600)
+    d.chmod(0o700)
+    # every ancestor must be traversable or the probe reports the ancestors, not us
+    p = tmp_path
+    while str(p) != "/":
+        p.chmod(p.stat().st_mode | 0o111)
+        p = p.parent
+    return d
+
+
+def _run(script, pooldir, remember="0"):
+    env = "POOLDIR='%s'\nSET_REMEMBER='%s'" % (pooldir, remember)
+    p = subprocess.run(["sh", "-c", env + "\n" + script],
+                       capture_output=True, text=True, input="", timeout=120)
+    return h.parse_steps(p.stdout)
+
+
+def _step(steps, key):
+    for s in steps:
+        if s["step"] == key:
+            return s
+    return None
+
+
+@pytest.mark.skipif(not _has("setpriv"), reason="needs setpriv to probe as another user")
+def test_the_check_finds_the_failure_that_was_reported(pool):
+    import os
+    if os.geteuid() != 0:
+        pytest.skip("needs root to probe as the VM user")
+    steps = _run(h.DIAGNOSE_SH, pool)
+    vols = _step(steps, "volumes")
+    assert vols and vols["status"] == "failed", steps
+    assert "arch-base.qcow2" in vols["detail"]
+
+
+@pytest.mark.skipif(not _has("setpriv"), reason="needs setpriv to probe as another user")
+def test_the_repair_actually_lets_the_vm_process_open_the_backing_file(pool):
+    """The whole point. An earlier version reported ok here while the open was
+    still denied, because it checked chmod's exit code instead of the open."""
+    import os
+    if os.geteuid() != 0:
+        pytest.skip("needs root to change ownership")
+    assert _step(_run(h.DIAGNOSE_SH, pool), "volumes")["status"] == "failed"
+    fixed = _step(_run(h.REPAIR_SH, pool), "fixed_vols")
+    assert fixed and fixed["status"] == "ok", fixed
+    after = _step(_run(h.DIAGNOSE_SH, pool), "volumes")
+    assert after["status"] == "ok", after
+
+
+@pytest.mark.skipif(not _has("setpriv"), reason="needs setpriv to probe as another user")
+def test_the_repair_is_idempotent(pool):
+    import os
+    if os.geteuid() != 0:
+        pytest.skip("needs root")
+    _run(h.REPAIR_SH, pool)
+    again = _run(h.REPAIR_SH, pool)
+    assert [s["status"] for s in again] == ["ok"] * len(again), again
+
+
+@pytest.mark.skipif(not _has("setpriv"), reason="needs setpriv to probe as another user")
+def test_the_fix_survives_libvirt_restoring_the_saved_owner(pool):
+    """The event that actually breaks this, and the reason a group-based fix fails.
+
+    libvirt does not only chown a disk TO the qemu user -- with remember_owner it
+    also chowns it BACK to the owner it saved (root:root) when a domain stops. A
+    volume left 0640 root:kvm by a chgrp survives the first direction (the qemu
+    process then owns the file) and dies on the second: group root, qemu's group
+    kvm, other nothing. 0644 survives both, because it never depended on who owns
+    the file at all.
+
+    An earlier version of this test modelled only the chown TO libvirt-qemu, which
+    hands that process owner permissions -- so it passed against the broken fix."""
+    import os, subprocess as sp
+    if os.geteuid() != 0:
+        pytest.skip("needs root")
+    _run(h.REPAIR_SH, pool)
+    img = pool / "arch-base.qcow2"
+    os.chown(str(img), 0, 0)          # libvirt restoring the owner it remembered
+    r = sp.run(["setpriv", "--reuid", "libvirt-qemu", "--regid", "kvm",
+                "--clear-groups", "cat", str(img)], capture_output=True)
+    assert r.returncode == 0, (
+        "after libvirt restored the saved owner (root:root) the VM process can no "
+        "longer read the backing file -- this fix does not survive a VM stopping: %s"
+        % (r.stderr or b"").decode()[:200])

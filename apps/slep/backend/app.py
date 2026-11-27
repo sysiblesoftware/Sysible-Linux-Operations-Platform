@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import (controller_import, db, engines, galaxy, gitops, infra, keydist,
+from . import (controller_import, db, engines, galaxy, gitops, hypervisor, infra, keydist,
                notifications, policy, projcfg, surveys, vault)
 from .runners import ansible_runner, molecule_runner, terraform_runner
 
@@ -3959,36 +3959,12 @@ def infra_install_hypervisor_key(request: Request, body: dict = Body(...), user:
     `password` may be a literal or a Vault variable (`vault.NAME`), so the secret
     doesn't ride in the clear. Requires `sshpass` on the SLEP host; without it we
     return the manual copy command instead of failing silently."""
-    import re
     import shutil
-    host = infra._one_line(str(body.get("host") or "")).strip()
-    if host and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]+", host):
-        raise HTTPException(status_code=400, detail="That host name/IP looks invalid.")
-    ssh_user = infra._one_line(str(body.get("user") or "root")).strip() or "root"
-    if not re.fullmatch(r"[A-Za-z0-9._\-]+", ssh_user):
-        raise HTTPException(status_code=400, detail="That SSH user looks invalid.")
-    port = str(body.get("port") or "22").strip() or "22"
-    if not host:
-        raise HTTPException(status_code=400, detail="A host is required.")
-    if not port.isdigit():
-        raise HTTPException(status_code=400, detail="Port must be a number.")
-    raw = str(body.get("password") or "").strip()
-    # Defense in depth: a Vault plaintext resolved here is offered as the SSH password
-    # to an operator-CHOSEN external host — a cross-org decryption oracle in the wrong
-    # hands. Restrict Vault refs to a system admin and audit-log the secret name; a
-    # literal password is unchanged (any operator). Resolution is org-scoped besides.
-    ref_name = _secret_ref_name(raw)
-    if ref_name:
-        if not _is_system_admin(_session_or_401(request)["role"]):
-            raise HTTPException(status_code=403,
-                                detail="Only a system administrator may use a Vault variable as the install "
-                                       "password here — enter the host password directly instead.")
-        db.log_audit("hypervisor_key_vault_pw", user, f"{ref_name} → {ssh_user}@{host}:{port}")
-    pw = _resolve_secret_ref(raw, org_ids=_visible_org_ids(request)) if raw else ""
-    if raw and not pw:
-        raise HTTPException(status_code=400,
-                            detail=f"Vault variable '{raw}' not found — add it under Secrets first, "
-                                   f"or enter the host password directly.")
+    # Same validation as every other hypervisor-over-SSH action, including the guard
+    # that stops a Vault reference being used as a decryption oracle against an
+    # operator-chosen host. One copy, so it cannot be enforced in three places
+    # out of four.
+    host, ssh_user, port, pw = _hypervisor_ssh_target(request, body, user, "hypervisor_key_vault_pw")
     if not pw:
         raise HTTPException(status_code=400, detail="A password is required to install the key.")
     # ONE key for everything: SLEP's managed key (also baked into VMs + used for the
@@ -4047,6 +4023,206 @@ def infra_install_hypervisor_key(request: Request, body: dict = Body(...), user:
     if pw:
         err = err.replace(pw, "***")
     return {"ok": False, "output": err[:400] or "Password install failed (check the user/password)."}
+
+
+# ---------------------------------------------------------------- hypervisors
+#
+# Making a plain Linux host into a hypervisor, and keeping its storage usable.
+# SLEP drives hypervisors it does not own, and until now it could only *test* a
+# connection, *list* what was already there and *start* a pool somebody else had
+# defined. A freshly installed host had no pool, no network and usually no libvirt
+# at all, and the first sign of it was a Terraform apply dying halfway through.
+#
+# Nothing here is Debian-specific: hypervisor.py resolves the package family off
+# /etc/os-release's ID/ID_LIKE chain, so Linux Mint and Sysible Server reach the
+# same package set without being named, and RHEL/SUSE/Arch/Alpine have their own.
+
+def _hypervisor_ssh_target(request: Request, body: dict, user: str, audit_tag: str):
+    """Validate the {host,user,port,password} every hypervisor-over-SSH action takes.
+
+    Factored out of infra_install_hypervisor_key: four endpoints need exactly this
+    and a copy each is how the Vault-reference guard below ends up enforced in
+    three places out of four."""
+    import re
+    host = infra._one_line(str(body.get("host") or "")).strip()
+    if host and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]+", host):
+        raise HTTPException(status_code=400, detail="That host name/IP looks invalid.")
+    ssh_user = infra._one_line(str(body.get("user") or "root")).strip() or "root"
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", ssh_user):
+        raise HTTPException(status_code=400, detail="That SSH user looks invalid.")
+    port = str(body.get("port") or "22").strip() or "22"
+    if not host:
+        raise HTTPException(status_code=400, detail="A host is required.")
+    if not port.isdigit():
+        raise HTTPException(status_code=400, detail="Port must be a number.")
+    raw = str(body.get("password") or "").strip()
+    # Defense in depth: a Vault plaintext resolved here is offered as the SSH password
+    # to an operator-CHOSEN external host — a cross-org decryption oracle in the wrong
+    # hands. Restrict Vault refs to a system admin and audit-log the secret name; a
+    # literal password is unchanged (any operator). Resolution is org-scoped besides.
+    ref_name = _secret_ref_name(raw)
+    if ref_name:
+        if not _is_system_admin(_session_or_401(request)["role"]):
+            raise HTTPException(status_code=403,
+                                detail="Only a system administrator may use a Vault variable as the "
+                                       "password here — enter the host password directly instead.")
+        db.log_audit(audit_tag, user, f"{ref_name} → {ssh_user}@{host}:{port}")
+    pw = _resolve_secret_ref(raw, org_ids=_visible_org_ids(request)) if raw else ""
+    if raw and not pw:
+        raise HTTPException(status_code=400,
+                            detail=f"Vault variable '{raw}' not found — add it under Secrets first, "
+                                   f"or enter the host password directly.")
+    return host, ssh_user, port, pw
+
+
+def _run_on_hypervisor(host: str, ssh_user: str, port: str, pw: str, script: str,
+                       env_prefix: str = "", timeout: int = 600):
+    """Run a POSIX sh script on a hypervisor over SSH. Returns (ok, stdout, error).
+
+    The password rides on stdin, which the script reads as its first line for sudo —
+    never in argv, so it is not in `ps` on the host. Script PARAMETERS come in as
+    shell assignments prepended to the script rather than positional args, because
+    stdin is already taken by the password and `sh -s` would want it too.
+
+    SLEP's managed key is tried first; sshpass is only used when a password is the
+    only way in. Both paths still feed the password to the script for sudo."""
+    import shutil
+    keyfile = ""
+    try:
+        keyfile = infra_hypervisor_key(user=ssh_user).get("keyfile") or ""
+    except Exception:  # noqa: BLE001 - no managed key yet is not fatal; fall back to the password
+        keyfile = ""
+    remote = (env_prefix + "\n" + script) if env_prefix else script
+    common = ["-p", port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "ConnectTimeout=15"]
+    attempts = []
+    if keyfile and os.path.exists(keyfile):
+        attempts.append(["ssh", "-i", keyfile, "-o", "BatchMode=yes",
+                         "-o", "PreferredAuthentications=publickey"] + common
+                        + [f"{ssh_user}@{host}", remote])
+    if pw and shutil.which("sshpass"):
+        attempts.append(["sshpass", "-e", "ssh", "-o", "PreferredAuthentications=password",
+                         "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1"]
+                        + common + [f"{ssh_user}@{host}", remote])
+    if not attempts:
+        return False, "", ("No way in to the host: SLEP has no managed key on it yet and "
+                           + ("`sshpass` isn't installed on the SLEP host, so a password can't be used either."
+                              if pw else "no password was given. Install SLEP's key first, or supply a password."))
+    env = dict(os.environ)
+    if pw:
+        env["SSHPASS"] = pw
+    last = ""
+    for cmd in attempts:
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                               env=env, input=(pw + "\n") if pw else "\n")
+        except subprocess.TimeoutExpired:
+            return False, "", (f"Timed out after {timeout}s on {ssh_user}@{host}:{port}. "
+                               "Installing packages on a slow link can take a while — try again, "
+                               "or run it on the host directly.")
+        except Exception as e:  # noqa: BLE001
+            last = f"Couldn't run it: {e}"
+            continue
+        out = p.stdout or ""
+        if hypervisor.MARK in out:
+            # The script ran and reported. A non-zero exit just means it stopped at a
+            # failed step, which the steps themselves describe far better than rc.
+            return True, out, ""
+        last = (p.stderr or p.stdout or "").strip()
+        if pw:
+            last = last.replace(pw, "***")
+    return False, "", (last[:400] or "The host didn't run the script (check the user, password and port).")
+
+
+@app.post("/infra/hypervisor-provision")
+def infra_hypervisor_provision(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
+    """Make a remote Linux host into a KVM hypervisor, whatever distro it runs.
+
+    Installs qemu-kvm/libvirt/virtinst for the host's package family, starts the
+    daemon, puts the SSH account in the libvirt group, and defines + builds +
+    autostarts the default storage pool and network. Every step reports on its own,
+    so a host that gets five steps in tells you which one stopped it rather than
+    collapsing into one wall of output.
+
+    Idempotent: a host that is already a hypervisor reports 'already' throughout.
+    Refuses outright on a CPU with no hardware virtualisation — emulated VMs are
+    too slow to be worth building, so this says so instead of building one."""
+    host, ssh_user, port, pw = _hypervisor_ssh_target(request, body, user, "hypervisor_provision_vault_pw")
+    ok, out, err = _run_on_hypervisor(host, ssh_user, port, pw, hypervisor.PROVISION_SH, timeout=900)
+    if not ok:
+        return {"ok": False, "steps": [], "output": err}
+    steps = hypervisor.parse_steps(out)
+    failed = [s for s in steps if s["status"] == "failed"]
+    db.log_audit("hypervisor_provisioned", user,
+                 f"{ssh_user}@{host}:{port} — {len(steps)} steps, {len(failed)} failed")
+    return {"ok": not failed, "steps": steps,
+            "output": ("This host is a hypervisor now." if not failed
+                       else "Stopped at: " + ", ".join(s["label"] for s in failed))}
+
+
+@app.post("/infra/hypervisor-permissions")
+def infra_hypervisor_permissions(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    """Report why a VM can't open its own disk.
+
+    The failure this answers, verbatim from a host:
+
+        qemu-system-x86_64: -blockdev {...,"filename":"/var/lib/libvirt/images/
+        arch-base.qcow2","node-name":"libvirt-3-storage","auto-read-only":true,...}:
+        Could not open '...arch-base.qcow2': Permission denied
+
+    Note who fails: qemu-system-x86_64, not libvirtd. libvirtd is root and creates
+    the files perfectly; the VM process runs unprivileged and has to open its disk's
+    ENTIRE backing chain — and every VM here is a copy-on-write clone over one
+    shared base image. This probes as that process is really credentialed (its
+    qemu.conf user AND only its qemu.conf group, no supplementary groups) instead
+    of assuming the file modes mean what they look like."""
+    host, ssh_user, port, pw = _hypervisor_ssh_target(request, body, user, "hypervisor_perms_vault_pw")
+    pool = infra._one_line(str(body.get("pool_dir") or "/var/lib/libvirt/images")).strip()
+    if not pool.startswith("/") or "'" in pool or ".." in pool:
+        raise HTTPException(status_code=400, detail="That pool directory looks invalid.")
+    ok, out, err = _run_on_hypervisor(host, ssh_user, port, pw, hypervisor.DIAGNOSE_SH,
+                                      env_prefix=f"POOLDIR='{pool}'", timeout=120)
+    if not ok:
+        return {"ok": False, "steps": [], "output": err}
+    steps = hypervisor.parse_steps(out)
+    failed = [s for s in steps if s["status"] == "failed"]
+    return {"ok": not failed, "steps": steps,
+            "output": ("Nothing wrong with the storage permissions on this host."
+                       if not failed else "Problems found: " + ", ".join(s["label"] for s in failed))}
+
+
+@app.post("/infra/hypervisor-fix-permissions")
+def infra_hypervisor_fix_permissions(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
+    """Fix the storage permissions the check above reports, on the host.
+
+    Makes the pool directory traversable (o+x — search only, the listing stays
+    private, which is what libvirt's own 0711 intends) and every volume readable by
+    the group qemu actually runs under. With `remember_owner` set, it also turns
+    that off: it is why this breaks AGAIN after working. remember_owner=1 (the
+    default) makes libvirt restore a file's original owner when a domain stops, so
+    stopping one VM hands the shared base image back to root:root while the others
+    still need it. That one needs a libvirt restart, which does not touch running
+    VMs — they are separate qemu processes — so it is opt-in and says what it did.
+
+    Every claim is verified by opening the files AS the VM process afterwards, not
+    by whether chmod returned 0."""
+    host, ssh_user, port, pw = _hypervisor_ssh_target(request, body, user, "hypervisor_fixperms_vault_pw")
+    pool = infra._one_line(str(body.get("pool_dir") or "/var/lib/libvirt/images")).strip()
+    if not pool.startswith("/") or "'" in pool or ".." in pool:
+        raise HTTPException(status_code=400, detail="That pool directory looks invalid.")
+    remember = "1" if body.get("set_remember_owner") else "0"
+    ok, out, err = _run_on_hypervisor(host, ssh_user, port, pw, hypervisor.REPAIR_SH,
+                                      env_prefix=f"POOLDIR='{pool}'\nSET_REMEMBER='{remember}'",
+                                      timeout=180)
+    if not ok:
+        return {"ok": False, "steps": [], "output": err}
+    steps = hypervisor.parse_steps(out)
+    failed = [s for s in steps if s["status"] == "failed"]
+    db.log_audit("hypervisor_perms_fixed", user,
+                 f"{ssh_user}@{host}:{port} {pool} remember_owner={remember} — {len(failed)} failed")
+    return {"ok": not failed, "steps": steps,
+            "output": ("Storage permissions are correct — verified by opening the volumes as the VM process."
+                       if not failed else "Still wrong: " + ", ".join(s["label"] for s in failed))}
 
 
 @app.post("/infra/{project_id}/scaffold")
