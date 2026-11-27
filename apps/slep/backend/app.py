@@ -3729,6 +3729,61 @@ def _refresh_infra_cloudinit(project_id: int, emit=None, password=None) -> bool:
     return True
 
 
+def _libvirt_connect_hint(uri: str, err: str) -> str:
+    """Translate a libvirt connection failure into the thing to actually do.
+
+    This matters most against our OWN Server image. Sysible Server installs
+    libvirt-daemon-system and qemu-system and enables libvirtd -- so every package
+    is already there -- but the default `sysible` account is deliberately NOT in
+    the `libvirt` group, because membership is root-equivalent and no shipped
+    image should hand that out by default. The result is that pointing SLEP at a
+    stock Sysible Server fails on
+
+        error: Failed to connect socket to '/var/run/libvirt/libvirt-sock':
+        Permission denied
+
+    which reads as a file-permission problem and is not one. That exact wording
+    already cost an evening on the VM disks, so name the cause here rather than
+    passing the stderr through and letting it be guessed at a second time.
+
+    Returns a sentence to append, or '' when the error is not one we recognise --
+    an unrecognised failure must keep showing its own text, not a wrong guess."""
+    import re as _re
+    low = (err or "").lower()
+    m = _re.match(r"qemu\+ssh://([^@/]+)@", uri or "")
+    acct = m.group(1) if m else "the SSH account"
+    sock = "libvirt-sock" in low or "libvirt/libvirt" in low
+
+    if sock and "permission denied" in low:
+        return (f"\n\nWhat this means: libvirt IS running, but '{acct}' may not talk to it. "
+                f"This is not a file-permission problem. The account is not in the `libvirt` "
+                f"group — and on Sysible Server that is deliberate: the default account is left "
+                f"out because the group is root-equivalent. Fix it with “\U0001F6E0 Make this a "
+                f"hypervisor” below, which adds it, or by hand on the host:\n"
+                f"    sudo usermod -aG libvirt {acct}\n"
+                f"The next SSH session picks up the new group; an open one does not.")
+    if sock and ("no such file" in low or "connection refused" in low):
+        return ("\n\nWhat this means: nothing is listening on the libvirt socket, so libvirtd is "
+                "not installed or not started. “\U0001F6E0 Make this a hypervisor” below installs "
+                "it for this host's distribution and starts it.")
+    if "polkit" in low:
+        return (f"\n\nWhat this means: libvirt wants to authorise '{acct}' interactively, and an "
+                f"SSH connection has no desktop to ask. Putting the account in the `libvirt` group "
+                f"removes the question:\n    sudo usermod -aG libvirt {acct}")
+    if "permission denied (publickey" in low or "permission denied (publickey,password" in low:
+        return ("\n\nWhat this means: the host refused SLEP's key, so this never reached libvirt. "
+                "Use “\U0001F510 Install key with password” above once, and the URI will carry the "
+                "key SLEP installed.")
+    if "host key verification failed" in low or "remote host identification has changed" in low:
+        return ("\n\nWhat this means: the SLEP host does not trust this host's SSH key (or it "
+                "changed). A new key cannot be accepted from here — run `ssh-keyscan -H <host> >> "
+                "~/.ssh/known_hosts` as the SLEP service account, or clear the stale entry.")
+    if "could not resolve hostname" in low or "name or service not known" in low:
+        return ("\n\nWhat this means: the name in the URI does not resolve from the SLEP host. "
+                "Use an IP address, or add the host to DNS / /etc/hosts.")
+    return ""
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
@@ -3758,7 +3813,8 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         ok = p.returncode == 0
         out = (p.stdout + p.stderr).strip()
         if not ok:
-            return {"ok": False, "output": out or "connection failed"}
+            return {"ok": False,
+                    "output": (out or "connection failed") + _libvirt_connect_hint(uri, out)}
         out = out or "connected."
         # Say which machine this hypervisor is, because it decides which cloud
         # images can boot on it and the operator otherwise has no way to see it.
