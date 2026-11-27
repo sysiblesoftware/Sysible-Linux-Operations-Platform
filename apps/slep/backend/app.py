@@ -3690,6 +3690,23 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
                 ok = False
             else:
                 out += f"\n• {label} '{name}': ✓"
+        # Hardware virtualisation. The connection, the network and the pool can all
+        # be perfect on a host that will only ever run VMs under software emulation
+        # -- which looks like a working hypervisor right up to the point the VMs are
+        # unusably slow. Say it HERE, when it is cheap to fix, rather than letting
+        # the first apply be where it is discovered.
+        from .runners.terraform_runner import libvirt_acceleration
+        accel, why = libvirt_acceleration(uri)
+        if accel == "kvm":
+            out += "\n• Hardware virtualisation: ✓ KVM"
+        elif accel == "tcg":
+            out += ("\n• Hardware virtualisation: ✗ NONE — " + why + ". VMs would run about ten "
+                    "times slower, so a build will be refused. If the hypervisor is itself a VM, "
+                    "enable nested virtualisation on its host; on bare metal, enable VT-x/AMD-V "
+                    "in the firmware.")
+            ok = False
+        else:
+            out += "\n• Hardware virtualisation: could not be checked (" + why + ")"
         return {"ok": ok, "output": out}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output":

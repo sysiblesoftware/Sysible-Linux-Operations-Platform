@@ -252,6 +252,37 @@ def _libvirt_uri_for(project_id: int) -> str:
         return ""
 
 
+def libvirt_acceleration(uri: str):
+    """Does this hypervisor offer hardware virtualisation? -> ('kvm'|'tcg'|'unknown', detail)
+
+    `virsh capabilities` lists a <domain type='kvm'/> under each guest arch when KVM
+    is usable and only <domain type='qemu'/> when it is not. That is the question
+    that matters: a host with the KVM MODULES loaded but no CPU support still shows
+    qemu only, and a host whose /dev/kvm the SSH account cannot open does too --
+    which is the state a VM actually runs in, rather than what /proc/cpuinfo claims.
+
+    'unknown' when virsh is missing or the call fails: not knowing is not the same
+    as knowing it is bad, and a build must not be refused on a broken probe."""
+    import shutil
+    import subprocess
+    if not uri or not shutil.which("virsh"):
+        return "unknown", "virsh is not available on the SLEP host"
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "capabilities"],
+                           capture_output=True, text=True, timeout=25,
+                           env={**os.environ, "LIBVIRT_DEFAULT_URI": uri})
+    except Exception as e:  # noqa: BLE001
+        return "unknown", str(e)[:200]
+    if p.returncode != 0:
+        return "unknown", (p.stderr or p.stdout or "").strip()[:200]
+    caps = p.stdout or ""
+    if "domain type='kvm'" in caps or 'domain type="kvm"' in caps:
+        return "kvm", "hardware virtualisation available"
+    if "domain type='qemu'" in caps or 'domain type="qemu"' in caps:
+        return "tcg", "only software emulation (qemu/TCG) is offered"
+    return "unknown", "could not read the hypervisor's capabilities"
+
+
 def _run_quiet(cmd) -> int:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=25,
@@ -348,6 +379,33 @@ def launch(run_id: int) -> None:
                 emit("!! don't wait on the base-image download first.")
                 db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
                 return
+
+            # Preflight hardware virtualisation. A hypervisor without KVM accepts
+            # every libvirt call perfectly happily -- it just runs each VM under TCG
+            # software emulation, which is roughly an order of magnitude slower. The
+            # build then "succeeds" and hands over machines that are unusable, with
+            # nothing in the run saying why. Refuse instead: a build nobody can use
+            # is not a build, and there is no TCG fallback on purpose.
+            if "libvirt_domain" in tf_text:
+                _uri = _libvirt_uri_for(run["project_id"])
+                _accel, _why = libvirt_acceleration(_uri)
+                if _accel == "tcg":
+                    emit("!! This hypervisor has no hardware virtualisation.")
+                    emit("!! " + _why + ", so every VM would run under software")
+                    emit("!! emulation -- on the order of ten times slower, and unusable for real work.")
+                    emit("!!")
+                    emit("!! If the hypervisor is itself a VM, turn on nested virtualisation on ITS")
+                    emit("!! host. If it is bare metal, enable VT-x/AMD-V in the firmware. If KVM is")
+                    emit("!! there but this account cannot reach /dev/kvm, add it to the kvm group.")
+                    emit("!! Checked on the hypervisor, not on the SLEP host:")
+                    emit("!!   virsh -c " + (_uri or "<uri>") + " capabilities | grep \"domain type\"")
+                    emit("!!")
+                    emit("!! Refusing rather than building something that crawls. Nothing was created.")
+                    db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+                    return
+                if _accel == "unknown":
+                    emit("-- Could not confirm hardware virtualisation on the hypervisor (" + _why + ").")
+                    emit("-- Carrying on: not knowing is not the same as knowing it is missing.")
 
             # Keep the project's cloud-init current: ensure SLEP's managed key is
             # authorized, so VMs this apply (re)creates accept the default "SLEP
