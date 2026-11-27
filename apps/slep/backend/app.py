@@ -3904,29 +3904,56 @@ def infra_hypervisor_networks(body: dict = Body(...), user: str = Depends(curren
             "output": f"{len(nets or [])} network(s), {len(pools or [])} pool(s)."}
 
 
+def _virsh_activate(uri: str, kind: str, name: str):
+    """Start a defined-but-inactive pool or network, and make it survive a reboot.
+
+    One helper for both because they are the same operation on two object types
+    (`virsh pool-start` / `virsh net-start`, then the matching `-autostart`), and
+    the pool half shipped alone: a network defined but INACTIVE fails an apply
+    exactly as a pool does, and the operator was told nothing and offered nothing.
+    `kind` is 'pool' or 'net'; it is never taken from the request."""
+    import shutil
+    assert kind in ("pool", "net"), kind
+    noun = "pool" if kind == "pool" else "network"
+    if not name:
+        raise HTTPException(status_code=400, detail=f"A {noun} name is required.")
+    if not shutil.which("virsh"):
+        return {"ok": False, "output": f"`virsh` isn't installed on the SLEP host — run "
+                                       f"`virsh {kind}-start {name}` on the hypervisor."}
+    try:
+        p = subprocess.run(["virsh", "-c", uri, f"{kind}-start", name],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        subprocess.run(["virsh", "-c", uri, f"{kind}-autostart", name],
+                       capture_output=True, text=True, timeout=15, env=dict(os.environ))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "output": str(e)}
+    ok = p.returncode == 0 or "already active" in (p.stderr or "").lower()
+    return {"ok": ok, "output": (f"\u2713 {noun} '{name}' is active, and set to start on boot."
+                                 if ok else
+                                 (p.stderr or p.stdout or f"{kind}-start failed").strip()[:200])}
+
+
 @app.post("/infra/hypervisor-pool-start")
 def infra_hypervisor_pool_start(body: dict = Body(...), user: str = Depends(require_operator)):
     """Start (activate) a defined-but-inactive storage pool on the hypervisor —
     `virsh pool-start <pool>` — the one-click fix for the 'pool defined but INACTIVE'
     preflight failure, so the operator doesn't have to SSH to the host to run it.
     Also flips autostart on so it survives a hypervisor reboot."""
-    import shutil
-    uri = _validate_libvirt_uri(body.get("uri"))
-    pool = infra._one_line(str(body.get("pool") or "")).strip()
-    if not pool:
-        raise HTTPException(status_code=400, detail="A pool name is required.")
-    if not shutil.which("virsh"):
-        return {"ok": False, "output": "`virsh` isn't installed on the SLEP host — run `virsh pool-start " + pool + "` on the hypervisor."}
-    try:
-        p = subprocess.run(["virsh", "-c", uri, "pool-start", pool],
-                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
-        subprocess.run(["virsh", "-c", uri, "pool-autostart", pool],
-                       capture_output=True, text=True, timeout=15, env=dict(os.environ))
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "output": str(e)}
-    ok = p.returncode == 0 or "already active" in (p.stderr or "").lower()
-    return {"ok": ok, "output": (f"✓ pool '{pool}' is active." if ok
-                                 else (p.stderr or p.stdout or "pool-start failed").strip()[:200])}
+    return _virsh_activate(_validate_libvirt_uri(body.get("uri")), "pool",
+                           infra._one_line(str(body.get("pool") or "")).strip())
+
+
+@app.post("/infra/hypervisor-net-start")
+def infra_hypervisor_net_start(body: dict = Body(...), user: str = Depends(require_operator)):
+    """Start (activate) a defined-but-inactive virtual network — the twin of the
+    pool fix above, which shipped without it.
+
+    libvirt will not attach an interface to an inactive network, so the apply dies
+    on the first domain; and because the wizard's dropdown only appended
+    '— inactive' to the option text, an operator who picked the host's real network
+    saw nothing wrong and got no button. Same one click, same autostart."""
+    return _virsh_activate(_validate_libvirt_uri(body.get("uri")), "net",
+                           infra._one_line(str(body.get("network") or "")).strip())
 
 
 def _virsh_list_domains(uri: str):

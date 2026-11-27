@@ -846,16 +846,24 @@ function NetworkPoolPicker({ values, set }) {
       else { setData({ networks: [], pools: [] }); setErr(d.output || 'Could not list networks/pools.') }
     } catch (e) { setErr(e.message) } finally { setBusy(false) }
   }
-  const startPool = async (name) => {
-    setStarting(name)
-    try { await api('infra/hypervisor-pool-start', { method: 'POST', json: { uri: values.uri, pool: name } }); await load() }
-    catch (e) { setErr(e.message) } finally { setStarting('') }
+  // One activator for both kinds. The pool half shipped alone and the network
+  // half was simply missing, so keep them on the same line of code.
+  const activate = async (kind, name) => {
+    setStarting(kind + ':' + name)
+    const path = kind === 'pool' ? 'infra/hypervisor-pool-start' : 'infra/hypervisor-net-start'
+    const json = kind === 'pool' ? { uri: values.uri, pool: name } : { uri: values.uri, network: name }
+    try {
+      const r = await api(path, { method: 'POST', json })
+      if (r && r.ok === false) setErr(r.output || ('Could not start that ' + kind + '.'))
+      await load()
+    } catch (e) { setErr(e.message) } finally { setStarting('') }
   }
   const net = values.network || 'default'
   const pool = values.pool || 'default'
   const nets = data?.networks || []
   const pools = data?.pools || []
   const poolObj = pools.find((p) => p.name === pool)
+  const netObj = nets.find((n) => n.name === net)
   const sel = (cur, list, key, ph) => (list.length > 0
     ? <select value={list.some((x) => x.name === cur) ? cur : ''} onChange={(e) => set(key, e.target.value)} style={{ flex: 1 }}>
         <option value="">(pick one)</option>
@@ -871,10 +879,16 @@ function NetworkPoolPicker({ values, set }) {
           disabled={busy || !values.uri} title="List the networks and pools on the hypervisor"
           onClick={load}>{busy ? 'Loading…' : 'Load from host'}</button>
       </div>
+      {netObj && !netObj.active && (
+        <div className="faint" style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 2 }}>
+          Network “{net}” is defined but INACTIVE — libvirt won’t attach an interface to it, so apply will fail on the first VM.{' '}
+          <a onClick={() => activate('net', net)} style={{ cursor: 'pointer' }}>{starting === 'net:' + net ? 'starting…' : 'Start it now'}</a>
+        </div>
+      )}
       {poolObj && !poolObj.active && (
         <div className="faint" style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 2 }}>
           Pool “{pool}” is defined but INACTIVE — apply will fail.{' '}
-          <a onClick={() => startPool(pool)} style={{ cursor: 'pointer' }}>{starting === pool ? 'starting…' : 'Start it now'}</a>
+          <a onClick={() => activate('pool', pool)} style={{ cursor: 'pointer' }}>{starting === 'pool:' + pool ? 'starting…' : 'Start it now'}</a>
         </div>
       )}
       {err && <div className="faint" style={{ fontSize: 11, color: 'var(--danger)', marginTop: 2 }}>{err}</div>}
