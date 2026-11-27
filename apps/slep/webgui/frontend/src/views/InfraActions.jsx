@@ -64,11 +64,18 @@ function buildActions(r, { controllers, setVms, setEnrollFor, setJumpFor, setTes
   // from their own places — the Inventories page, the Jump Hosts card, the run views.
   // Cadence was dropped too: the IDE's "Pipeline" button already runs a multi-step
   // build→configure→maintain flow, so a second one-click preset here was redundant.
+  // A bare "Edit" sitting between Destroy and Enroll reads as "rename this row" --
+  // it was reported as "there is an edit button for build infra but it's not very
+  // intuitive, I didn't know what it did". It opens the Build-infrastructure wizard
+  // on this project's spec, so it says so, and it comes FIRST: you define the VMs,
+  // then plan/apply/destroy them. Plan, Apply and Destroy all act on what Edit VMs
+  // defines, so having it in the middle of them put the one verb that changes the
+  // definition inside the group that acts on it.
   return [
+    ['Edit VMs', () => setEditFor && setEditFor(r), 'ghost', 'Change this project\u2019s VM types, counts, images and sizes, then regenerate its Terraform. Destroy the VMs first \u2014 this rewrites the .tf.'],
     ['Plan', () => run('plan'), 'ghost', 'Terraform/OpenTofu plan'],
     ['Apply', () => run('apply'), 'primary', 'Terraform/OpenTofu apply — create the VMs'],
     ['Destroy', () => run('destroy'), 'danger ghost', 'Terraform/OpenTofu destroy', true],
-    ['Edit', () => setEditFor && setEditFor(r), 'ghost', 'Edit this infrastructure and regenerate its Terraform (after a destroy — e.g. add a VM type)'],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
   ].map(([label, fn, cls, title, danger]) => ({ label, fn, cls, title, danger, enroll }))
 }

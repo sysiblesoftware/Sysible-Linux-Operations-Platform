@@ -1,3 +1,4 @@
+import { CopyButton } from '../ui.jsx'
 import React, { useState } from 'react'
 
 // AAP-style run visualizations. Each takes the parsed model from runParse.js and
@@ -196,8 +197,13 @@ function WhyItEnded({ status, text, what }) {
         {verb} before {what}
       </div>
       {lines.length
-        ? <pre className="log" style={{ marginTop: 8, maxHeight: 220, overflow: 'auto',
-                                        whiteSpace: 'pre-wrap' }}>{lines.join('\n')}</pre>
+        ? <>
+            <div className="row" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
+              <CopyButton text={() => lines.join('\n')} label="Copy" title="Copy these lines" />
+            </div>
+            <pre className="log" style={{ marginTop: 4, maxHeight: 220, overflow: 'auto',
+                                          whiteSpace: 'pre-wrap' }}>{lines.join('\n')}</pre>
+          </>
         : <div className="muted" style={{ marginTop: 8 }}>
             This step wrote nothing to its log. “Show log” has the raw stream.
           </div>}

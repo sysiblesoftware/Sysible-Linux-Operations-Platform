@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
-import { Field, Modal, useErr } from '../ui.jsx'
+import { Field, Modal, useErr, CopyButton } from '../ui.jsx'
 
 // Infrastructure — a READ-ONLY status view of the VMs SLEP has built. Building and
 // the lifecycle actions (apply/destroy/configure/maintain/cadence) live in Projects
@@ -426,6 +426,7 @@ export function DiagnoseModal({ r, onClose }) {
               {h.log && h.log.length > 0 && (
                 <div style={{ marginTop: 4 }}>
                   <button className="ghost sm" onClick={() => setOpen((o) => ({ ...o, [h.name]: !o[h.name] }))}>{open[h.name] ? 'Hide' : 'Show'} cloud-init log</button>
+                  {open[h.name] && <CopyButton text={() => h.log.join('\n')} label="Copy" title="Copy this host's cloud-init log" />}
                   {open[h.name] && <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', background: 'var(--bg-soft, rgba(0,0,0,0.15))', padding: 8, borderRadius: 6, marginTop: 4 }}>{h.log.join('\n')}</pre>}
                 </div>
               )}
@@ -878,7 +879,6 @@ function LibvirtConnect({ values, set }) {
   const [installing, setInstalling] = useState(null)  // {ok, output} | 'installing'
   const [key, setKey] = useState(null)        // {public_key, keyfile}
   const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
-  const [copied, setCopied] = useState(false)
   const [prep, setPrep] = useState(null)       // {ok, steps, output} | 'running'
   const [remember, setRemember] = useState(false)
   const { wrap, node } = useErr()
@@ -923,7 +923,6 @@ function LibvirtConnect({ values, set }) {
   const cmd = key
     ? `ssh ${(user || 'root').trim()}@${(host || 'HYPERVISOR').trim()} 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo "${key.public_key}" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'`
     : ''
-  const copy = async () => { try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch { /* ignore */ } }
 
   return (
     <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, margin: '2px 0 12px' }}>
@@ -991,7 +990,7 @@ function LibvirtConnect({ values, set }) {
               <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
                 <textarea readOnly rows={3} value={cmd} onClick={(e) => e.target.select()}
                   style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11.5, resize: 'vertical', flex: 1 }} />
-                <button className="ghost sm" onClick={copy}>{copied ? '✓ Copied' : 'Copy'}</button>
+                <CopyButton text={cmd} title="Copy this command" />
               </div>
             </div>
           )}
@@ -1051,8 +1050,13 @@ function LibvirtConnect({ values, set }) {
           )}
           {prep && prep !== 'running' && (
             <div style={{ marginTop: 8 }}>
-              <div style={{ fontSize: 12.5, color: prep.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
-                {prep.ok ? '✓ ' : '✗ '}{prep.output}
+              <div className="row" style={{ alignItems: 'flex-start', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: prep.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
+                  {prep.ok ? '✓ ' : '✗ '}{prep.output}
+                </div>
+                <CopyButton label="Copy result" title="Copy every step and its detail"
+                  text={() => [prep.output, ''].concat((prep.steps || []).map(
+                    (st) => `${st.status === 'failed' ? '✗' : '✓'} ${st.label}: ${st.detail}`)).join('\n')} />
               </div>
               {(prep.steps || []).map((st, i) => (
                 <div key={i} className="row" style={{ gap: 8, fontSize: 12, alignItems: 'flex-start', marginTop: 3 }}>

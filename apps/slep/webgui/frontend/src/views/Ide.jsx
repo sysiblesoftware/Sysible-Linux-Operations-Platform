@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { api, getTheme } from '../api.js'
-import { Field, Modal, useErr } from '../ui.jsx'
+import { Field, Modal, useErr, CopyButton } from '../ui.jsx'
 import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnippets.js'
 import CollectionsInstall from '../components/CollectionsInstall.jsx'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
@@ -784,7 +784,14 @@ function GitPanel({ project, onClose, onChanged }) {
         </div>
       </div>
 
-      {flash && <pre className="log" style={{ marginTop: 8, maxHeight: '18vh' }}>{flash}</pre>}
+      {flash && (
+        <>
+          <div className="row" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
+            <CopyButton text={() => flash} label="Copy output" title="Copy this output" />
+          </div>
+          <pre className="log" style={{ marginTop: 4, maxHeight: '18vh' }}>{flash}</pre>
+        </>
+      )}
       {node}
     </Modal>
   )

@@ -3,7 +3,7 @@ import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
 import RunViz, { PipelineFlow, stageTally } from './RunViz.jsx'
 import { RunModal } from './Ide.jsx'
-import { Modal, Field } from '../ui.jsx'
+import { Modal, Field, CopyButton } from '../ui.jsx'
 
 // Render ANSI-coloured tool output (ansible-playbook et al. emit SGR codes) as
 // coloured spans, so the run log reads like a real terminal instead of showing
@@ -430,7 +430,16 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
       <div className="run-split" ref={splitRef}
         style={{ gridTemplateColumns: showLog ? `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` : '1fr' }}>
         <div className="run-pane">
-          <div className="pane-title">Visualize</div>
+          <div className="pane-title-row">
+            <div className="pane-title">Visualize</div>
+            {seq.length > 1
+              ? <CopyButton label="Copy all stages" title="Copy every stage's log in this pipeline, in order"
+                  text={() => seq.map((s) => {
+                    const st = stages[s.id]
+                    return `===== ${s.kind} · ${s.target} (${s.status}) =====\n${(st && st.text) || '(no output)'}`
+                  }).join('\n\n')} />
+              : <CopyButton text={() => text || ''} label="Copy log" title="Copy this run's whole log" />}
+          </div>
           {/* The whole pipeline as a stage flow at the top (a nav + summary), then
               EVERY stage's visualization — a lone run shows its one viz; a pipeline
               lays all stages side by side as ONE window (columns, Terraform → Enroll),
@@ -482,7 +491,14 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
         {showLog && <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />}
         {showLog && (
           <div className="run-pane">
-            <div className="pane-title">Log</div>
+            <div className="pane-title-row">
+              <div className="pane-title">Log</div>
+              {/* Selecting inside a pane that is still streaming and auto-scrolling
+                  loses the selection every time a line lands, so the whole log needs
+                  a button. Lazy: the text is only materialised on the click. */}
+              <CopyButton text={() => text || ''} label="Copy log"
+                title="Copy this run's whole log — including the part scrolled out of view" />
+            </div>
             <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
           </div>
         )}

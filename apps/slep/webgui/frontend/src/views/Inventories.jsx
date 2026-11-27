@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, tail } from '../api.js'
-import { Field, Modal, useErr } from '../ui.jsx'
+import { Field, Modal, useErr, CopyButton } from '../ui.jsx'
 
 export default function Inventories() {
   const [invs, setInvs] = useState([])
@@ -207,8 +207,15 @@ function useLogStream() {
 // Render a streamed SSH-action log as a readable report: bold section headers,
 // green ✓ / red ✗ per-host rows (host in strong text, reason muted), dim
 // progress and notes. Falls back to a placeholder when empty.
+// Every JobLog gets a Copy, so the three panes that use it (test result, key
+// distribution progress, per-host log) are all copyable from one change.
 function JobLog({ text, empty }) {
   if (!text) return <div className="job-log empty">{empty}</div>
+  const copyRow = (
+    <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 4 }}>
+      <CopyButton text={() => text} label="Copy" title="Copy this output" />
+    </div>
+  )
   const rows = text.split('\n').map((raw, i) => {
     const t = raw.replace(/\s+$/, '')
     if (!t.trim()) return <div key={i} style={{ height: 6 }} />
@@ -231,7 +238,7 @@ function JobLog({ text, empty }) {
     }
     return <div key={i} className="jl-line">{bare}</div>
   })
-  return <div className="job-log">{rows}</div>
+  return <>{copyRow}<div className="job-log">{rows}</div></>
 }
 
 // Test SSH reachability of the inventory's hosts with a chosen credential (or

@@ -167,6 +167,10 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .run-split > .run-pane:last-child{padding-left:12px}
 .run-pane{min-width:0}
 .pane-title{font-size:11px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin:0 2px 6px}
+/* A pane heading that carries an action (Copy). The heading keeps its own margin
+   when used alone, so this only adjusts it inside the row. */
+.pane-title-row{display:flex;align-items:center;gap:8px;margin:0 2px 6px}
+.pane-title-row > .pane-title{margin:0;flex:1 1 auto}
 .run-scroll{max-height:74vh;overflow:auto}
 .run-pane .log{max-height:74vh;margin:0}
 /* SSH-action modals: controls on the left, live log on the right. */
