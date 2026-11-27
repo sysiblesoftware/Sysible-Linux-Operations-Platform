@@ -1061,6 +1061,9 @@ function LibvirtConnect({ values, set }) {
               title="Report why a VM cannot open its own disk — probing as the VM process is really credentialed, not as root."
               onClick={() => hvRun('infra/hypervisor-permissions', { pool_dir: '/var/lib/libvirt/images' })}>🔎 Check storage permissions</button>
             <button className="ghost sm" disabled={prep === 'running' || !host}
+              title="A VM that never gets an address: read its state, its DHCP lease, qemu's own log and any security denial, and say which one explains it. Changes nothing on the host."
+              onClick={() => hvRun('infra/hypervisor-why-no-ip', { prefix: values.name_prefix || '', network: values.network || 'default' })}>💡 Why did a VM get no IP?</button>
+            <button className="ghost sm" disabled={prep === 'running' || !host}
               title="Make the pool traversable and every volume readable by the VM process, and clear the owner libvirt saved on them."
               onClick={() => hvRun('infra/hypervisor-fix-permissions', { pool_dir: '/var/lib/libvirt/images', set_remember_owner: remember, fix_apparmor: apparmor })}>🔧 Fix permissions</button>
             <label className="row" style={{ gap: 6, fontSize: 12.5, cursor: 'pointer' }}

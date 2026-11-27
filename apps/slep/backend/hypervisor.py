@@ -62,11 +62,20 @@ def family_for(id_: str, id_like: str) -> str:
     return ""
 
 
-def parse_steps(stdout: str):
+def parse_steps(stdout: str, labels: dict | None = None):
     """Turn the script's marker lines into [{step,label,status,detail}].
 
     Anything that is not a marker line is ignored, so apt/dnf chatter on stdout
-    cannot be mistaken for a result."""
+    cannot be mistaken for a result.
+
+    `labels` is the extra vocabulary for THIS script, merged over the base table
+    so the keys every script shares (sudo) keep resolving. Without it a caller
+    got PROVISION_SH's table only, so PERM_STEP_LABELS was defined, tested, and
+    then never actually reached parse_steps -- the storage steps rendered as
+    their raw keys and the operator read "fixed_vols" and "qemu_user" in the UI.
+    Unknown keys still fall back to the key itself rather than vanishing."""
+    table = dict(STEP_LABELS)
+    table.update(labels or {})
     out = []
     for raw in (stdout or "").splitlines():
         line = raw.strip()
@@ -78,7 +87,7 @@ def parse_steps(stdout: str):
         key = parts[1].strip()
         status = parts[2].strip()
         detail = parts[3].strip() if len(parts) > 3 else ""
-        out.append({"step": key, "label": STEP_LABELS.get(key, key),
+        out.append({"step": key, "label": table.get(key, key),
                     "status": status, "detail": detail})
     return out
 
@@ -578,3 +587,118 @@ fi
 
 DIAGNOSE_SH = _PREAMBLE_SH + _QEMU_ID_SH + _DIAGNOSE_BODY
 REPAIR_SH = _PREAMBLE_SH + _QEMU_ID_SH + _REPAIR_BODY
+
+
+# --------------------------------------------------------------------- why no IP
+#
+# When a VM does not come up, the provider says:
+#
+#   couldn't retrieve IP address of domain ... 1) is the domain running properly?
+#   2) has the network interface an IP address? 3) Networking issues on your
+#   libvirt setup? 4) is DHCP enabled on this Domain's network? 5) if you use
+#   bridge network, the domain should have the pkg qemu-agent installed
+#
+# Five guesses, all about networking, and tonight the answer was none of them: the
+# guest aborted in glibc before the NIC existed, because its Terraform predated the
+# host-passthrough CPU. Ubuntu and Rocky booted on the same host at the same moment,
+# which was the only clue there was.
+#
+# SLEP could say nothing, because the generated domain's serial console is a pty and
+# a pty is not retained. What IS retained, for every started domain, is
+# /var/log/libvirt/qemu/<name>.log -- qemu's own stderr. That is where tonight's
+# "Could not open ...qcow2: Permission denied" appeared, verbatim, while the UI was
+# still talking about DHCP.
+#
+# So: state, lease, that log, and any security denial naming the domain. Read-only.
+BOOT_STEP_LABELS = {
+    "domains": "VMs found",
+    "state": "VM state",
+    "lease": "DHCP lease",
+    "qemulog": "What qemu said",
+    "denial": "Security denial",
+    "hint": "Most likely cause",
+}
+
+WHY_NO_IP_SH = r'''
+set -u
+S() { printf 'SYSIBLE_STEP|%s|%s|%s\n' "$1" "$2" "$3"; }
+SUDOPW=''
+if [ ! -t 0 ]; then read -r SUDOPW 2>/dev/null || SUDOPW=''; fi
+SUDO=''
+if [ "$(id -u)" -ne 0 ]; then
+  if printf '%s\n' "$SUDOPW" | sudo -S -p '' -v >/dev/null 2>&1; then SUDO='sudo -n'
+  else S domains failed 'Needs sudo on the hypervisor to read the VM logs.'; exit 10; fi
+fi
+SUDOPW=''
+PREFIX="${PREFIX:-}"
+NET="${NET:-default}"
+CPUABORT=0
+V="$SUDO virsh -c qemu:///system"
+
+if ! command -v virsh >/dev/null 2>&1; then
+  S domains failed 'virsh is not installed on this host.'; exit 11
+fi
+
+doms="$($V list --all --name 2>/dev/null | grep -v '^$' | { [ -n "$PREFIX" ] && grep "^$PREFIX" || cat; })"
+if [ -z "$doms" ]; then
+  S domains failed "No VMs${PREFIX:+ named $PREFIX*} are defined on this hypervisor. Terraform may have rolled the domain back after the failure, in which case the log below is the only thing left of it."
+else
+  S domains ok "$(printf '%s' "$doms" | tr '\n' ' ')"
+fi
+
+leases="$($V net-dhcp-leases "$NET" 2>/dev/null || true)"
+
+for d in $doms; do
+  st="$($V domstate "$d" 2>/dev/null || echo unknown)"
+  if [ "$st" = "running" ]; then S state ok "$d is $st"
+  else S state failed "$d is $st -- it is not running, so it was never going to get an address."; fi
+
+  mac="$($V domiflist "$d" 2>/dev/null | awk 'NR>2 && $5 ~ /:/ {print $5; exit}')"
+  if [ -n "$mac" ] && printf '%s' "$leases" | grep -qi "$mac"; then
+    S lease ok "$d has a lease: $(printf '%s' "$leases" | grep -i "$mac" | awk '{print $5}')"
+  elif [ -n "$mac" ] && [ "$st" != "running" ]; then
+    # Not a separate problem: it follows from the state above. Said, not crossed.
+    S lease ok "$d ($mac) has no lease, which follows from it not running."
+  elif [ -n "$mac" ]; then
+    S lease failed "$d ($mac) is running but has no lease on network '$NET' -- it booted and never asked for an address. Look at the guest, not the hypervisor."
+  fi
+
+  # qemu's own stderr. The one thing that is always kept, and the one place
+  # tonight's real error appeared while the UI talked about DHCP.
+  log="${QEMULOG_DIR:-/var/log/libvirt/qemu}/${d}.log"
+  if $SUDO test -r "$log"; then
+    tail="$($SUDO grep -iE 'error|denied|fail|panic|abort|not support' "$log" 2>/dev/null | tail -4 | tr '\n' ' ')"
+    if [ -n "$tail" ]; then
+      S qemulog failed "$d: $(printf '%s' "$tail" | tail -c 400)"
+      printf '%s' "$tail" | grep -qiE 'x86-64-v[234]|CPU does not support' && CPUABORT=1
+    else S qemulog ok "$d: nothing in its qemu log looks like an error."; fi
+  else
+    S qemulog failed "$d has no $log -- it may never have been started."
+  fi
+done
+
+# A denial naming any of these domains. AppArmor logs to dmesg, the kernel journal
+# or auditd depending on the host -- tonight dmesg was empty while auditd had every
+# one of them, and reading only dmesg sent the search back to file permissions.
+den=''
+for src in "dmesg" "journalctl -k --since -1h --no-pager" "cat /var/log/audit/audit.log"; do
+  hit="$($SUDO sh -c "$src" 2>/dev/null | grep -iE 'apparmor=.DENIED|avc: *denied' | tail -3 | tr '\n' ' ')"
+  [ -n "$hit" ] && den="$den $hit"
+done
+if [ -n "$den" ]; then
+  S denial failed "A security module is refusing these VMs, NOT the file permissions: $(printf '%s' "$den" | tail -c 400)"
+else
+  S denial ok 'no AppArmor/SELinux denial in dmesg, the kernel journal or the audit log'
+fi
+
+# Say what it looks like, rather than leaving five possibilities on screen.
+if printf '%s' "$den" | grep -q .; then
+  S hint failed 'A security module is denying access to the disks. This is NOT a networking problem and not a file-permission problem: fix the AppArmor/SELinux profile for the storage pool.'
+elif [ "$CPUABORT" = "1" ]; then
+  S hint failed 'The guest aborted because the emulated CPU is too old for it -- Rocky/Alma 9+, Arch and openSUSE need x86-64-v2 and glibc kills them before networking starts, which is why this looked like a DHCP timeout. Give the VMs the host CPU: cpu { mode = "host-passthrough" }. Regenerate this project'"'"'s Terraform and apply again; Debian and Ubuntu are unaffected, which is why only some VMs failed.'
+elif [ -z "$doms" ]; then
+  S hint failed 'No VM survived the apply, so look at what qemu said above rather than at the network.'
+else
+  S hint ok 'Nothing here points at the disks or a security module. If a VM is running with no lease, look at the guest: it booted and did not ask for an address.'
+fi
+'''

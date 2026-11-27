@@ -4312,7 +4312,7 @@ def infra_hypervisor_permissions(request: Request, body: dict = Body(...), user:
                                       env_prefix=f"POOLDIR='{pool}'", timeout=120)
     if not ok:
         return {"ok": False, "steps": [], "output": err}
-    steps = hypervisor.parse_steps(out)
+    steps = hypervisor.parse_steps(out, hypervisor.PERM_STEP_LABELS)
     failed = [s for s in steps if s["status"] == "failed"]
     return {"ok": not failed, "steps": steps,
             "output": ("Nothing wrong with the storage permissions on this host."
@@ -4353,13 +4353,62 @@ def infra_hypervisor_fix_permissions(request: Request, body: dict = Body(...), u
                                       timeout=180)
     if not ok:
         return {"ok": False, "steps": [], "output": err}
-    steps = hypervisor.parse_steps(out)
+    steps = hypervisor.parse_steps(out, hypervisor.PERM_STEP_LABELS)
     failed = [s for s in steps if s["status"] == "failed"]
     db.log_audit("hypervisor_perms_fixed", user,
                  f"{ssh_user}@{host}:{port} {pool} remember_owner={remember} apparmor={apparmor} — {len(failed)} failed")
     return {"ok": not failed, "steps": steps,
             "output": ("Storage permissions are correct — verified by opening the volumes as the VM process."
                        if not failed else "Still wrong: " + ", ".join(s["label"] for s in failed))}
+
+
+@app.post("/infra/hypervisor-why-no-ip")
+def infra_hypervisor_why_no_ip(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    """Say why a VM never got an address, instead of listing five possibilities.
+
+    The failure this answers, verbatim from an apply:
+
+        Error: couldn't retrieve IP address of domain id: 7a1c...
+        Please check following: 1) is DHCP enabled ... 2) is there an IP address
+        ... 3) ... 4) ... 5) ...
+
+    All five suggestions were wrong. The VM had aborted in glibc before it ever
+    brought up a NIC:
+
+        Fatal glibc error: CPU does not support x86-64-v2
+
+    Nothing in SLEP could show that, because the generated domain's serial console
+    is a pty and a pty is not retained once the process is gone. What IS retained,
+    for every domain that ever started, is /var/log/libvirt/qemu/<name>.log --
+    qemu's own stderr. That is also where "Could not open ...qcow2: Permission
+    denied" appeared while the UI was still talking about DHCP.
+
+    So this reports, per domain: its state, whether the network has a lease for its
+    MAC, the error lines from that log, and any AppArmor/SELinux denial naming it --
+    then names the single most likely cause. Strictly read-only; it changes nothing
+    on the host."""
+    host, ssh_user, port, pw = _hypervisor_ssh_target(request, body, user, "hypervisor_whynoip_vault_pw")
+    # The domain name prefix and network come from the spec being edited. Both are
+    # interpolated into a single-quoted shell assignment, so they are validated
+    # rather than escaped: a quote or a backslash here would end the quoting.
+    prefix = infra._one_line(str(body.get("prefix") or "")).strip()
+    net = infra._one_line(str(body.get("network") or "default")).strip() or "default"
+    for label, val in (("name prefix", prefix), ("network", net)):
+        if val and not re.fullmatch(r"[A-Za-z0-9._\-]+", val):
+            raise HTTPException(status_code=400, detail=f"That {label} looks invalid.")
+    ok, out, err = _run_on_hypervisor(host, ssh_user, port, pw, hypervisor.WHY_NO_IP_SH,
+                                      env_prefix=f"PREFIX='{prefix}'\nNET='{net}'", timeout=120)
+    if not ok:
+        return {"ok": False, "steps": [], "output": err}
+    steps = hypervisor.parse_steps(out, hypervisor.BOOT_STEP_LABELS)
+    # The hint IS the answer; a red cross on it is the point, not a problem to count.
+    hint = next((st for st in steps if st["step"] == "hint"), None)
+    failed = [st for st in steps if st["status"] == "failed" and st["step"] != "hint"]
+    return {"ok": not failed,
+            "steps": steps,
+            "output": (hint["detail"] if hint else
+                       ("Nothing here explains it." if not failed else
+                        "Problems found: " + ", ".join(st["label"] for st in failed)))}
 
 
 @app.post("/infra/{project_id}/scaffold")

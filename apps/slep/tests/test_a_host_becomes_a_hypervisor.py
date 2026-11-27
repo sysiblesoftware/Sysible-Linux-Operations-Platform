@@ -338,16 +338,17 @@ def test_making_a_hypervisor_and_changing_permissions_need_an_operator():
 
 
 def test_the_shared_ssh_validator_is_used_everywhere_not_copied():
-    """Four endpoints take {host,user,port,password}. The guard that stops a Vault
+    """Five endpoints take {host,user,port,password}. The guard that stops a Vault
     reference being used as a decryption oracle against an operator-chosen host
     lives in the validator -- a copy per endpoint is how it ends up enforced in
-    three places out of four."""
+    four places out of five. Add an endpoint, add it here."""
     import inspect
     from backend import app as backend_app
     src = inspect.getsource(backend_app)
     assert src.count("def _hypervisor_ssh_target") == 1
     for fn in ("infra_install_hypervisor_key", "infra_hypervisor_provision",
-               "infra_hypervisor_permissions", "infra_hypervisor_fix_permissions"):
+               "infra_hypervisor_permissions", "infra_hypervisor_fix_permissions",
+               "infra_hypervisor_why_no_ip"):
         body = src[src.index("def " + fn):]
         body = body[:body.index("\n@app.") if "\n@app." in body else 3000]
         assert "_hypervisor_ssh_target(" in body, "%s validates its own SSH target" % fn
