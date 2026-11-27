@@ -200,15 +200,34 @@ def test_main_actually_calls_it():
         "the prompt comes after the command it was asked to run")
 
 
-def test_it_is_not_offered_for_help_or_uninstall():
+def _early_verbs(path: Path):
+    """The verbs main() handles BEFORE the first-run prompt."""
+    main = path.read_text(encoding="utf-8").split("\nmain() {", 1)[1]
+    return main[:main.index("_maybe_offer_first_update")]
+
+
+@pytest.mark.parametrize("path", [
+    CTL,
+    pytest.param(Path("/home/user/Sysible-Controller/deploy/sysiblectl"), id="standalone"),
+])
+def test_it_is_not_offered_for_help_or_uninstall(path):
     """`--help` must not ask anything, and neither must the installer: the first-run
-    install IS the thing that would be updated."""
-    src = CTL.read_text(encoding="utf-8")
-    main = src.split("\nmain() {", 1)[1]
-    early = main[:main.index("_maybe_offer_first_update")]
-    for verb in ("help", "uninstall", "first-run"):
+    install IS the thing that would be updated.
+
+    `first-run` is required only where it EXISTS. The standalone Controller copy has
+    no such verb — it runs SLOP's install.sh, and that repo has no install.sh — so
+    demanding it there failed on a difference that is deliberate."""
+    if not path.exists():
+        pytest.skip("%s is not checked out beside this one" % path)
+    early = _early_verbs(path)
+    for verb in ("help", "uninstall"):
         assert verb in early, (
-            "%r is handled after the prompt, so it would be asked first" % verb)
+            "%r is handled after the prompt in %s, so it would be asked first"
+            % (verb, path.name))
+    if "cmd_first_run" in path.read_text(encoding="utf-8"):
+        assert "first-run" in early, (
+            "%s has a first-run verb but handles it after the prompt — the install "
+            "itself would be asked whether to update first" % path.name)
 
 
 # ------------------------------------------------------------- both copies
