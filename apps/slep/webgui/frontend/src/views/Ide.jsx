@@ -332,6 +332,63 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
   useEffect(() => { if (project.openFile) open(project.openFile) }, [project.id])
 
   const open = async (p) => { const d = await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`); setPath(p); setContent(d.content); setSaved(true) }
+
+  // Ctrl-F across every file in the project. The tree said what existed; nothing
+  // said what was IN it, so finding where a variable was set meant opening each
+  // file and looking. Explicit (Enter / the button) rather than debounced: this
+  // walks the whole project server-side, and firing it per keystroke would mean a
+  // full tree scan for every letter of a word.
+  const [q, setQ] = useState('')
+  const [hits, setHits] = useState(null)        // null = not searching, {} = results
+  const [searching, setSearching] = useState(false)
+  const [sCase, setSCase] = useState(false)
+  const [sRegex, setSRegex] = useState(false)
+  const searchRef = useRef(null)
+  // Ctrl+Shift+F is the universal "find in files". Bound on the window because the
+  // focus is usually inside Monaco, which swallows its own key handling; Monaco
+  // itself leaves this chord free (it binds Ctrl+F for find-in-THIS-file).
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
+        e.preventDefault()
+        if (searchRef.current) { searchRef.current.focus(); searchRef.current.select() }
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
+  const runSearch = async () => {
+    if (!q.trim()) { setHits(null); return }
+    setSearching(true)
+    try {
+      const d = await api(`projects/${project.id}/search?q=${encodeURIComponent(q)}`
+        + `&case=${sCase ? 'true' : 'false'}&regex=${sRegex ? 'true' : 'false'}`)
+      setHits(d)
+    } catch (e) { setHits({ error: String(e.message || e), matches: [] }) }
+    finally { setSearching(false) }
+  }
+  // Jumping to a hit: the editor only has the new file's model AFTER content lands,
+  // so remember the line and reveal it once that render has happened. When the file
+  // is already open there is no re-render to wait for, so reveal straight away.
+  const pendingLine = useRef(null)
+  const revealLine = (n) => {
+    const ed = editorRef.current
+    if (!ed || !n) return false
+    try { ed.revealLineInCenter(n); ed.setPosition({ lineNumber: n, column: 1 }); ed.focus(); return true }
+    catch { return false }
+  }
+  const openAt = async (p, line) => {
+    if (p === path) { revealLine(line); return }
+    pendingLine.current = line
+    await open(p)
+  }
+  useEffect(() => {
+    if (pendingLine.current == null) return
+    const n = pendingLine.current
+    // One frame after the model is swapped in, or the reveal lands on the old one.
+    const t = setTimeout(() => { if (revealLine(n)) pendingLine.current = null }, 0)
+    return () => clearTimeout(t)
+  }, [path, content])
   // Open the project's ansible.cfg — the equivalent-of-ansible.cfg configuration
   // file. Seed it from SLEP's starter template on first use, then edit it like any
   // file (it's real ansible.cfg on disk that the runner reads at run time).
@@ -497,8 +554,48 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
         </div>
         <div className="tree">
           <div className="tree-h"><span>Explorer</span><button className="tree-h-btn" title="New file" onClick={() => setNewOpen(true)}>＋</button></div>
-          {tree.length === 0 && <div className="muted" style={{ padding: 6, fontSize: 12 }}>Empty project. Click “＋ New file” to start from a template — Ansible playbook or Terraform.</div>}
-          {tree.map((f) => {
+          <div className="tree-search">
+            <input ref={searchRef} value={q} placeholder="Search all files…  (Ctrl+Shift+F)"
+              onChange={(e) => { setQ(e.target.value); if (!e.target.value.trim()) setHits(null) }}
+              onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); if (e.key === 'Escape') { setQ(''); setHits(null) } }} />
+            <div className="tree-search-opts">
+              <label title="Match upper and lower case exactly">
+                <input type="checkbox" checked={sCase} onChange={(e) => setSCase(e.target.checked)} />Aa</label>
+              <label title="Treat the search as a regular expression. Off, a dot means a dot.">
+                <input type="checkbox" checked={sRegex} onChange={(e) => setSRegex(e.target.checked)} />.*</label>
+              <button className="tree-h-btn" title="Search every file in this project"
+                      disabled={searching || !q.trim()} onClick={runSearch}>{searching ? '…' : 'Find'}</button>
+            </div>
+          </div>
+          {hits && (
+            <div className="tree-hits">
+              {hits.error
+                ? <div className="muted" style={{ padding: 6, fontSize: 12, color: 'var(--danger)' }}>{hits.error}</div>
+                : hits.matches.length === 0
+                  ? <div className="muted" style={{ padding: 6, fontSize: 12 }}>No match in {hits.files_searched} file(s).</div>
+                  : <>
+                      <div className="faint" style={{ padding: '4px 6px', fontSize: 11 }}>
+                        {hits.matches.length} match{hits.matches.length === 1 ? '' : 'es'} in{' '}
+                        {hits.files_with_matches} file{hits.files_with_matches === 1 ? '' : 's'}
+                        {hits.truncated ? ' — first 500 shown, narrow the search' : ''}
+                      </div>
+                      {hits.matches.map((m, i) => (
+                        <div key={i} className={'hit' + (m.path === path ? ' active' : '')}
+                             title={`${m.path}:${m.line}`} onClick={() => openAt(m.path, m.line)}>
+                          <div className="hit-where"><span className="hit-file">{m.path}</span>:{m.line}</div>
+                          <div className="hit-line">
+                            {m.clipped && <span className="faint">…</span>}
+                            {m.text.slice(0, m.col)}
+                            <mark>{m.text.slice(m.col, m.col + m.len)}</mark>
+                            {m.text.slice(m.col + m.len)}
+                          </div>
+                        </div>
+                      ))}
+                    </>}
+            </div>
+          )}
+          {!hits && tree.length === 0 && <div className="muted" style={{ padding: 6, fontSize: 12 }}>Empty project. Click “＋ New file” to start from a template — Ansible playbook or Terraform.</div>}
+          {!hits && tree.map((f) => {
             const depth = f.path.split('/').length - 1
             const base = f.path.split('/').pop()
             return (

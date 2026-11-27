@@ -1036,6 +1036,97 @@ def list_files(pid: int, request: Request, user: str = Depends(current_user)):
     return {"files": _tree(db.project_dir(pid).resolve())}
 
 
+# Directories whose contents are never the operator's own work: version-control
+# internals, provider plugins (.terraform alone can be hundreds of megabytes of
+# vendored Go binaries), caches and dependency trees. Searching them buries the
+# three real hits in ten thousand.
+_SEARCH_SKIP_DIRS = {".git", ".terraform", "__pycache__", "node_modules",
+                     ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
+                     ".ruff_cache", "dist", "build", ".idea", ".vscode"}
+# A file this big is generated, vendored or a blob, not something anyone wants to
+# read a matching line out of.
+_SEARCH_MAX_BYTES = 2 * 1024 * 1024
+_SEARCH_MAX_MATCHES = 500
+_SEARCH_MAX_LINE = 400          # a minified bundle is one 2MB "line"
+
+
+@app.get("/projects/{pid}/search")
+def search_project(pid: int, request: Request, q: str = Query(...),
+                   regex: bool = Query(False), case: bool = Query(False),
+                   user: str = Depends(current_user)):
+    """Find a string in every file of a project — the IDE's Ctrl-F across the tree.
+
+    Until now the only way to find where a variable was set was to open each file
+    and look. The file tree told you what existed; nothing told you what was in it.
+
+    Plain substring by default. `regex` is opt-in because an operator typing a bare
+    `.` or `*` into a search box means the character, not the metacharacter, and
+    getting every line of every file back is not a search result.
+
+    Binary files, .git, .terraform, node_modules and the other vendored trees are
+    skipped: searching them buries three real hits in ten thousand. Results are
+    capped and say so, so a one-letter query returns a usable page instead of
+    streaming the whole project back."""
+    _guard_project(request, pid, "viewer")
+    # Strip newlines only: leading and trailing SPACES can be the point of a search
+    # (indentation, trailing whitespace). A query that is nothing but whitespace is
+    # an empty box, though, and returning every indented line is not a result --
+    # regex mode covers a deliberate `\s{3}`.
+    q = (q or "").strip("\n")
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Nothing to search for.")
+    if len(q) > 500:
+        raise HTTPException(status_code=400, detail="That search is too long.")
+    if regex:
+        try:
+            pat = re.compile(q, 0 if case else re.IGNORECASE)
+        except re.error as e:
+            raise HTTPException(status_code=400, detail=f"That regular expression isn't valid: {e}")
+    else:
+        pat = re.compile(re.escape(q), 0 if case else re.IGNORECASE)
+
+    root = db.project_dir(pid).resolve()
+    matches, scanned, skipped = [], 0, 0
+    truncated = False
+    for p in sorted(root.rglob("*")):
+        if truncated:
+            break
+        if not p.is_file() or p.is_symlink():
+            continue
+        if any(part in _SEARCH_SKIP_DIRS for part in p.relative_to(root).parts):
+            continue
+        try:
+            if p.stat().st_size > _SEARCH_MAX_BYTES:
+                skipped += 1
+                continue
+            text = p.read_text()
+        except (OSError, UnicodeDecodeError):
+            skipped += 1          # binary, unreadable, or vanished mid-walk
+            continue
+        scanned += 1
+        rel = str(p.relative_to(root))
+        for n, line in enumerate(text.splitlines(), 1):
+            m = pat.search(line)
+            if not m:
+                continue
+            if len(matches) >= _SEARCH_MAX_MATCHES:
+                truncated = True
+                break
+            # Keep the line short enough to render, but keep the MATCH in view: a
+            # hit at column 900 of a long line must not be cut off the right edge.
+            start = 0
+            if len(line) > _SEARCH_MAX_LINE and m.start() > _SEARCH_MAX_LINE // 2:
+                start = m.start() - _SEARCH_MAX_LINE // 2
+            matches.append({"path": rel, "line": n,
+                            "text": line[start:start + _SEARCH_MAX_LINE],
+                            "col": m.start() - start, "len": max(1, m.end() - m.start()),
+                            "clipped": start > 0})
+    return {"query": q, "regex": bool(regex), "case": bool(case),
+            "matches": matches, "files_searched": scanned, "files_skipped": skipped,
+            "truncated": truncated,
+            "files_with_matches": len({m["path"] for m in matches})}
+
+
 @app.get("/projects/{pid}/file")
 def read_file(pid: int, request: Request, path: str = Query(...), user: str = Depends(current_user)):
     _guard_project(request, pid, "viewer")

@@ -170,6 +170,27 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 /* A pane heading that carries an action (Copy). The heading keeps its own margin
    when used alone, so this only adjusts it inside the row. */
 .pane-title-row{display:flex;align-items:center;gap:8px;margin:0 2px 6px}
+
+/* Search across every file in the project (the IDE's Ctrl+Shift+F). The results
+   take the Explorer's place while a query is active -- the same column, so the
+   width an operator already chose is the width the results get. */
+.tree-search{padding:6px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.tree-search input[type=text],.tree-search input:not([type]){width:100%;font-size:12px;padding:4px 6px}
+.tree-search-opts{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.tree-search-opts label{display:inline-flex;align-items:center;gap:3px;cursor:pointer;
+  font-family:ui-monospace,monospace}
+.tree-search-opts input[type=checkbox]{width:auto;margin:0}
+.tree-search-opts > .tree-h-btn{margin-left:auto}
+.tree-hits{overflow:auto}
+.hit{padding:4px 6px;cursor:pointer;border-left:2px solid transparent}
+.hit:hover{background:var(--panel2)}
+.hit.active{border-left-color:var(--accent)}
+.hit-where{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  direction:rtl;text-align:left}
+.hit-file{unicode-bidi:plaintext}
+.hit-line{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  white-space:pre;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.hit-line mark{background:var(--accent);color:#000;border-radius:2px;padding:0 1px}
 .pane-title-row > .pane-title{margin:0;flex:1 1 auto}
 .run-scroll{max-height:74vh;overflow:auto}
 .run-pane .log{max-height:74vh;margin:0}
