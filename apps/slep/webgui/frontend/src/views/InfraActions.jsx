@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react'
 import { api, canWrite } from '../api.js'
-import { PipelineModal } from './Ide.jsx'
 import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal, PrepareJumpModal, CreateWizard } from './Infrastructure.jsx'
 
 // The infrastructure lifecycle actions (Plan/Apply/Destroy, → Inventory, Access,
@@ -13,7 +12,7 @@ import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal, P
 
 // Build the handler set + the [label, fn, class, title] action list for an infra
 // row `r`, wired to the given modal setters / callbacks.
-function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, onOpenRun, onOpenProject, refresh }) {
+function buildActions(r, { controllers, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, onOpenRun, onOpenProject, refresh }) {
   const openProj = (extra) => onOpenProject &&
     onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, ...extra })
   const run = async (target) => {
@@ -77,7 +76,6 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
 // Shared modal state + the modals JSX. `refresh` is called after enroll/access save.
 function useInfraModals({ onOpenRun, refresh }) {
   const [controllers, setControllers] = useState([])
-  const [pipe, setPipe] = useState(null)
   const [vms, setVms] = useState(null)
   const [enrollFor, setEnrollFor] = useState(null)
   const [jumpFor, setJumpFor] = useState(null)
@@ -86,11 +84,9 @@ function useInfraModals({ onOpenRun, refresh }) {
   const [prepFor, setPrepFor] = useState(null)
   const [editFor, setEditFor] = useState(null)
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, onOpenRun, refresh })[0].enroll
+  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, onOpenRun, refresh })[0].enroll
   const modals = (
     <>
-      {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
-        onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun && onOpenRun(id) }} />}
       {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
       {enrollFor && <EnrollPicker r={enrollFor} controllers={controllers}
         onClose={() => setEnrollFor(null)} onPick={(cid, env) => enrollPick(cid, env)} />}
@@ -105,7 +101,7 @@ function useInfraModals({ onOpenRun, refresh }) {
         onDone={() => { setEditFor(null); refresh && refresh() }} />}
     </>
   )
-  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, modals }
+  return { controllers, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, setEditFor, modals }
 }
 
 // Bar on top of the IDE. Fetches this project's infra row; renders nothing for a

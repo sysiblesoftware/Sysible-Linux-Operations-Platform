@@ -1077,6 +1077,24 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     target: (/\.ya?ml$/i.test(currentFile || '') ? currentFile : 'site.yml'),
     inventory_id: '', credential_id: '', tool: 'terraform',
     vars: '', becomePw: '', limit: '', startAt: '', controller_id: '', environment: '', ...over })
+  // A SAVED step arrives in the API's shape (extra_vars as an object, start_at_task,
+  // numeric ids); the editor works in its own (a "KEY=value per line" box, startAt,
+  // string ids for the <select>s). blank(s) alone spread the API shape straight over
+  // the defaults, so every per-step variable and --start-at-task silently vanished the
+  // moment a saved pipeline was opened -- and pressing Update wrote that emptied
+  // version back over the saved one. Normalise instead of spreading.
+  const fromSaved = (s) => {
+    const o = s || {}
+    const ev = o.extra_vars && typeof o.extra_vars === 'object' ? o.extra_vars : null
+    const id = (v) => (v === 0 || v ? String(v) : '')
+    return blank({ ...o,
+      vars: o.vars !== undefined ? o.vars
+        : (ev ? Object.keys(ev).map((k) => `${k}=${ev[k]}`).join('\n') : ''),
+      startAt: o.startAt !== undefined ? o.startAt : (o.start_at_task || ''),
+      becomePw: o.becomePw || '',   // the server strips become_password on save, by design
+      inventory_id: id(o.inventory_id), credential_id: id(o.credential_id),
+      controller_id: id(o.controller_id) })
+  }
   // Load a Controller's environments (for the Enroll step's Environment picker), cached
   // per controller so switching back doesn't refetch. Empty list on an older Controller.
   const loadEnvs = (cid) => {
@@ -1084,7 +1102,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     api(`controllers/${cid}/environments`).then((d) => setEnvsByCtrl((m) => ({ ...m, [cid]: d.environments || [] })))
       .catch(() => setEnvsByCtrl((m) => ({ ...m, [cid]: [] })))
   }
-  const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
+  const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map(fromSaved) : [blank()])
   // STEP ONE SHOULD MATCH WHAT THE PROJECT IS. A project that builds
   // infrastructure starts with apply -- a playbook run first targets hosts that
   // do not exist yet. Defaulting every pipeline to Ansible put a playbook step in
@@ -1096,6 +1114,32 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   // and an edit must not be second-guessed -- the ref starts false whenever
   // initialSteps came in, so re-opening or editing one is never touched.
   const freshPipeline = useRef(!(initialSteps && initialSteps.length))
+  // "I shouldn't have to build this pipeline every time." This dialog is where a
+  // pipeline actually gets built -- and until now the IDE's copy of it could neither
+  // load a saved sequence nor keep one, so the only way to re-run yesterday's build ->
+  // configure was to retype it step by step. Offer the project's saved pipelines here,
+  // and let this dialog save, wherever it was opened from.
+  const [saved, setSaved] = useState([])
+  const [editId, setEditId] = useState(saveId || null)
+  const [savedNote, setSavedNote] = useState('')
+  useEffect(() => {
+    if (!project?.id) return
+    api('pipelines')
+      .then((d) => setSaved((d.pipelines || []).filter((pl) => pl.project_id === project.id)))
+      .catch(() => setSaved([]))
+  }, [project?.id])
+  const loadSaved = (id) => {
+    setSavedNote('')
+    if (!id) { setEditId(null); return }
+    const pl = saved.find((x) => String(x.id) === String(id))
+    if (!pl) return
+    // A saved sequence is its author's. Never re-nudge it to a Terraform-first step.
+    freshPipeline.current = false
+    setSteps((pl.steps || []).length ? pl.steps.map(fromSaved) : [blank()])
+    setName(pl.name || '')
+    setStopOnFail(pl.stop_on_failure !== false)
+    setEditId(pl.id)
+  }
   const startWithTerraform = () => {
     if (!freshPipeline.current) return
     freshPipeline.current = false
@@ -1194,6 +1238,19 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   return (
     <Modal title="Run pipeline" onClose={onClose} wide>
       <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another — a common pipeline is build (Terraform/OpenTofu) → configure (Ansible). Keeping hosts in that state afterwards is Sysible Baseline's job.</div>
+      {saved.length > 0 && (
+        <Field label="Start from a saved pipeline">
+          <select value={editId ? String(editId) : ''} onChange={(e) => loadSaved(e.target.value)}
+                  title="Load a sequence you already built instead of retyping it. Editing it here and pressing Update overwrites the saved one.">
+            <option value="">(build a new sequence)</option>
+            {saved.map((pl) => (
+              <option key={pl.id} value={pl.id}>
+                {pl.name} — {(pl.steps || []).length} step{(pl.steps || []).length === 1 ? '' : 's'}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
       <div className="pipe-scroll">
       <div className="pipe-inner">
       <div className="pipe-head">
@@ -1291,22 +1348,29 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
           Stop on first failure
         </label>
       </div>
-      {onSaved && (
-        <Field label="Save this sequence as (optional)">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. web-tier full cadence" />
-        </Field>
-      )}
+      <Field label="Save this sequence as (optional)">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. web-tier full cadence" />
+      </Field>
+      {savedNote && <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>{savedNote}</div>}
       {node}
       <div className="row">
-        {onSaved && (
-          <button className="ghost" disabled={!name.trim()} onClick={() => wrap(async () => {
+        <button className="ghost" disabled={!name.trim()}
+          title={editId ? 'Overwrite the saved pipeline with what is on screen'
+                        : 'Keep this sequence so you never have to build it again'}
+          onClick={() => wrap(async () => {
             const body = { project_id: project.id, name: name.trim(), steps: payloadOf(), stop_on_failure: stopOnFail }
-            const d = saveId
-              ? await api(`pipelines/${saveId}`, { method: 'PUT', json: body })
+            const d = editId
+              ? await api(`pipelines/${editId}`, { method: 'PUT', json: body })
               : await api('pipelines', { method: 'POST', json: body })
-            onClose(); onSaved(d.pipeline)
-          })}>💾 {saveId ? 'Update' : 'Save'}</button>
-        )}
+            const pl = d.pipeline
+            setSaved((s) => [pl, ...s.filter((x) => x.id !== pl.id)])
+            setEditId(pl.id)
+            // Opened from the Pipelines page, saving is the whole errand, so hand back
+            // and close. Opened from the IDE there is nowhere to hand back TO -- closing
+            // silently would look like nothing happened, so stay put and say so.
+            if (onSaved) { onClose(); onSaved(pl) }
+            else setSavedNote(`Saved as “${pl.name}” — it will be waiting under “Start from a saved pipeline” next time.`)
+          })}>💾 {editId ? 'Update' : 'Save'}</button>
         <div className="spacer" />
         <button className="primary" onClick={() => wrap(async () => {
           const d = await api('pipelines/run', { method: 'POST', json: { project_id: project.id, steps: payloadOf(), stop_on_failure: stopOnFail } })
