@@ -61,6 +61,14 @@ def _ls_remote(root: Path, remote: str, rbranch: str,
         # Surface git's ACTUAL complaint (auth, unknown host, TLS, proxy) —
         # "network or auth" tells an operator nothing they can fix.
         detail = " ".join((ls.stderr or ls.stdout or "").split())[:200]
+        if detail and "could not read Username" in detail:
+            # Not an unreachable remote: git had a credential configured, the
+            # server rejected it, and there was no terminal to ask on. The
+            # cause so far has always been actions/checkout's Authorization
+            # header shipped inside .git/config.
+            detail = ("a stale credential is configured for this remote - run: "
+                      "git config --file <checkout>/.git/config "
+                      "--remove-section 'http.https://github.com/'")
         err = f"git ls-remote {remote} {rbranch} failed" + (f": {detail}" if detail else "")
         result = (None, err)
     else:
@@ -79,10 +87,33 @@ def forget_remote(root: Path) -> None:
             del _remote_cache[key]
 
 
+# git must FAIL on a missing credential, never ask for one.
+#
+# This call captures stdout and stderr, so it cannot hang the way an interactive
+# `sysiblectl update` can -- git's prompt goes to /dev/tty, which capture does not
+# hold. But without this the console reported
+#     git ls-remote origin main failed: fatal: could not read Username for
+#     'https://github.com': No such device or address
+# which reads like a broken remote and is really "git wanted a credential and had
+# no terminal to ask on". The ISO shipped actions/checkout's Authorization header
+# inside .git/config, so every ls-remote sent a dead token and GitHub answered 401
+# -- on a PUBLIC repo, because git does not fall back to anonymous once an
+# Authorization header is configured.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "SSH_ASKPASS": "",
+    "GIT_SSH_COMMAND": os.environ.get(
+        "GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"),
+}
+
+
 def _git(root: Path, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(root), "-c", f"safe.directory={root}", *args],
-        capture_output=True, text=True, timeout=timeout or LOCAL_TIMEOUT)
+        capture_output=True, text=True, timeout=timeout or LOCAL_TIMEOUT,
+        env=_GIT_ENV)
 
 
 def _short(sha: str) -> str:

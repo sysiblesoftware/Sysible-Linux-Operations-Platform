@@ -165,6 +165,28 @@ fi
 
 dirname_for() { basename "$1"; }
 
+# ---- git must be able to FAIL, never BLOCK --------------------------------
+# git writes its credential prompt to /dev/tty, which `>/dev/null 2>&1` does
+# NOT catch. sysible-linux-operations-platform is a private repo, so an
+# unauthenticated fetch gets a 401 and git stops on
+#   Username for '"'"'https://github.com'"'"':
+# and waits. Forever. With output redirected, all the operator sees is the
+# "== updating ... ==" line and a cursor -- the `|| keep what is on disk`
+# branch below is never reached. Reported from a real Workstation install.
+#
+# GIT_TERMINAL_PROMPT=0 makes git FAIL instead of asking. The empty askpass
+# vars stop a desktop session popping a GUI credential dialog in its place,
+# which on Workstation is the same hang with a window around it. BatchMode
+# does the same for an ssh remote. A credential helper the operator has
+# genuinely configured is left alone, so a host that DOES have access still
+# fetches. The callers already treat non-zero as "keep the code on disk",
+# which is exactly right on an airgapped or unauthenticated host.
+_git() {
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= \
+  GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new}" \
+  git "$@"
+}
+
 # Where a product's source ACTUALLY is, which is not always where it would be
 # cloned to.
 #
@@ -189,7 +211,7 @@ clone_one() {  # clone_one <repo-url> [product]
   _d="$SRC_DIR/$(dirname_for "$1")"
   if [ -d "$_d/.git" ]; then
     say "== updating $(dirname_for "$1") =="
-    if ! git -C "$_d" pull --ff-only >/dev/null 2>&1; then
+    if ! _git -C "$_d" pull --ff-only >/dev/null 2>&1; then
       # Not an error: an unreachable remote means this host keeps the code it
       # already has. Said plainly rather than letting git's raw "fatal: unable
       # to access" read as a failed install.
@@ -198,7 +220,7 @@ clone_one() {  # clone_one <repo-url> [product]
   elif [ -n "${2:-}" ] && [ "$(dir_for "$2" "$1")" != "$_d" ]; then
     say "== using the $2 source vendored in this checkout =="
   else
-    say "== cloning $(dirname_for "$1") =="; git clone --depth 1 "$1" "$_d"
+    say "== cloning $(dirname_for "$1") =="; _git clone --depth 1 "$1" "$_d"
   fi
 }
 
