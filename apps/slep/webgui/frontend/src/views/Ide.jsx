@@ -490,7 +490,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
             title="Automatically save edits a moment after you stop typing">
             <input type="checkbox" checked={autosave} onChange={(e) => toggleAutosave(e.target.checked)} style={{ width: 'auto' }} /> Autosave
           </label>
-          <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
+          <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⋔ Git</button>
           <div className="spacer" />
           <button className="ghost sm" title="Run several steps as one pipeline (build → configure → maintain)" onClick={() => setPipeOpen(true)}>Pipeline</button>
           <button className="primary sm" onClick={() => setRunOpen(true)}>Run</button>
@@ -732,7 +732,7 @@ function GitPanel({ project, onClose, onChanged }) {
   return (
     <Modal title={`Git — ${project.name}`} onClose={onClose} wide>
       <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span className="pill">⎇ {st.branch}</span>
+        <span className="pill">⋔ {st.branch}</span>
         {st.ahead > 0 && <span className="pill" title="commits to push">↑ {st.ahead}</span>}
         {st.behind > 0 && <span className="pill" title="commits to pull">↓ {st.behind}</span>}
         <select value="" onChange={(e) => e.target.value && act('checkout', () => api(`${base}/checkout`, { method: 'POST', json: { branch: e.target.value } }))}>

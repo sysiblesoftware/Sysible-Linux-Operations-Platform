@@ -43,7 +43,13 @@ export default function RunViz({ engine, model, seedHosts, status, text }) {
 // that step's run, which swaps BOTH the detail viz and the log below to it — so the
 // log and steps track the stage you select. Renders nothing for a lone (non-pipeline)
 // run. `seq` is the group's runs [{id, kind, target, status}], from /pipelines/runs.
-const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', enroll: '◈' }
+// Geometric Shapes only (U+25xx, Unicode 1.1). The Ansible stage used
+// U+23FB POWER SYMBOL, which is Misc Technical and was added in Unicode 9.0 --
+// coverage for it is patchy, and on the reporter's machine it drew as tofu:
+// "Ansible has a malformed glyph on slep". The other three were already from
+// the near-universal block and rendered fine, which is what made it one odd
+// icon rather than four. U+25B6 reads as run/play, which is what the stage is.
+const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '▶', enroll: '◈' }
 const STAGE_COLOR = {
   success: 'var(--ok,#63c869)', failed: 'var(--err,#e5534b)', canceled: '#7d8ca3',
   running: 'var(--warn,#e0a83b)', queued: '#7d8ca3', pending: '#7d8ca3',

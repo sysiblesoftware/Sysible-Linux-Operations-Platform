@@ -251,6 +251,55 @@ def test_a_refused_run_is_shown_as_refused(tmp_path):
 
 
 @pytest.mark.skipif(not _playwright(), reason="playwright not installed")
+def test_inline_code_matches_the_text_around_it(tmp_path):
+    """Reported: "there is a font mismatch on sysiblectl <product> update".
+
+    That string is a bare <code> inside <p class=sub>. _CSS styled .mono but had
+    NO rule for <code> at all, so it fell through to the user agent, which sets
+    font-family:monospace and then resolves font-size:medium against the
+    browser's SEPARATE monospace default (13px in Chrome) rather than inheriting
+    the paragraph. In a 13.5px <p class=sub> that is a different family AND a
+    size jump mid-sentence. ~14 of these are written through the page.
+
+    Checked as COMPUTED style in a real browser, because the whole fault is the
+    user agent filling in what the stylesheet left out -- reading the CSS is
+    exactly what missed it."""
+    from playwright.sync_api import sync_playwright
+    state = {"enabled": False, "cadence": "weekly", "hour": 3, "weekday": 6,
+             "include_platform": True, "last": None}
+    server = _server(tmp_path, state)
+    try:
+        with sync_playwright() as p:
+            chrome = chromium_path()
+            try:
+                b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
+            except Exception as e:                                  # noqa: BLE001
+                pytest.skip(f"no chromium to drive ({e})")
+            pg = b.new_page(viewport={"width": 1180, "height": 1000})
+            _sign_in(pg)
+            got = pg.evaluate("""() => {
+                const c = document.querySelector('p.sub code');
+                if (!c) return null;
+                const cs = getComputedStyle(c), ps = getComputedStyle(c.parentElement);
+                return {code: parseFloat(cs.fontSize), para: parseFloat(ps.fontSize),
+                        family: cs.fontFamily};
+            }""")
+            assert got, "no <code> inside a p.sub on this page to check"
+            ratio = got["code"] / got["para"]
+            assert 0.80 <= ratio <= 1.02, (
+                f"inline code is {got['code']}px inside {got['para']}px text "
+                f"(x{ratio:.2f}) -- it is not inheriting its surroundings, which "
+                f"is the user-agent monospace default taking over")
+            assert "monospace" in got["family"].lower(), got["family"]
+            assert got["family"].split(",")[0].strip().strip('"\'').lower() != "monospace", (
+                f"<code> is on the generic UA monospace rather than the page's "
+                f"own stack: {got['family']}")
+            b.close()
+    finally:
+        _shutdown(server)
+
+
+@pytest.mark.skipif(not _playwright(), reason="playwright not installed")
 def test_an_off_schedule_says_so_even_after_it_has_run(tmp_path):
     """The third lie, and the one that needed no refusal to tell.
 

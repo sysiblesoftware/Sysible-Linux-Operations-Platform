@@ -637,6 +637,17 @@ p.sub{color:var(--muted);margin:.1em 0 1.2em;font-size:13.5px;line-height:1.55}
 td.sub{color:var(--muted);font-size:12.5px}
 span.sub{color:var(--muted);font-size:12.5px}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12.5px}
+/* A bare <code> had NO rule here, so it fell through to the user agent, which
+   sets font-family:monospace and then resolves font-size:medium against the
+   browser's SEPARATE monospace default (13px in Chrome) instead of inheriting
+   the surrounding text. Inside <p class=sub> at 13.5px that is a different
+   family AND a size jump mid-sentence -- reported as "a font mismatch on
+   sysiblectl <product> update". ~100 of these are written through the page.
+   em, not px: <code> appears in 13.5px prose, in table cells and in 15px body
+   text, so it has to scale with whatever it sits in rather than pick one size
+   and be wrong in the other two places. */
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+font-size:.92em}
 label{display:block;font-size:12.5px;color:var(--muted);margin:.9em 0 .3em}
 input:not([type]),input[type=text],input[type=password],select{width:100%;padding:10px 12px;border-radius:10px;
 border:1px solid var(--line);background:var(--field);color:var(--text);font-size:14px;font-family:var(--font)}

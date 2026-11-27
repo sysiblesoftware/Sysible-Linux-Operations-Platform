@@ -287,13 +287,22 @@ def integrated_env(env: dict) -> bool:
         "1", "true", "yes", "on")
 
 
-def plan_profile(slop_env: dict) -> dict:
+def plan_profile(slop_env: dict, integrated: bool | None = None) -> dict:
     """What COMPOSE_PROFILES must become, or {} if it is already right.
 
     Only ADDS the profile to whatever is there: an operator who set
     COMPOSE_PROFILES for a reason of their own keeps it.
+
+    `integrated` lets the caller decide by layout as well as by flag. It used to
+    read integrated_env() alone, so on a host whose .env has no
+    SYSIBLE_INTEGRATED this returned {} every single time -- and since
+    repair_profile is what jobs.py calls before an update and before
+    restart/start/recreate, an operator could update all day and never get the
+    profile written. Reported after two updates: "it's not registering as fixed".
     """
-    if not integrated_env(slop_env):
+    if integrated is None:
+        integrated = integrated_env(slop_env)
+    if not integrated:
         return {}
     have = [p.strip() for p in (slop_env.get(PROFILE_KEY) or "").split(",") if p.strip()]
     if INTEGRATED_PROFILE in have:
@@ -312,7 +321,10 @@ def repair_profile(slop_root: Path | None = None) -> tuple[dict, list[str]]:
     if not slop_env_path.is_file():
         return {}, []
 
-    changes = plan_profile(read_env(slop_env_path))
+    env = read_env(slop_env_path)
+    # Flag OR layout. The flag is authoritative when present; the layout check is
+    # what rescues a host that never got one, and it cannot be flipped by a pull.
+    changes = plan_profile(env, integrated_env(env) or apps.layout_is_integrated())
     if not changes:
         return {}, []
     try:

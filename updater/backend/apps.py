@@ -153,6 +153,34 @@ def is_vendored(key: str) -> bool:
 VENDORED_KEYS = ("controller", "slep", "connect")
 
 
+def layout_is_integrated() -> bool:
+    """Integrated, decided from the LAYOUT rather than the flag.
+
+    SYSIBLE_INTEGRATED is written by `install.sh --integrated`. A host installed
+    with the SERVER INSTALLER never gets it -- row_keys() below describes that
+    exact case, "this host was installed with the server installer, so the flag
+    is off". Anything gated on the flag alone is therefore dead on those hosts.
+
+    A PULL MUST NOT FLIP A HOST'S LAYOUT. That is why integrated() above refuses
+    to infer from apps/ being present, and the rule is kept here. The signal is
+    the one is_vendored() already leans on for the same reason: apps/<key> is
+    present AND there is no separate checkout of it. A pull can create apps/; it
+    cannot delete /opt/sysible-src/sysible-controller. A split host always has at
+    least one of those checkouts -- that is what makes it split -- so it can
+    never be read as integrated, and a host part-way through a migration keeps
+    its standalone stack exactly as before.
+
+    Deliberately NOT used to replace integrated() wholesale: that would also move
+    is_vendored(), which decides what the screen says is installed and which
+    update button each app gets. This answers a narrower question for callers
+    that need it.
+    """
+    for key in VENDORED_KEYS:
+        if vendored(key) is None or checkout_dir(key) is not None:
+            return False
+    return True
+
+
 def keys() -> list[str]:
     """Every product the updater MANAGES. Machinery, not display.
 
