@@ -174,6 +174,15 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 /* Search across every file in the project (the IDE's Ctrl+Shift+F). The results
    take the Explorer's place while a query is active -- the same column, so the
    width an operator already chose is the width the results get. */
+/* A project whose generated Terraform predates a fix. Not an error -- the project
+   works, it just will not have changes made after it was created -- so it reads as
+   a notice rather than a failure, and says what regenerating would give it. */
+.tf-stale-row > td{padding-top:0}
+.tf-stale{border-left:3px solid var(--warn,#e0a83b);background:var(--panel2,#1c2128);
+  border-radius:0 6px 6px 0;padding:8px 10px;font-size:12.5px}
+.tf-stale ul{margin:6px 0;padding-left:18px}
+.tf-stale li{margin:3px 0}
+
 /* Which build this console is, in the rail foot beside the edition badge. Quiet
    on purpose -- it is chrome -- but always present, because "is my fix deployed?"
    had no answer on any screen and cost an evening twice over. */

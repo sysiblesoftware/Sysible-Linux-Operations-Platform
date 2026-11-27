@@ -4410,7 +4410,30 @@ def infra_list(request: Request, user: str = Depends(current_user)):
         rows = [r for r in rows
                 if (db.get_project(r["project_id"]) or {}).get("org_id") in allowed
                 or (db.get_project(r["project_id"]) or {}).get("org_id") is None]
-    return {"infra": [_mask_infra(r) for r in rows]}
+    return {"infra": [_tf_age(_mask_infra(r)) for r in rows]}
+
+
+def _tf_age(row: dict) -> dict:
+    """Which generator wrote this project's Terraform, and what it is missing.
+
+    A project's .tf is written once at creation and then never touched by an
+    update, so a fix to the generator reaches new projects only. Nothing said so,
+    and an evening went into a VM that would not boot because its main.tf predated
+    the host-passthrough CPU -- which surfaces as the provider timing out on the
+    IP address, not as anything resembling a boot problem."""
+    row = dict(row)
+    row["tf_generator"] = None
+    row["tf_current"] = infra.TF_GENERATOR_VERSION
+    row["tf_missing"] = []
+    try:
+        main = db.project_dir(row["project_id"]) / "main.tf"
+        if main.is_file():
+            v = infra.tf_generator_version(main.read_text())
+            row["tf_generator"] = v
+            row["tf_missing"] = infra.tf_missing_changes(v)
+    except (OSError, UnicodeDecodeError):
+        pass    # unreadable .tf must never stop the list rendering
+    return row
 
 
 @app.get("/infra/{project_id}/options")
