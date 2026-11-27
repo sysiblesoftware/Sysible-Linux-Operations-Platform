@@ -542,12 +542,22 @@ if [ "$FIX_APPARMOR" = "1" ]; then
   ABS_LOCAL="${APPARMOR_ABS_LOCAL:-/etc/apparmor.d/local/abstractions/libvirt-qemu}"
   if [ ! -f "$ABS" ]; then
     S apparmor ok 'no AppArmor libvirt abstraction on this host -- nothing to do'
-  elif $SUDO grep -qF "$POOLDIR/**" "$ABS" 2>/dev/null || \
-       $SUDO grep -qF "$POOLDIR/**" "$ABS_LOCAL" 2>/dev/null; then
+  elif $SUDO grep -qF "$POOLDIR/** rwk," "$ABS" 2>/dev/null || \
+       $SUDO grep -qF "$POOLDIR/** rwk," "$ABS_LOCAL" 2>/dev/null; then
     S apparmor already "$POOLDIR is already allowed in the libvirt-qemu profile"
   else
     $SUDO cp -n "$ABS" "$ABS.sysible-bak" 2>/dev/null || true
-    rule="  $POOLDIR/** rk,"
+    # rwk, not rk. The first attempt granted read only, reasoning about the shared
+    # BASE images -- which are indeed read-only. But the same directory holds every
+    # VM's OWN disk, which qemu opens for WRITE, so the denial simply moved one
+    # level up the backing chain:
+    #
+    #   -blockdev {"node-name":"libvirt-2-format","read-only":false,"driver":"qcow2",
+    #   "backing":"libvirt-3-format"}: Could not open '.../ubuntu-1.qcow2': Permission denied
+    #
+    # libvirt-3 (the base) now opened and libvirt-2 (the VM's disk) did not. This is
+    # the storage pool qemu runs out of; read-only was never the right scope for it.
+    rule="  $POOLDIR/** rwk,"
     if $SUDO grep -q 'local/abstractions/libvirt-qemu' "$ABS" 2>/dev/null; then
       $SUDO mkdir -p "$(dirname "$ABS_LOCAL")"
       printf '%s\n' "$rule" | $SUDO tee -a "$ABS_LOCAL" >/dev/null
@@ -557,7 +567,7 @@ if [ "$FIX_APPARMOR" = "1" ]; then
       where="$ABS (previous kept as $ABS.sysible-bak)"
     fi
     $SUDO apparmor_parser -r "$ABS" >/dev/null 2>&1 || $SUDO systemctl reload apparmor >/dev/null 2>&1 || true
-    if $SUDO grep -qF "$POOLDIR/**" "$where" 2>/dev/null || $SUDO grep -qF "$POOLDIR/**" "$ABS" 2>/dev/null; then
+    if $SUDO grep -qF "$POOLDIR/** rwk," "$where" 2>/dev/null || $SUDO grep -qF "$POOLDIR/** rwk," "$ABS" 2>/dev/null; then
       S apparmor ok "qemu may now read $POOLDIR -- added to $where. Each VM picks this up when it next starts."
     else
       S apparmor failed "Could not add the rule to the libvirt-qemu profile."

@@ -383,16 +383,32 @@ def test_the_repair_can_fix_the_apparmor_denial():
     assert "FIX_APPARMOR" in r
     assert "abstractions/libvirt-qemu" in r, "the repair does not touch the profile VMs include"
     assert "apparmor_parser -r" in r, "the profile is edited but never reloaded"
-    assert "$POOLDIR/** rk," in r, "the rule does not grant read on the pool"
+    assert "$POOLDIR/** rwk," in r, "the rule does not give qemu access to the pool"
     assert "apparmor" in h.PERM_STEP_LABELS
 
 
-def test_the_apparmor_rule_is_narrow():
-    """Widening a security profile is not a thing to do casually: read and lock on
-    one pool, never write, never a wildcard over the filesystem."""
+def test_the_apparmor_rule_covers_the_vm_disks_too():
+    """Granting read only was wrong and moved the denial one level up the backing
+    chain. The base images under this pool ARE read-only, but the same directory
+    holds every VM's own disk, which qemu opens for write:
+
+        -blockdev {"node-name":"libvirt-2-format","read-only":false,
+        "backing":"libvirt-3-format"}: Could not open '.../ubuntu-1.qcow2':
+        Permission denied
+
+    i.e. the base opened and the VM's disk did not."""
     r = h.REPAIR_SH
-    assert "/** rwk" not in r and "/** w" not in r, "the rule grants write"
-    assert "/**/** " not in r
+    assert '"  $POOLDIR/** rwk,"' in r, "the rule does not let qemu write its own disks"
+
+
+def test_the_apparmor_rule_is_still_scoped_to_the_pool():
+    """Widening a security profile is not a thing to do casually. One pool, named
+    explicitly -- never a wildcard over the filesystem, never a bare /** rule."""
+    r = h.REPAIR_SH
+    step = _apparmor_step()
+    assert 'rule="  $POOLDIR/' in step, "the rule is not anchored to the pool directory"
+    for reckless in ('"  /** ', '"  /**/** ', '/var/lib/** ', '/etc/** '):
+        assert reckless not in step, "the rule reaches outside the pool: %r" % reckless
     # Scoped to the AppArmor step: .sysible-bak also appears in the qemu.conf
     # step, and a file-level assertion passed against a reverted backup here.
     assert ".sysible-bak" in _apparmor_step(), (
@@ -452,13 +468,13 @@ def test_the_apparmor_rule_is_really_written(tmp_path):
                          capture_output=True, text=True, input="", timeout=120)
     step = _step(h.parse_steps(out.stdout), "apparmor")
     assert step and step["status"] == "ok", (out.stdout, out.stderr[-300:])
-    assert "%s/** rk," % pool in abs_file.read_text(), "the rule never reached the profile"
+    assert "%s/** rwk," % pool in abs_file.read_text(), "the rule never reached the profile"
     assert (tmp_path / "libvirt-qemu.sysible-bak").exists(), "no backup was kept"
     # and again: no second copy of the rule
     out2 = subprocess.run(["sh", "-c", env + "\n" + h.REPAIR_SH],
                           capture_output=True, text=True, input="", timeout=120)
     assert _step(h.parse_steps(out2.stdout), "apparmor")["status"] == "already"
-    assert abs_file.read_text().count("/** rk,") == 1, "the rule was appended twice"
+    assert abs_file.read_text().count("/** rwk,") == 1, "the rule was appended twice"
 
 
 def test_the_local_override_is_used_when_the_abstraction_includes_it(tmp_path):
@@ -472,6 +488,6 @@ def test_the_local_override_is_used_when_the_abstraction_includes_it(tmp_path):
     out = subprocess.run(["sh", "-c", env + "\n" + h.REPAIR_SH],
                          capture_output=True, text=True, input="", timeout=120)
     assert _step(h.parse_steps(out.stdout), "apparmor")["status"] == "ok", out.stdout
-    assert local.exists() and "/** rk," in local.read_text(), (
+    assert local.exists() and "/** rwk," in local.read_text(), (
         "the rule went to the abstraction even though it includes a local override")
-    assert "/** rk," not in abs_file.read_text(), "the packaged abstraction was edited anyway"
+    assert "/** rwk," not in abs_file.read_text(), "the packaged abstraction was edited anyway"
