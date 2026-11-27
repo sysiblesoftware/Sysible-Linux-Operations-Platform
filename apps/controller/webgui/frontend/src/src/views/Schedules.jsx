@@ -1,0 +1,253 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api.js";
+import HostTree from "../components/HostTree.jsx";
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// Recurring fleet maintenance: patch scans, security/all updates, posture scans,
+// reboots — set once, run unattended (dispatched as root on agent hosts). The
+// runner lives on the controller; this is the CRUD + run-now UI.
+// A run where some hosts were offline is not the same as one where nothing ran.
+// Red for both is what made a nightly patch job that reached 14 of 16 hosts look
+// broken every morning; amber says "look, but it mostly worked".
+function runColor(status) {
+  if (status === "ok") return "#4ec07a";
+  if (status === "partial") return "#e0a83a";
+  return "#e06c6c";
+}
+
+export default function Schedules() {
+  const [jobs, setJobs] = useState([]);
+  const [meta, setMeta] = useState({ actions: {}, cadences: [] });
+  const [hosts, setHosts] = useState([]);
+  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const [editing, setEditing] = useState(null);     // job id whose editor is open
+  const [expanded, setExpanded] = useState(null);   // job id whose run history is open
+
+  const load = useCallback(() => {
+    api.schedules().then((d) => { setJobs(d.schedules || []); setMeta({ actions: d.actions || {}, cadences: d.cadences || [], arg_actions: d.arg_actions || {} }); })
+      .catch((e) => setErr(e.message));
+    api.hosts().then((d) => setHosts(d.hosts || [])).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  async function runNow(id) {
+    setBusy(id); setErr(""); setMsg("");
+    try { const r = await api.scheduleRunNow(id); setMsg(`Ran: ${r.status} — ${r.detail}`); load(); }
+    catch (e) { setErr(e.message); } finally { setBusy(""); }
+  }
+  async function toggle(j) {
+    try { await api.scheduleUpdate(j.id, { ...j, enabled: !j.enabled }); load(); }
+    catch (e) { setErr(e.message); }
+  }
+  async function del(id) {
+    if (!window.confirm("Delete this schedule?")) return;
+    try { await api.scheduleDelete(id); load(); } catch (e) { setErr(e.message); }
+  }
+
+  const hostName = useMemo(() => Object.fromEntries(hosts.map((h) => [h.id, h.label])), [hosts]);
+  // Format in the SCHEDULE's timezone (the one its HH:MM was set in), not the viewer's
+  // browser tz — otherwise a job set for 02:00 in one place reads as a different hour
+  // for an operator elsewhere (the bug behind '02:00 shows as 22:00').
+  const fmt = (ts, tz) => ts ? new Date(ts * 1000).toLocaleString(undefined, tz ? { timeZone: tz } : undefined) : "—";
+  const cadenceText = (j) => j.cadence === "hourly" ? `hourly at :${j.at.split(":")[1]}`
+    : j.cadence === "weekly" ? `${WEEKDAYS[j.weekday] || "Mon"} ${j.at}` : `daily ${j.at}`;
+  const targetsText = (j) => !j.targets || j.targets.length === 0 ? "all hosts"
+    : j.targets.map((id) => hostName[id] || id).join(", ");
+
+  return (
+    <div>
+      {err && <div className="error-box">{err}</div>}
+      {msg && <div className="ok-text" style={{ marginBottom: 10 }}>{msg}</div>}
+
+      <div className="spread" style={{ marginBottom: 12 }}>
+        <span className="faint">{jobs.length} scheduled job{jobs.length === 1 ? "" : "s"}</span>
+        <button className="btn sm" onClick={() => { setEditing(null); setShowNew((v) => !v); }}>
+          {showNew ? "Cancel" : "New schedule"}</button>
+      </div>
+
+      {showNew && <ScheduleForm meta={meta} hosts={hosts}
+                    onDone={() => { setShowNew(false); load(); }}
+                    onCancel={() => setShowNew(false)} onErr={setErr} />}
+
+      {jobs.length === 0 ? (
+        <div className="empty" style={{ padding: 24 }}>No schedules yet. Create one for unattended patching, scans, or reboots.</div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ textAlign: "left", color: "var(--text-faint)", fontSize: 11 }}>
+              {["Name", "Action", "When", "Targets", "Next run", "Last run", ""].map((h) => (
+                <th key={h} style={{ padding: "7px 10px" }}>{h}</th>))}
+            </tr></thead>
+            <tbody>
+              {jobs.map((j) => {
+                const hist = (j.history || []);
+                const canExpand = hist.length > 0;
+                const open = expanded === j.id;
+                const edit = editing === j.id;
+                return (
+                <React.Fragment key={j.id}>
+                <tr style={{ borderTop: "1px solid var(--border)", opacity: j.enabled ? 1 : 0.5 }}>
+                  <td style={{ padding: "7px 10px", fontWeight: 600 }}>{j.name}</td>
+                  <td style={{ padding: "7px 10px" }}>{meta.actions[j.action] || j.action}
+                    {j.arg ? <span className="faint" style={{ fontSize: 12 }}> · {j.arg}</span> : null}</td>
+                  <td style={{ padding: "7px 10px" }}>{cadenceText(j)}</td>
+                  <td style={{ padding: "7px 10px", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={targetsText(j)}>{targetsText(j)}</td>
+                  <td style={{ padding: "7px 10px" }} className="faint">{j.enabled ? fmt(j.next_run, j.tz) : "paused"}</td>
+                  <td style={{ padding: "7px 10px", cursor: canExpand ? "pointer" : "default" }}
+                      onClick={() => canExpand && setExpanded(open ? null : j.id)}
+                      title={canExpand ? "Show run history" : ""}>
+                    {j.last_run ? <span style={{ color: runColor(j.last_status) }}
+                                        title={j.last_detail}>{j.last_status} · {fmt(j.last_run, j.tz)}
+                                    {canExpand && <span className="faint" style={{ marginLeft: 4 }}>{open ? "▾" : `▸ ${hist.length}`}</span>}</span>
+                               : <span className="faint">never</span>}
+                  </td>
+                  <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                    <button className="btn ghost sm"
+                            onClick={() => { setShowNew(false); setEditing(edit ? null : j.id); }}>
+                      {edit ? "Close" : "Edit"}</button>{" "}
+                    <button className="btn ghost sm" disabled={busy === j.id} onClick={() => runNow(j.id)}>
+                      {busy === j.id ? <span className="spin" /> : "Run now"}</button>{" "}
+                    <button className="btn ghost sm" onClick={() => toggle(j)}>{j.enabled ? "Pause" : "Resume"}</button>{" "}
+                    <button className="btn ghost sm danger" onClick={() => del(j.id)}>Delete</button>
+                  </td>
+                </tr>
+                {edit && (
+                  <tr>
+                    <td colSpan={7} style={{ padding: "0 10px 10px 10px" }}>
+                      {/* Keyed by the job, so the form's initial state is tied to the
+                          schedule it is editing and cannot be carried over to the
+                          next one — the fields are seeded once, on mount. */}
+                      <ScheduleForm key={j.id} meta={meta} hosts={hosts} job={j}
+                                    onDone={() => { setEditing(null); load(); }}
+                                    onCancel={() => setEditing(null)} onErr={setErr} />
+                    </td>
+                  </tr>
+                )}
+                {open && (
+                  <tr>
+                    <td colSpan={7} style={{ padding: "0 10px 8px 24px", background: "var(--panel-2, rgba(255,255,255,0.02))" }}>
+                      <div style={{ fontSize: 12, display: "grid", gap: 3, paddingTop: 6 }}>
+                        {[...hist].reverse().map((h, i) => (
+                          <div key={i} className="row" style={{ gap: 10, alignItems: "baseline" }}>
+                            <span className="faint" style={{ minWidth: 150 }}>{fmt(h.ts, j.tz)}</span>
+                            <span style={{ color: runColor(h.status), fontWeight: 600, minWidth: 60 }}>{h.status}</span>
+                            <span className="faint">{h.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="faint" style={{ fontSize: 12, marginTop: 12 }}>
+        Scheduled jobs run unattended on the controller and dispatch as root on agent hosts
+        (no operator sudo password needed). Times are shown and fired in the timezone the
+        schedule was created in.
+      </p>
+    </div>
+  );
+}
+
+// One form for both, because a schedule you cannot change is a schedule you have
+// to delete and rebuild from memory — every target re-ticked by hand — to move it
+// by an hour. The API has always accepted a full update (the Pause button is one);
+// only the way in was missing.
+function ScheduleForm({ meta, hosts, job, onDone, onCancel, onErr }) {
+  const editing = Boolean(job);
+  const argActions = meta.arg_actions || {};
+  const [f, setF] = useState({
+    name: job?.name || "",
+    action: job?.action || Object.keys(meta.actions)[0] || "patch_scan",
+    arg: job?.arg || "",
+    cadence: job?.cadence || "daily",
+    at: job?.at || "02:00",
+    weekday: job?.weekday ?? 0,
+  });
+  const [targets, setTargets] = useState(job?.targets || []);
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const argLabel = argActions[f.action];
+  // A job whose action this build no longer advertises must still be listed, or
+  // opening its editor would silently retarget it to whatever sorts first.
+  const actionKeys = useMemo(() => {
+    const keys = Object.keys(meta.actions);
+    return keys.includes(f.action) ? keys : [f.action, ...keys];
+  }, [meta.actions, f.action]);
+
+  async function save() {
+    setSaving(true); onErr("");
+    const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const body = {
+      name: f.name, action: f.action, arg: f.arg, targets,
+      cadence: f.cadence, at: f.at, weekday: Number(f.weekday),
+      // An edit must not resume a paused job, and must not re-stamp the
+      // schedule's timezone with the editor's browser one: 02:00 was set in the
+      // zone it fires in, and an operator elsewhere opening the form would
+      // otherwise move the run by the difference between them without touching
+      // the time field.
+      enabled: editing ? job.enabled !== false : true,
+      tz: editing ? (job.tz || browserTz) : browserTz,
+    };
+    try {
+      if (editing) await api.scheduleUpdate(job.id, body);
+      else await api.scheduleCreate(body);
+      onDone();
+    } catch (e) { onErr(e.message); } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <strong>{editing ? `Edit ${job.name || "schedule"}` : "New schedule"}</strong>
+      <div className="row" style={{ gap: 12, flexWrap: "wrap", marginTop: 10, alignItems: "flex-end" }}>
+        <label className="field" style={{ minWidth: 200 }}><span>Name (optional)</span>
+          <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Weekly Prod security patch" /></label>
+        <label className="field"><span>Action</span>
+          <select value={f.action} onChange={(e) => set("action", e.target.value)}>
+            {actionKeys.map((k) => <option key={k} value={k}>{meta.actions[k] || k}</option>)}
+          </select></label>
+        {argLabel && (
+          <label className="field" style={{ minWidth: 200 }}><span>{argLabel}</span>
+            <input value={f.arg} onChange={(e) => set("arg", e.target.value)}
+                   placeholder={f.action === "run_command" ? "e.g. dnf -y autoremove" : "e.g. nginx"} /></label>
+        )}
+        <label className="field"><span>Cadence</span>
+          <select value={f.cadence} onChange={(e) => set("cadence", e.target.value)}>
+            {(meta.cadences || []).map((c) => <option key={c} value={c}>{c}</option>)}
+          </select></label>
+        {f.cadence === "weekly" && (
+          <label className="field"><span>Weekday</span>
+            <select value={f.weekday} onChange={(e) => set("weekday", e.target.value)}>
+              {WEEKDAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+            </select></label>
+        )}
+        <label className="field"><span>{f.cadence === "hourly" ? "Minute (:MM)" : "Time (HH:MM)"}</span>
+          <input type="time" value={f.at} onChange={(e) => set("at", e.target.value)} />
+          {editing && job.tz && (
+            <span className="faint" style={{ fontSize: 11 }}>fires in {job.tz}</span>
+          )}</label>
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>
+          Target hosts (none checked = all hosts):
+        </div>
+        <HostTree hosts={hosts} value={targets} onChange={setTargets} resizable={false} />
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 12 }}>
+        <button className="btn" disabled={saving} onClick={save}>
+          {saving ? <span className="spin" /> : editing ? "Save changes" : "Create schedule"}</button>
+        <button className="btn ghost" disabled={saving} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
