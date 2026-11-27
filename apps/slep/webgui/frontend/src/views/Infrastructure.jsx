@@ -879,7 +879,21 @@ function LibvirtConnect({ values, set }) {
   const [key, setKey] = useState(null)        // {public_key, keyfile}
   const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
   const [copied, setCopied] = useState(false)
+  const [prep, setPrep] = useState(null)       // {ok, steps, output} | 'running'
+  const [remember, setRemember] = useState(false)
   const { wrap, node } = useErr()
+
+  // Make a host a hypervisor, check why its VMs cannot open their disks, and fix it.
+  // All three take the same SSH target as the key install above and report step by
+  // step, so a host that gets five steps in says which one stopped it instead of
+  // collapsing into one wall of output.
+  const hvRun = (path, extra) => wrap(async () => {
+    setPrep('running')
+    try {
+      setPrep(await api(path, { method: 'POST', json: {
+        host: (host || '').trim(), user: (user || '').trim(), password: (pw || '').trim(), ...extra } }))
+    } catch (e) { setPrep({ ok: false, steps: [], output: String(e.message || e) }) }
+  })
 
   const buildUri = (m, h, u, k) => {
     if (m === 'local') return 'qemu:///system'
@@ -1004,6 +1018,55 @@ function LibvirtConnect({ values, set }) {
           </span>
         )}
       </div>
+      {/* Making a plain Linux host into a hypervisor, and keeping its storage usable.
+          Distro does not matter: the package family is resolved from the host's own
+          /etc/os-release ID/ID_LIKE chain, so Mint and Sysible Server are the same
+          branch without being named. */}
+      {mode === 'remote' && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>
+            Host not a hypervisor yet, or VMs failing to start? These run over SSH on{' '}
+            <span className="mono">{(user || 'root')}@{host || '…'}</span> and need the host password above for sudo.
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="ghost sm" disabled={prep === 'running' || !host}
+              title="Install qemu-kvm, libvirt and virtinst for this host's distribution, start the daemon, and define the default storage pool and network. Safe to re-run."
+              onClick={() => hvRun('infra/hypervisor-provision')}>🛠 Make this a hypervisor</button>
+            <button className="ghost sm" disabled={prep === 'running' || !host}
+              title="Report why a VM cannot open its own disk — probing as the VM process is really credentialed, not as root."
+              onClick={() => hvRun('infra/hypervisor-permissions', { pool_dir: '/var/lib/libvirt/images' })}>🔎 Check storage permissions</button>
+            <button className="ghost sm" disabled={prep === 'running' || !host}
+              title="Make the pool traversable and every volume readable by the VM process, and clear the owner libvirt saved on them."
+              onClick={() => hvRun('infra/hypervisor-fix-permissions', { pool_dir: '/var/lib/libvirt/images', set_remember_owner: remember })}>🔧 Fix permissions</button>
+            <label className="row" style={{ gap: 6, fontSize: 12.5, cursor: 'pointer' }}
+              title="remember_owner = 1 is why this works once and then stops: when one VM stops, libvirt gives the shared base image back to root while the others still need it. Turning it off restarts libvirt, which does not touch running VMs.">
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} style={{ width: 'auto' }} />
+              also set remember_owner = 0
+            </label>
+          </div>
+          {prep === 'running' && (
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+              Working on {host}… installing packages over a slow link can take a few minutes.
+            </div>
+          )}
+          {prep && prep !== 'running' && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 12.5, color: prep.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
+                {prep.ok ? '✓ ' : '✗ '}{prep.output}
+              </div>
+              {(prep.steps || []).map((st, i) => (
+                <div key={i} className="row" style={{ gap: 8, fontSize: 12, alignItems: 'flex-start', marginTop: 3 }}>
+                  <span style={{ width: 12, flex: '0 0 auto', color: st.status === 'failed' ? 'var(--danger)' : 'var(--green-bright)' }}>
+                    {st.status === 'failed' ? '✗' : '✓'}
+                  </span>
+                  <span style={{ width: 200, flex: '0 0 auto' }}>{st.label}</span>
+                  <span className="muted" style={{ whiteSpace: 'pre-wrap', flex: 1, minWidth: 0 }}>{st.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {node}
     </div>
   )

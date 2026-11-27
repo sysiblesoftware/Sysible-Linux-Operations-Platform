@@ -301,3 +301,55 @@ def test_the_fix_survives_libvirt_restoring_the_saved_owner(pool):
         "after libvirt restored the saved owner (root:root) the VM process can no "
         "longer read the backing file -- this fix does not survive a VM stopping: %s"
         % (r.stderr or b"").decode()[:200])
+
+
+# ------------------------------------------- the endpoints must be reachable
+
+def test_every_hypervisor_endpoint_has_a_button():
+    """An endpoint nothing calls is an endpoint that does not exist. SLEP has already
+    shipped one unreachable feature this way (a pipeline dialog whose caller was
+    never wired), so pin the wiring rather than trust it."""
+    views = HERE / "webgui" / "frontend" / "src" / "views"
+    ui = "\n".join(f.read_text(encoding="utf-8") for f in views.glob("*.jsx"))
+    for route in ("infra/hypervisor-provision",
+                  "infra/hypervisor-permissions",
+                  "infra/hypervisor-fix-permissions"):
+        assert route in ui, "%s is not called from any view -- nothing can reach it" % route
+
+
+def test_the_backend_actually_serves_those_routes():
+    from backend import app as backend_app
+    paths = {getattr(r, "path", "") for r in backend_app.app.routes}
+    for route in ("/infra/hypervisor-provision",
+                  "/infra/hypervisor-permissions",
+                  "/infra/hypervisor-fix-permissions"):
+        assert route in paths, "%s is called from the UI but not served" % route
+
+
+def test_making_a_hypervisor_and_changing_permissions_need_an_operator():
+    """Reading what is wrong is for anyone who can see the project; installing
+    packages and changing file ownership on someone's host is not."""
+    import inspect
+    from backend import app as backend_app
+    src = inspect.getsource(backend_app)
+    for fn in ("def infra_hypervisor_provision", "def infra_hypervisor_fix_permissions"):
+        sig = src[src.index(fn):src.index(fn) + 400]
+        assert "require_operator" in sig, "%s is not operator-guarded" % fn
+
+
+def test_the_shared_ssh_validator_is_used_everywhere_not_copied():
+    """Four endpoints take {host,user,port,password}. The guard that stops a Vault
+    reference being used as a decryption oracle against an operator-chosen host
+    lives in the validator -- a copy per endpoint is how it ends up enforced in
+    three places out of four."""
+    import inspect
+    from backend import app as backend_app
+    src = inspect.getsource(backend_app)
+    assert src.count("def _hypervisor_ssh_target") == 1
+    for fn in ("infra_install_hypervisor_key", "infra_hypervisor_provision",
+               "infra_hypervisor_permissions", "infra_hypervisor_fix_permissions"):
+        body = src[src.index("def " + fn):]
+        body = body[:body.index("\n@app.") if "\n@app." in body else 3000]
+        assert "_hypervisor_ssh_target(" in body, "%s validates its own SSH target" % fn
+    # and the guard itself exists exactly once
+    assert src.count("may use a Vault variable as the") == 1
