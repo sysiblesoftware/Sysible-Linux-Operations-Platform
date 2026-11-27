@@ -99,3 +99,32 @@ jobs:
         # runner must stay unprivileged. Privilege is granted to the PORT, not
         # to the process.
         run: python -m pytest -q -p no:cacheprovider tests
+
+  # The standalone Sysible-Controller repo is a PUBLISHED COPY of apps/controller,
+  # not a second place to work. Decided: "only work in slop publish outward".
+  #
+  # Keeping the two in step by hand meant not keeping them in step: a feature
+  # landed in one and was missing from the other, and the only way to find out was
+  # for somebody to hit the missing half. That happened three times in a single
+  # day — the airgap guards, a whole set of test files, and the Copy buttons.
+  #
+  # This job does not push anything and needs no token (the repo is public). It
+  # fails when the published copy is behind, so the drift cannot be merged and
+  # then forgotten. To clear it: run tools/publish-controller.py against a
+  # checkout of Sysible-Controller, then commit and push there.
+  controller-published:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: controller is published
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the published Controller
+        uses: actions/checkout@v4
+        with:
+          repository: sysiblesoftware/Sysible-Controller
+          path: .published-controller
+          fetch-depth: 1
+
+      - name: The published Controller must not be behind SLOP
+        run: python3 tools/publish-controller.py .published-controller --check
