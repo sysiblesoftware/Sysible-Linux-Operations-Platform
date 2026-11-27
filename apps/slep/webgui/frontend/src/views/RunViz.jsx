@@ -54,10 +54,13 @@ const STAGE_COLOR = {
   success: 'var(--ok,#63c869)', failed: 'var(--err,#e5534b)', canceled: '#7d8ca3',
   running: 'var(--warn,#e0a83b)', queued: '#7d8ca3', pending: '#7d8ca3',
 }
-export function PipelineFlow({ seq, runId, onOpenRun }) {
+export function PipelineFlow({ seq, runId, onOpenRun, aligned }) {
   if (!seq || seq.length < 2) return null
+  // `aligned` puts each tile on the same track as its column below (see
+  // .pipe-flow.aligned). The arrows become a ::before in the gutter there, because
+  // as flex siblings they take track width and push every tile off its column.
   return (
-    <div className="pipe-flow">
+    <div className={'pipe-flow' + (aligned ? ' aligned' : '')}>
       {seq.map((s, i) => {
         const col = STAGE_COLOR[s.status] || STAGE_COLOR.pending
         const current = s.id === runId
@@ -74,7 +77,7 @@ export function PipelineFlow({ seq, runId, onOpenRun }) {
               </span>
               <span className={'pipe-dot' + (s.status === 'running' ? ' pulse' : '')} style={{ background: col }} />
             </button>
-            {i < seq.length - 1 && <span className="pipe-arrow" aria-hidden="true">→</span>}
+            {!aligned && i < seq.length - 1 && <span className="pipe-arrow" aria-hidden="true">→</span>}
           </React.Fragment>
         )
       })}

@@ -310,6 +310,27 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .pipe-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .pipe-arrow{display:inline-flex;align-items:center;color:var(--faint)}
 
+/* ALIGNED MODE: when the stages are also shown as columns below, each tile has to
+   sit over its own column. It could not before -- the tiles were content-width and
+   wrapped, while the columns are flex:1 1 0 with min-width:210px -- so by the third
+   stage the tile was visibly left of its column.
+
+   Both rows are put on the SAME track here. A column is a 210px track with 12px of
+   padding each side; a tile is a 186px box with 12px of margin each side, which is
+   the same 210px track and the same content edges. The side padding and side
+   borders go, because 8px of padding would shift every tile by 8px relative to the
+   columns. The arrows stop being flex siblings (they would eat track width) and are
+   drawn in the 24px gutter between tiles instead. .stage-sync then scrolls both
+   rows as one, so they stay aligned when the pane is too narrow. */
+.stage-sync{overflow-x:auto}
+.stage-sync > .stage-row{overflow-x:visible}
+.pipe-flow.aligned{flex-wrap:nowrap;gap:0;padding:8px 0;border-left:0;border-right:0;
+  border-radius:0;margin-bottom:8px}
+.pipe-flow.aligned > .pipe-stage{position:relative;flex:1 1 0;min-width:186px;margin:0 12px}
+.pipe-flow.aligned > .pipe-stage + .pipe-stage::before{content:'\2192';position:absolute;
+  left:-16px;top:50%;transform:translateY(-50%);color:var(--faint);font-size:12px;
+  line-height:1;pointer-events:none}
+
 /* The whole pipeline in ONE window: every stage side by side as a column
    (Terraform → … → Enroll), so the entire run is visible at once instead of a
    long scroll. Columns share the pane width, divided by a thin rule; each column's

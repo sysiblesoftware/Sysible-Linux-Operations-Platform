@@ -435,11 +435,13 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
               EVERY stage's visualization — a lone run shows its one viz; a pipeline
               lays all stages side by side as ONE window (columns, Terraform → Enroll),
               so the entire run is visible at a glance rather than a long scroll. */}
-          <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
+          {seq.length <= 1 && <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />}
           {seq.length > 1 ? (
             // Overview: all stages side by side. Click a stage to MAXIMIZE it — that
             // stage becomes the selected run (log follows) and fills the pane; the
             // top strip still navigates, and a ⤡ restores the overview.
+            <div className="stage-sync">
+            <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} aligned={!maxed} />
             <div className={'stage-row' + (maxed ? ' maximized' : '')}>
               {(maxed ? seq.filter((s) => s.id === runId) : seq).map((s) => {
                 const st = stages[s.id]
@@ -468,6 +470,7 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
                   </div>
                 )
               })}
+            </div>
             </div>
           ) : (
             <div className="run-scroll">
