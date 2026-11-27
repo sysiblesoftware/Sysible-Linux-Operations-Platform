@@ -251,6 +251,97 @@ def test_a_refused_run_is_shown_as_refused(tmp_path):
 
 
 @pytest.mark.skipif(not _playwright(), reason="playwright not installed")
+def test_an_off_schedule_says_so_even_after_it_has_run(tmp_path):
+    """The third lie, and the one that needed no refusal to tell.
+
+    The note stated its own state only when there was NO history: the line was
+    gated on `!last`. So a host where automatic updates had been switched OFF
+    after running showed exactly one sentence --
+
+        Last run 14/11/2026, 03:00:00: updated.
+
+    -- and nothing to say the schedule had since been turned off. That reads as
+    a schedule still running, which is the same class of green as a refusal
+    reported as a run."""
+    from playwright.sync_api import sync_playwright
+    state = {"enabled": False, "cadence": "weekly", "hour": 3, "weekday": 6,
+             "include_platform": True,
+             "last": {"at": 1763000000, "outcome": "updated",
+                      "detail": "", "products": []}}
+    server = _server(tmp_path, state)
+    try:
+        with sync_playwright() as p:
+            chrome = chromium_path()
+            try:
+                b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
+            except Exception as e:                                  # noqa: BLE001
+                pytest.skip(f"no chromium to drive ({e})")
+            pg = b.new_page(viewport={"width": 1180, "height": 1000})
+            _sign_in(pg)
+            note = pg.text_content("#au-note") or ""
+            assert "off" in note.lower(), (
+                f"automatic updates are OFF and the note never says so -- it "
+                f"reads as a live schedule: {note!r}")
+            assert "Last run" in note, (
+                f"the history was dropped along the way: {note!r}")
+            b.close()
+    finally:
+        _shutdown(server)
+
+
+@pytest.mark.skipif(not _playwright(), reason="playwright not installed")
+def test_the_off_state_names_what_is_off(tmp_path):
+    """It used to read 'Nothing is updated unless you press a button.' -- a
+    sentence with no subject, sitting directly under a checkbox labelled
+    'Update automatically'. Reported as "doesn't make sense for automatic
+    updates", because read in place it says automatic updates do not update."""
+    from playwright.sync_api import sync_playwright
+    state = {"enabled": False, "cadence": "weekly", "hour": 3, "weekday": 6,
+             "include_platform": True, "last": None}
+    server = _server(tmp_path, state)
+    try:
+        with sync_playwright() as p:
+            chrome = chromium_path()
+            try:
+                b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
+            except Exception as e:                                  # noqa: BLE001
+                pytest.skip(f"no chromium to drive ({e})")
+            pg = b.new_page(viewport={"width": 1180, "height": 1000})
+            _sign_in(pg)
+            note = (pg.text_content("#au-note") or "").strip()
+            assert note.lower().startswith("automatic updates are off"), (
+                f"the note does not name what is off, so it reads as a claim "
+                f"about the feature rather than its state: {note!r}")
+            b.close()
+    finally:
+        _shutdown(server)
+
+
+@pytest.mark.skipif(not _playwright(), reason="playwright not installed")
+def test_an_on_schedule_does_not_claim_to_be_off(tmp_path):
+    """The obvious inverse, so the fix cannot be "always say it is off"."""
+    from playwright.sync_api import sync_playwright
+    state = {"enabled": True, "cadence": "weekly", "hour": 3, "weekday": 6,
+             "include_platform": True, "last": None}
+    server = _server(tmp_path, state)
+    try:
+        with sync_playwright() as p:
+            chrome = chromium_path()
+            try:
+                b = p.chromium.launch(**({"executable_path": chrome} if chrome else {}))
+            except Exception as e:                                  # noqa: BLE001
+                pytest.skip(f"no chromium to drive ({e})")
+            pg = b.new_page(viewport={"width": 1180, "height": 1000})
+            _sign_in(pg)
+            note = (pg.text_content("#au-note") or "")
+            assert "are off" not in note.lower(), (
+                f"a LIVE schedule is being described as off: {note!r}")
+            b.close()
+    finally:
+        _shutdown(server)
+
+
+@pytest.mark.skipif(not _playwright(), reason="playwright not installed")
 def test_a_refused_save_does_not_leave_the_page_claiming_a_schedule(tmp_path):
     """The other lie. The checkbox has to go back to what the SERVER has."""
     from playwright.sync_api import sync_playwright

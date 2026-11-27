@@ -3287,6 +3287,22 @@ _UPDATES_JS = r"""
     note.innerHTML=''; note.classList.remove('warn');
     var bits=[];
     if(s.enabled && d.next_run_text) bits.push('Next run '+d.next_run_text+'.');
+    // SAY WHEN IT IS OFF, and say it FIRST.
+    //
+    // Two faults, one line. It used to read 'Nothing is updated unless you
+    // press a button.' with no subject, directly beneath a checkbox labelled
+    // 'Update automatically' -- so it read as a statement ABOUT automatic
+    // updates ("automatic updates do not update anything?") rather than about
+    // their current state. Reported as "doesn't make sense for automatic
+    // updates".
+    //
+    // And it was gated on `!last`, so a host where the schedule had been
+    // switched OFF after running showed only 'Last run ...: updated.' and
+    // nothing else -- which reads exactly like a schedule that is still
+    // running. The state is now stated whenever it is off, whatever the
+    // history, and it leads so the history reads as history.
+    if(!s.enabled) bits.push('Automatic updates are off \u2014 nothing is updated '
+                             + 'unless you start it yourself.');
     // What the LAST run DID, in the words of the outcome it recorded. A
     // scheduler that reports "last run" without saying whether anything came of
     // it is the one that gets believed about a checkout which has been refusing
@@ -3302,7 +3318,6 @@ _UPDATES_JS = r"""
     } else if(s.enabled){
       bits.push('It has not run yet.');
     }
-    if(!s.enabled && !last) bits.push('Nothing is updated unless you press a button.');
     note.textContent = bits.join(' ');
   }
   function saveAutoUpdate(){
