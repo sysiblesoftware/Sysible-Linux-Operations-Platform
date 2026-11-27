@@ -71,3 +71,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
    || curl -fs  http://127.0.0.1:8700/healthz  >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+# Last in the file deliberately — changing it rebuilds one ENV layer rather
+# than invalidating the COPY above and reinstalling every dependency. Matches
+# idp/flashback/baseline/visualizer/updater, which already do this.
+ARG SYSIBLE_REV=""
+ENV SYSIBLE_REV=$SYSIBLE_REV

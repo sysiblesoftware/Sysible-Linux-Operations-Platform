@@ -166,6 +166,15 @@ export default function App() {
   const atNav = (k) => view === k && !project && runId == null
   const initials = (username || 'AD').slice(0, 2).toUpperCase()
 
+  // WHICH SLEP IS THIS, RUNNING WHAT. Two questions that had no answer on any
+  // screen, and both cost an evening: a fix that had shipped four days earlier was
+  // reported missing (nothing could tell a stale image from a current one), and a
+  // Terraform apply quoted real line numbers out of a main.tf while the container
+  // being inspected had an empty projects directory -- two SLEPs, and neither said
+  // so. The chip answers the first at a glance and the second on hover.
+  const [build, setBuild] = useState(null)
+  useEffect(() => { api('version').then(setBuild).catch(() => setBuild({ unreachable: true })) }, [])
+
   return (
     <div className="shell">
       <aside className="rail">
@@ -195,6 +204,7 @@ export default function App() {
         </nav>
         <div className="rail-foot">
           <div className="ce-badge">Community Edition</div>
+          <BuildChip build={build} />
           <div className="account">
             <span className="avatar">{initials}</span>
             <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>{roleName || 'operator'}</span></div>
@@ -230,6 +240,37 @@ export default function App() {
     </div>
   )
 }
+
+
+// The build + instance chip. Deliberately small and quiet -- it is chrome -- but
+// its title carries the facts an operator needs when two instances disagree:
+// which data directory this console is really using and how many projects are in
+// it. "Restart needed" means someone pulled in the running directory and never
+// restarted, so the code on disk is not the code executing.
+function BuildChip({ build }) {
+  if (!build) return null
+  if (build.unreachable) {
+    return <div className="build-chip" title="Could not read this instance's build.">build unknown</div>
+  }
+  const label = build.rev ? `build ${build.rev}`
+    : build.commit_short ? `source ${build.commit_short}${build.dirty ? '+' : ''}`
+    : 'version unknown'
+  const lines = [
+    build.rev ? `Built from ${build.rev}` : null,
+    build.commit_short ? `Checkout ${build.commit_short}${build.branch ? ` on ${build.branch}` : ''}${build.dirty ? ' (uncommitted changes)' : ''}` : null,
+    !build.rev && !build.commit_short ? 'This image was built without a revision, so it cannot say which commit it is running.' : null,
+    build.data_dir ? `Data ${build.data_dir}` : null,
+    build.projects != null ? `${build.projects} project${build.projects === 1 ? '' : 's'}` : null,
+    build.host ? `Host ${build.host} (pid ${build.pid})` : null,
+    build.restart_needed ? 'The code on disk has moved since this process started — it was pulled here but never restarted.' : null,
+  ].filter(Boolean)
+  return (
+    <div className={'build-chip' + (build.restart_needed ? ' stale' : '')} title={lines.join('\n')}>
+      {build.restart_needed ? '\u25B2 ' : ''}{label}
+    </div>
+  )
+}
+
 
 function SsoSignIn() {
   // Accounts live in SLOP Administration; this instance has no login of its own.

@@ -21,28 +21,43 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 BUILT = ("idp", "flashback", "baseline", "visualizer", "updater")
 CONSOLES = ("flashback", "baseline", "visualizer")
 
+# The three SPAs were left out of this for a long time, and that is precisely
+# where it hurt: they are the apps an operator works in. A fix that had shipped
+# four days earlier was reported missing, and a Terraform apply was traced to a
+# DIFFERENT SLEP than the one being inspected — neither of which any screen could
+# have told anybody. They build from their own paths, hence the map.
+SPAS = {
+    "slep": "apps/slep/deploy/Dockerfile",
+    "connect": "apps/connect/deploy/Dockerfile",
+    "controller": "apps/controller/Dockerfile",
+}
 
-@pytest.mark.parametrize("app", BUILT)
+
+def _dockerfile(app):
+    return REPO / SPAS.get(app, "%s/Dockerfile" % app)
+
+
+@pytest.mark.parametrize("app", BUILT + tuple(SPAS))
 def test_every_built_image_accepts_the_revision(app):
     """The arg has to exist in the Dockerfile or compose cannot pass it."""
-    df = (REPO / app / "Dockerfile").read_text(encoding="utf-8")
+    df = _dockerfile(app).read_text(encoding="utf-8")
     assert re.search(r"^ARG SYSIBLE_REV", df, re.M), f"{app} takes no SYSIBLE_REV"
     assert re.search(r"^ENV SYSIBLE_REV=\$SYSIBLE_REV", df, re.M), \
         f"{app} never turns the build arg into an environment variable"
 
 
-@pytest.mark.parametrize("app", BUILT)
+@pytest.mark.parametrize("app", BUILT + tuple(SPAS))
 def test_the_revision_is_the_last_thing_in_the_dockerfile(app):
     """Not cosmetic: an ENV above the COPY invalidates it, so every new commit
     would reinstall every dependency to change one string."""
-    lines = [ln for ln in (REPO / app / "Dockerfile").read_text().splitlines()
+    lines = [ln for ln in _dockerfile(app).read_text().splitlines()
              if ln.strip() and not ln.lstrip().startswith("#")]
     tail = lines[-1]
     assert tail.startswith("ENV SYSIBLE_REV"), \
         f"{app}'s revision is not the last layer; it is followed by {tail!r}"
 
 
-@pytest.mark.parametrize("app", BUILT)
+@pytest.mark.parametrize("app", BUILT + tuple(SPAS))
 def test_compose_passes_it_to_every_build(app):
     import yaml
     compose = yaml.safe_load((REPO / "docker-compose.yml").read_text())

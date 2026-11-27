@@ -785,6 +785,16 @@ def healthz():
     return {"ok": True}
 
 
+@app.get("/version")
+def version_route():
+    """Which Connect this is, and what it is running.
+
+    BEFORE the SPA catch-all below: `@app.get("/{full_path:path}")` matches
+    everything, so a route declared after it is unreachable."""
+    from . import build_info
+    return build_info.info()
+
+
 if _DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
 

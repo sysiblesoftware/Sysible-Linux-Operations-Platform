@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import (controller_import, db, engines, galaxy, gitops, hypervisor, infra, keydist,
+from . import (build_info, controller_import, db, engines, galaxy, gitops, hypervisor, infra, keydist,
                notifications, policy, projcfg, surveys, vault)
 from .runners import ansible_runner, molecule_runner, terraform_runner
 
@@ -580,6 +580,26 @@ async def security_headers(request: Request, call_next):
 
 
 # ------------------------------------------------------------------ health/setup
+@app.get("/version")
+def version_route(user: str = Depends(current_user)):
+    """Which SLEP this is, and what it is running.
+
+    Two questions, both unanswerable from SLEP's screens before this, and both of
+    which cost an evening: "I updated and my fix isn't here" (it had shipped four
+    days earlier; nothing could tell a stale image from a current one), and "where
+    is my project's main.tf" (a Terraform apply was quoting real line numbers while
+    the container being inspected had an empty /data/projects -- two SLEPs, and no
+    screen on either said so).
+
+    So this reports the INSTANCE as well as the build: the data directory actually
+    in use and how many projects are in it. Any signed-in user may read it: it is
+    the answer to "am I looking at the right console", which is not a privileged
+    question, and it discloses no secret. The Controller's equivalent is superuser
+    -only because it returns an absolute install path on a fleet manager; SLEP's
+    data_dir is the path an operator is already typing into docker exec."""
+    return build_info.info()
+
+
 @app.get("/healthz")
 def healthz():
     # `sso` is what the console reads before rendering anything. Without it, a

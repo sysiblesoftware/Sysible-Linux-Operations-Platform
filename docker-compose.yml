@@ -383,6 +383,7 @@ services:
         # both at the root and under /controller/. A "/" here re-bakes an
         # absolute /assets/... and the console comes up blank behind the gateway.
         SYSIBLE_BASE_PATH: ""
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"
     image: sysible-controller:latest
     container_name: sysible-controller
     restart: unless-stopped
@@ -462,6 +463,7 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         SYSIBLE_BASE_PATH: "/slep/"
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"
     image: sysible-slep:latest
     container_name: sysible-slep
     restart: unless-stopped
@@ -486,6 +488,7 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         SYSIBLE_BASE_PATH: "/connect/"
+        SYSIBLE_REV: "${SYSIBLE_SLOP_REV:-}"
     image: sysible-connect:latest
     container_name: sysible-connect
     restart: unless-stopped
