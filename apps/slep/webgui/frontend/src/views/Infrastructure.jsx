@@ -881,6 +881,9 @@ function LibvirtConnect({ values, set }) {
   const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
   const [prep, setPrep] = useState(null)       // {ok, steps, output} | 'running'
   const [remember, setRemember] = useState(false)
+  // Default ON: on a real host this was the actual cause while every file
+  // permission was already correct.
+  const [apparmor, setApparmor] = useState(true)
   const { wrap, node } = useErr()
 
   // Make a host a hypervisor, check why its VMs cannot open their disks, and fix it.
@@ -1036,11 +1039,16 @@ function LibvirtConnect({ values, set }) {
               onClick={() => hvRun('infra/hypervisor-permissions', { pool_dir: '/var/lib/libvirt/images' })}>🔎 Check storage permissions</button>
             <button className="ghost sm" disabled={prep === 'running' || !host}
               title="Make the pool traversable and every volume readable by the VM process, and clear the owner libvirt saved on them."
-              onClick={() => hvRun('infra/hypervisor-fix-permissions', { pool_dir: '/var/lib/libvirt/images', set_remember_owner: remember })}>🔧 Fix permissions</button>
+              onClick={() => hvRun('infra/hypervisor-fix-permissions', { pool_dir: '/var/lib/libvirt/images', set_remember_owner: remember, fix_apparmor: apparmor })}>🔧 Fix permissions</button>
             <label className="row" style={{ gap: 6, fontSize: 12.5, cursor: 'pointer' }}
               title="remember_owner = 1 is why this works once and then stops: when one VM stops, libvirt gives the shared base image back to root while the others still need it. Turning it off restarts libvirt, which does not touch running VMs.">
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} style={{ width: 'auto' }} />
               also set remember_owner = 0
+            </label>
+            <label className="row" style={{ gap: 6, fontSize: 12.5, cursor: 'pointer' }}
+              title="libvirt writes an AppArmor profile per VM listing that VM's own disks. A copy-on-write clone's shared BASE image is often missing from it, and the kernel then refuses the open however correct the file permissions are — the VM dies with &quot;Could not open ...qcow2: Permission denied&quot;. This adds read access to this pool, and nothing else.">
+              <input type="checkbox" checked={apparmor} onChange={(e) => setApparmor(e.target.checked)} style={{ width: 'auto' }} />
+              allow qemu to read the pool (AppArmor)
             </label>
           </div>
           {prep === 'running' && (

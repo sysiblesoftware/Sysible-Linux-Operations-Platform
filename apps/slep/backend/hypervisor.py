@@ -312,6 +312,7 @@ PERM_STEP_LABELS = {
     "fixed_vols": "Volumes readable by the VM user",
     "fixed_remember": "remember_owner",
     "reloaded": "libvirt reloaded",
+    "apparmor": "AppArmor access to the pool",
 }
 
 # Shared by DIAGNOSE_SH and REPAIR_SH, in ONE place on purpose: the repair used to
@@ -392,7 +393,7 @@ for f in "$POOLDIR"/*.qcow2 "$POOLDIR"/*.img "$POOLDIR"/*.raw; do
 done
 bad="$(printf '%s' "$bad" | sed 's/^ //')"
 if [ "$n" -eq 0 ]; then S volumes ok 'no volumes in the pool yet'
-elif [ -z "$bad" ]; then S volumes ok "$n volume(s), all readable by $QU:$QG"
+elif [ -z "$bad" ]; then S volumes ok "$n volume(s), all readable by $QU:$QG -- so if a VM still cannot open its disk, the cause is ABOVE the filesystem (AppArmor/SELinux), not these permissions"
 else S volumes failed "$QU:$QG cannot read: $bad -- a VM whose disk has one of these as its BACKING file dies with Could not open ...: Permission denied."; fi
 
 # The saved owner. A file with these set has its ownership RESTORED on every
@@ -424,13 +425,27 @@ fi
 if command -v getenforce >/dev/null 2>&1; then mac="$mac; SELinux $($SUDO getenforce 2>/dev/null)"; fi
 S mac ok "$mac"
 
-den="$($SUDO dmesg 2>/dev/null | grep -iE 'apparmor=.DENIED|avc: *denied' | grep -i "$(basename "$POOLDIR")" | tail -2 | tr '\n' ' ' | tail -c 300)"
-if [ -n "$den" ]; then S denials failed "$den"
-else S denials ok 'no AppArmor/SELinux denial in dmesg mentioning the pool directory'; fi
+# Look in all three places. On a real host that was denying exactly this, dmesg
+# was EMPTY of denials while AppArmor was loaded and enforcing: the kernel ring
+# buffer had rotated and auditd had the records. Reporting "no denial" from dmesg
+# alone sent the investigation back to file permissions that were already correct.
+pool_base="$(basename "$POOLDIR")"
+den=""
+for src in "dmesg" "journalctl -k --since -1h --no-pager" "cat /var/log/audit/audit.log"; do
+  hit="$($SUDO sh -c "$src" 2>/dev/null | grep -iE 'apparmor=.DENIED|avc: *denied' | grep -i "$pool_base" | tail -2 | tr '\n' ' ')"
+  [ -n "$hit" ] && den="$den $hit"
+done
+den="$(printf '%s' "$den" | tail -c 400)"
+if [ -n "$den" ]; then
+  S denials failed "A security module is denying this, NOT the file permissions: $den"
+else
+  S denials ok 'no AppArmor/SELinux denial found in dmesg, the kernel journal or the audit log'
+fi
 """
 
 _REPAIR_BODY = r"""
 SET_REMEMBER="${SET_REMEMBER:-0}"
+FIX_APPARMOR="${FIX_APPARMOR:-0}"
 
 # 1. Traversable. o+x only -- NOT o+r: a path open needs only search, and the
 #    directory listing stays private, which is what libvirt's own 0711 intends.
@@ -499,6 +514,54 @@ if [ "$SET_REMEMBER" = "1" ]; then
     fi
   else
     S fixed_remember failed '/etc/libvirt/qemu.conf is not present on this host'
+  fi
+fi
+
+# 4. AppArmor. On a real host this was the whole problem, and every file
+#    permission was already correct:
+#
+#      apparmor="DENIED" operation="open" profile="libvirt-<uuid>"
+#      name="/var/lib/libvirt/images/arch-base.qcow2" comm="qemu-system-x86"
+#      requested_mask="r" denied_mask="r" fsuid=64055 ouid=64055
+#
+#    fsuid == ouid == libvirt-qemu: qemu owned the file it was refused. libvirt
+#    generates a profile per domain with virt-aa-helper, listing that VM's own
+#    disks -- and a COW clone's shared BACKING file does not always make it in.
+#    The kernel then refuses the open no matter what the mode says, which is why
+#    this survives every chmod and is not undone by remember_owner.
+#
+#    The per-domain profiles all include abstractions/libvirt-qemu, and they are
+#    regenerated at domain start, so a rule there reaches every VM on the next
+#    start. Some Debian versions include a local/ override and some do not, so
+#    use it when it exists and append to the abstraction when it does not.
+if [ "$FIX_APPARMOR" = "1" ]; then
+  # Overridable so a host that keeps the abstraction elsewhere can be pointed at
+  # it -- and so this step can be exercised against a real file in a test instead
+  # of only being read for the right words.
+  ABS="${APPARMOR_ABS:-/etc/apparmor.d/abstractions/libvirt-qemu}"
+  ABS_LOCAL="${APPARMOR_ABS_LOCAL:-/etc/apparmor.d/local/abstractions/libvirt-qemu}"
+  if [ ! -f "$ABS" ]; then
+    S apparmor ok 'no AppArmor libvirt abstraction on this host -- nothing to do'
+  elif $SUDO grep -qF "$POOLDIR/**" "$ABS" 2>/dev/null || \
+       $SUDO grep -qF "$POOLDIR/**" "$ABS_LOCAL" 2>/dev/null; then
+    S apparmor already "$POOLDIR is already allowed in the libvirt-qemu profile"
+  else
+    $SUDO cp -n "$ABS" "$ABS.sysible-bak" 2>/dev/null || true
+    rule="  $POOLDIR/** rk,"
+    if $SUDO grep -q 'local/abstractions/libvirt-qemu' "$ABS" 2>/dev/null; then
+      $SUDO mkdir -p "$(dirname "$ABS_LOCAL")"
+      printf '%s\n' "$rule" | $SUDO tee -a "$ABS_LOCAL" >/dev/null
+      where="$ABS_LOCAL"
+    else
+      printf '%s\n' "$rule" | $SUDO tee -a "$ABS" >/dev/null
+      where="$ABS (previous kept as $ABS.sysible-bak)"
+    fi
+    $SUDO apparmor_parser -r "$ABS" >/dev/null 2>&1 || $SUDO systemctl reload apparmor >/dev/null 2>&1 || true
+    if $SUDO grep -qF "$POOLDIR/**" "$where" 2>/dev/null || $SUDO grep -qF "$POOLDIR/**" "$ABS" 2>/dev/null; then
+      S apparmor ok "qemu may now read $POOLDIR -- added to $where. Each VM picks this up when it next starts."
+    else
+      S apparmor failed "Could not add the rule to the libvirt-qemu profile."
+    fi
   fi
 fi
 """

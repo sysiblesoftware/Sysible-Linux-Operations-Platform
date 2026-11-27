@@ -4319,15 +4319,24 @@ def infra_hypervisor_fix_permissions(request: Request, body: dict = Body(...), u
     if not pool.startswith("/") or "'" in pool or ".." in pool:
         raise HTTPException(status_code=400, detail="That pool directory looks invalid.")
     remember = "1" if body.get("set_remember_owner") else "0"
+    # AppArmor is ON by default here, unlike remember_owner. On a real host it was
+    # THE cause: every file permission was already correct and the kernel refused
+    # the open anyway, because the per-domain profile libvirt generates lists a
+    # VM's own disks and not the shared backing file underneath them. A button
+    # called "Fix permissions" that leaves the actual denial in place is not
+    # fixing permissions. The rule added is narrow (read + lock on this pool only)
+    # and the step says exactly what was written and where the backup is.
+    apparmor = "0" if body.get("fix_apparmor") is False else "1"
     ok, out, err = _run_on_hypervisor(host, ssh_user, port, pw, hypervisor.REPAIR_SH,
-                                      env_prefix=f"POOLDIR='{pool}'\nSET_REMEMBER='{remember}'",
+                                      env_prefix=(f"POOLDIR='{pool}'\nSET_REMEMBER='{remember}'"
+                                                  f"\nFIX_APPARMOR='{apparmor}'"),
                                       timeout=180)
     if not ok:
         return {"ok": False, "steps": [], "output": err}
     steps = hypervisor.parse_steps(out)
     failed = [s for s in steps if s["status"] == "failed"]
     db.log_audit("hypervisor_perms_fixed", user,
-                 f"{ssh_user}@{host}:{port} {pool} remember_owner={remember} — {len(failed)} failed")
+                 f"{ssh_user}@{host}:{port} {pool} remember_owner={remember} apparmor={apparmor} — {len(failed)} failed")
     return {"ok": not failed, "steps": steps,
             "output": ("Storage permissions are correct — verified by opening the volumes as the VM process."
                        if not failed else "Still wrong: " + ", ".join(s["label"] for s in failed))}

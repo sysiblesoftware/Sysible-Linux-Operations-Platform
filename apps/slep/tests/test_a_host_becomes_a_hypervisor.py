@@ -353,3 +353,125 @@ def test_the_shared_ssh_validator_is_used_everywhere_not_copied():
         assert "_hypervisor_ssh_target(" in body, "%s validates its own SSH target" % fn
     # and the guard itself exists exactly once
     assert src.count("may use a Vault variable as the") == 1
+
+
+# ------------------------------------------- the cause it actually turned out to be
+
+def test_the_check_reads_more_than_dmesg():
+    """On a real host dmesg held NO denials while AppArmor was loaded and enforcing
+    and auditd had every one of them. Reporting "no denial" from dmesg alone sent
+    the investigation back to file permissions that were already correct."""
+    for src in ("dmesg", "journalctl -k", "/var/log/audit/audit.log"):
+        assert src in h.DIAGNOSE_SH, "the permission check does not look in %s" % src
+
+
+def test_a_pool_the_vm_user_can_read_points_above_the_filesystem():
+    """When every volume IS readable and the VMs still fail, the next place to look
+    is the security module, and the check must say so rather than report all-clear."""
+    assert "ABOVE the filesystem" in h.DIAGNOSE_SH
+
+
+def test_the_repair_can_fix_the_apparmor_denial():
+    """The denial, verbatim from a host:
+
+        apparmor="DENIED" operation="open" profile="libvirt-<uuid>"
+        name="/var/lib/libvirt/images/arch-base.qcow2" comm="qemu-system-x86"
+        requested_mask="r" denied_mask="r" fsuid=64055 ouid=64055
+
+    fsuid == ouid == libvirt-qemu: qemu was refused a file it owned."""
+    r = h.REPAIR_SH
+    assert "FIX_APPARMOR" in r
+    assert "abstractions/libvirt-qemu" in r, "the repair does not touch the profile VMs include"
+    assert "apparmor_parser -r" in r, "the profile is edited but never reloaded"
+    assert "$POOLDIR/** rk," in r, "the rule does not grant read on the pool"
+    assert "apparmor" in h.PERM_STEP_LABELS
+
+
+def test_the_apparmor_rule_is_narrow():
+    """Widening a security profile is not a thing to do casually: read and lock on
+    one pool, never write, never a wildcard over the filesystem."""
+    r = h.REPAIR_SH
+    assert "/** rwk" not in r and "/** w" not in r, "the rule grants write"
+    assert "/**/** " not in r
+    # Scoped to the AppArmor step: .sysible-bak also appears in the qemu.conf
+    # step, and a file-level assertion passed against a reverted backup here.
+    assert ".sysible-bak" in _apparmor_step(), (
+        "the AppArmor profile is edited without keeping a copy")
+
+
+def test_both_ways_debian_ships_the_profile_are_handled():
+    """Some Debian versions include a local/ override from the abstraction and some
+    do not; writing to a local file that nothing includes would silently do nothing."""
+    r = h.REPAIR_SH
+    assert "local/abstractions/libvirt-qemu" in r
+    assert "grep -q 'local/abstractions/libvirt-qemu'" in r, (
+        "the repair assumes the local override is included rather than checking")
+
+
+def _apparmor_step():
+    """The AppArmor step only. Splitting on the first FIX_APPARMOR lands on the
+    variable assignment at the top of the script, which is steps 1 and 2."""
+    return h.REPAIR_SH[h.REPAIR_SH.index("# 4. AppArmor"):]
+
+
+def test_the_repair_is_idempotent_on_the_profile():
+    step = _apparmor_step()
+    assert "S apparmor already" in step, (
+        "re-running the repair would append the same rule to the profile again")
+    assert "grep -qF" in step, "nothing checks whether the rule is already present"
+
+
+def test_fixing_the_denial_is_on_by_default():
+    """A button called "Fix permissions" that leaves the actual denial in place is
+    not fixing permissions."""
+    import inspect
+    from backend import app as backend_app
+    src = inspect.getsource(backend_app)
+    body = src[src.index("def infra_hypervisor_fix_permissions"):]
+    body = body[:body.index("\n@app.")]
+    assert 'body.get("fix_apparmor") is False' in body, (
+        "fix_apparmor is opt-in; on a real host this was the actual cause")
+    ui = (HERE / "webgui" / "frontend" / "src" / "views" / "Infrastructure.jsx").read_text(encoding="utf-8")
+    assert "const [apparmor, setApparmor] = useState(true)" in ui, (
+        "the AppArmor checkbox starts off, so the default repair leaves the denial")
+    assert "fix_apparmor: apparmor" in ui, "the UI never sends the flag"
+
+
+@pytest.mark.skipif(not _has("dash") and not _has("sh"), reason="no POSIX shell")
+def test_the_apparmor_rule_is_really_written(tmp_path):
+    """Exercised, not read for the right words: gating the whole step off went
+    unnoticed by every assertion above, because they only check the script's text."""
+    abs_file = tmp_path / "libvirt-qemu"
+    abs_file.write_text("# a packaged abstraction with no local include\n  /dev/null rw,\n")
+    pool = tmp_path / "images"
+    pool.mkdir()
+    (pool / "base.qcow2").write_bytes(b"x")
+    env = ("POOLDIR='%s'\nFIX_APPARMOR=1\nAPPARMOR_ABS='%s'\nAPPARMOR_ABS_LOCAL='%s'"
+           % (pool, abs_file, tmp_path / "local" / "libvirt-qemu"))
+    out = subprocess.run(["sh", "-c", env + "\n" + h.REPAIR_SH],
+                         capture_output=True, text=True, input="", timeout=120)
+    step = _step(h.parse_steps(out.stdout), "apparmor")
+    assert step and step["status"] == "ok", (out.stdout, out.stderr[-300:])
+    assert "%s/** rk," % pool in abs_file.read_text(), "the rule never reached the profile"
+    assert (tmp_path / "libvirt-qemu.sysible-bak").exists(), "no backup was kept"
+    # and again: no second copy of the rule
+    out2 = subprocess.run(["sh", "-c", env + "\n" + h.REPAIR_SH],
+                          capture_output=True, text=True, input="", timeout=120)
+    assert _step(h.parse_steps(out2.stdout), "apparmor")["status"] == "already"
+    assert abs_file.read_text().count("/** rk,") == 1, "the rule was appended twice"
+
+
+def test_the_local_override_is_used_when_the_abstraction_includes_it(tmp_path):
+    abs_file = tmp_path / "libvirt-qemu"
+    abs_file.write_text("#include <local/abstractions/libvirt-qemu>\n")
+    local = tmp_path / "local" / "libvirt-qemu"
+    pool = tmp_path / "images"
+    pool.mkdir()
+    env = ("POOLDIR='%s'\nFIX_APPARMOR=1\nAPPARMOR_ABS='%s'\nAPPARMOR_ABS_LOCAL='%s'"
+           % (pool, abs_file, local))
+    out = subprocess.run(["sh", "-c", env + "\n" + h.REPAIR_SH],
+                         capture_output=True, text=True, input="", timeout=120)
+    assert _step(h.parse_steps(out.stdout), "apparmor")["status"] == "ok", out.stdout
+    assert local.exists() and "/** rk," in local.read_text(), (
+        "the rule went to the abstraction even though it includes a local override")
+    assert "/** rk," not in abs_file.read_text(), "the packaged abstraction was edited anyway"
