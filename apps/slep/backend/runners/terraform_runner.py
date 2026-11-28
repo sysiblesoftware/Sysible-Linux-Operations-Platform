@@ -431,7 +431,13 @@ def launch(run_id: int) -> None:
                 from .. import infra as _infra
                 main_tf = db.project_dir(run["project_id"]) / "main.tf"
                 if main_tf.exists():
-                    patched, notes = _infra.migrate_libvirt_main_tf(main_tf.read_text())
+                    # variables.tf too: the single-image layout keeps its image
+                    # in a variable, and the network-config repair has to know
+                    # which image a cloud-init disk belongs to.
+                    _vars_tf = db.project_dir(run["project_id"]) / "variables.tf"
+                    patched, notes = _infra.migrate_libvirt_main_tf(
+                        main_tf.read_text(),
+                        _vars_tf.read_text() if _vars_tf.exists() else "")
                     if notes:
                         main_tf.write_text(patched)
                         for n in notes:

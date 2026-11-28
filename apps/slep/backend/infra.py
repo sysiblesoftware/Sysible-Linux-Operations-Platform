@@ -570,6 +570,72 @@ _NETWORK_CONFIG = (
     "    dhcp4: true\n"
 )
 
+# ...BUT ONLY FOR THE IMAGES THAT NEED IT.
+#
+# Supplying this to every image was wrong, and HOW it was wrong is the point.
+# cloud-init renders version-2 network config through Netplan, networkd or
+# NetworkManager and nothing else. Debian and Ubuntu have Netplan; RHEL-family
+# images render it through their own stack. Arch ships no Netplan, and the
+# openSUSE cloud image has shipped with neither wicked nor NetworkManager -- so
+# on those two this file renders to NOTHING.
+#
+# That alone would be harmless. The fault is the second half: with NO
+# network-config supplied, cloud-init falls back to issuing DHCP on the first
+# interface by itself -- and that fallback is what was bringing those images up.
+# A config they cannot render SUPPRESSES the fallback that was working. The file
+# added to fix Rocky is what took Arch and openSUSE out.
+#
+# Observed on a real host: four domains running, two leases.
+#     arch-1   running   (no lease)      suse-1   running   (no lease)
+#     ubuntu-1 running   192.168.122.55  rocky-1  running   192.168.122.179
+#
+# So give it to the family that provably needs it and provably renders it, and
+# leave every other image on the fallback it was already succeeding with.
+# Guessing WIDER is not the safe direction here -- guessing wider is the bug.
+_RHEL_IMAGE_RE = re.compile(
+    r"rocky|alma|centos|rhel|red[-_ ]?hat|oracle[-_ ]?linux|\bol-?[89]\b", re.I)
+
+
+def rhel_family_image(*hints) -> bool:
+    """Whether an image is RHEL-family, from its URL or its pool volume name.
+
+    Keyed on the image rather than a distro field because the image is what a
+    generated main.tf actually carries -- `source = ".../Rocky-9-...qcow2"`, or
+    `base_volume_name = "rocky9.qcow2"` -- so an existing project can be repaired
+    without asking anyone what it was built from."""
+    return any(_RHEL_IMAGE_RE.search(h or "") for h in hints)
+
+
+# Images KNOWN to be unable to render a version-2 network-config, and therefore
+# known to be harmed by being given one. Arch ships no Netplan; the openSUSE cloud
+# image has shipped with neither wicked nor NetworkManager, leaving cloud-init's
+# network module nothing to render through.
+_CANNOT_RENDER_V2_RE = re.compile(r"arch[-_ ]?linux|archlinux|manjaro|opensuse|suse|sles",
+                                  re.I)
+
+
+def cannot_render_v2_network_config(*hints) -> bool:
+    """Whether an image is KNOWN to be unable to render a version-2 config.
+
+    Deliberately a positive list, not "anything I don't recognise". An unknown
+    image gets left exactly as it is, both ways: this whole fault came from
+    acting on an absence of knowledge -- handing the file to every image because
+    nothing said not to -- and stripping it from every image nothing vouches for
+    is the same mistake pointed the other way.
+
+    It matters because removing the line changes the cloud-init ISO, and the
+    domain is `replace_triggered_by` that ISO. Getting this wrong DESTROYS AND
+    REBUILDS a VM that is up and working."""
+    return any(_CANNOT_RENDER_V2_RE.search(h or "") for h in hints)
+
+
+def _net_cfg_line(*image_hints) -> str:
+    """The cloudinit disk's network_config line, or nothing at all."""
+    if not rhel_family_image(*image_hints):
+        return ""
+    return ('  network_config = file("${path.module}/network-config.cfg")'
+            '  # sysible:rhel-family\n')
+
 
 def _libvirt_agent_block(spec) -> str:
     """The domain's qemu_agent line — ONLY when the operator chose a bridged network.
@@ -634,6 +700,10 @@ def _render_libvirt(spec, keys):
                    '  # Grow the CoW clone past the cloud image\'s tiny root (see above).\n'
                    '  size           = var.disk_size * 1073741824\n'
                    '}')
+    # Only RHEL-family images get an explicit network-config. Every other image
+    # keeps cloud-init's own DHCP fallback, which is what was already bringing
+    # them up -- and which supplying an unrenderable config silently suppresses.
+    net_cfg = _net_cfg_line(spec.get("base_image", ""), base_volume)
     # Pin to the 0.7.x line. dmacvicar/libvirt 0.9.x is a terraform-plugin-framework
     # rewrite that changed the HCL surface (nested blocks like disk/network_interface/
     # console became nested *attributes*, `cloudinit` moved, `type`/`meta_data` became
@@ -655,11 +725,7 @@ resource "libvirt_cloudinit_disk" "ci" {{
   name      = "${{var.name_prefix}}-${{count.index + 1}}-ci.iso"
   pool      = var.pool
   user_data = file("${{path.module}}/cloudinit.cfg")
-  # Explicit DHCP network-config so RHEL-family images (Rocky/Alma) bring the NIC
-  # up — Debian/Ubuntu do it implicitly, RHEL-family often don't (no lease -> apply
-  # fails with "couldn't retrieve IP address of domain").
-  network_config = file("${{path.module}}/network-config.cfg")
-  # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
+{net_cfg}  # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
   # VM). One VM gets the bare base name; several get it suffixed so they stay
   # unique. The instance-id is per-VM AND carries a hash of the cloud-init: cloud-init
   # only re-runs the per-boot user/password/key setup when the instance-id changes, so
@@ -794,7 +860,7 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  name      = "{hostslug}-${{count.index + 1}}-ci.iso"\n'
             f'  pool      = var.pool\n'
             f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
-            f'  network_config = file("${{path.module}}/network-config.cfg")\n'
+            f'{_net_cfg_line(base_image, base_volume)}'
             f'  meta_data = "instance-id: {hostslug}-${{count.index + 1}}'
             f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
             f'local-hostname: {hostslug}-${{count.index + 1}}\\n"\n}}\n\n'
@@ -833,7 +899,70 @@ def _render_libvirt_groups(spec, keys, groups):
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
-def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
+def _image_hints_for(text: str, variables_text: str, slug: str) -> tuple:
+    """What image a cloud-init disk belongs to, read out of the generated HCL.
+
+    Groups mode names everything after the group: `ci_web` sits beside
+    `base_web` (a URL) or `disk_web` (a pool volume), so the image is in the same
+    file. The single-image layout keeps its image in variables.tf instead, which
+    is why that text is passed in rather than guessed at."""
+    if not slug:
+        return tuple(
+            m.group(1) for m in re.finditer(
+                r'variable\s+"(?:base_image|base_volume)"\s*\{[^}]*?default\s*=\s*"([^"]*)"',
+                variables_text or "", re.S))
+    hints = []
+    for pat in (r'resource\s+"libvirt_volume"\s+"base_%s"\s*\{[^}]*?source\s*=\s*"([^"]*)"',
+                r'resource\s+"libvirt_volume"\s+"disk_%s"\s*\{[^}]*?base_volume_name\s*=\s*"([^"]*)"'):
+        m = re.search(pat % re.escape(slug), text, re.S)
+        if m:
+            hints.append(m.group(1))
+    return tuple(hints)
+
+
+_NET_CFG_LINE_RE = re.compile(
+    r'[ \t]*network_config\s*=\s*file\("\$\{path\.module\}/network-config\.cfg"\)'
+    r'(?:[ \t]*#[^\n]*)?\n')
+_USER_DATA_RE = re.compile(
+    r'([ \t]*user_data = file\("\$\{path\.module\}/cloudinit\.cfg"\)\n)')
+
+
+def _apply_network_config_per_image(text: str, variables_text: str = ""):
+    """Add or remove the network-config line on each cloud-init disk, by image.
+
+    Returns (text, added, removed) where the two lists name the resources, so the
+    apply log can say which VMs changed rather than announcing a repair in the
+    abstract."""
+    added, removed = [], []
+    blocks = re.split(r'(?=resource "libvirt_cloudinit_disk")', text)
+    for i, blk in enumerate(blocks):
+        m = re.match(r'resource "libvirt_cloudinit_disk" "(\w+)"', blk)
+        if not m:
+            continue
+        res = m.group(1)
+        slug = res[3:] if res.startswith("ci_") else ""
+        wants = rhel_family_image(*_image_hints_for(text, variables_text, slug))
+        has = bool(_NET_CFG_LINE_RE.search(blk))
+        if wants and not has:
+            new_blk = _USER_DATA_RE.sub(
+                r'\1  network_config = file("${path.module}/network-config.cfg")'
+                '  # sysible:rhel-family\n', blk, count=1)
+            if new_blk != blk:
+                blocks[i] = new_blk
+                added.append(res)
+        elif has and cannot_render_v2_network_config(
+                *_image_hints_for(text, variables_text, slug)):
+            # Only where it cannot be rendered. An image that renders it fine is
+            # left exactly as it is: stripping the line would change the
+            # cloud-init ISO and the domain is replace_triggered_by that ISO, so
+            # a working VM would be destroyed and rebuilt to tidy up something
+            # that was doing no harm.
+            blocks[i] = _NET_CFG_LINE_RE.sub("", blk)
+            removed.append(res)
+    return ("".join(blocks) if (added or removed) else text), added, removed
+
+
+def migrate_libvirt_main_tf(text: str, variables_text: str = "") -> tuple[str, list[str]]:
     """Bring an EXISTING libvirt project's main.tf up to the current cloud-init re-run
     behaviour, in place (the infra row doesn't store the full spec, so we patch rather
     than re-render — which also preserves any hand-edits). Two idempotent patches:
@@ -901,15 +1030,25 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
     #    family VMs on the same network succeed. Point every libvirt_cloudinit_disk at
     #    a network-config.cfg (the runner writes the file alongside main.tf). Anchor on
     #    each `user_data = file(.../cloudinit.cfg)` line; idempotent.
-    if 'network_config' not in text and 'cloudinit.cfg")' in text:
-        new = re.sub(
-            r'(user_data = file\("\$\{path\.module\}/cloudinit\.cfg"\))',
-            r'\1\n  network_config = file("${path.module}/network-config.cfg")',
-            text)
-        if new != text:
-            text = new
-            notes.append('added an explicit DHCP network-config so RHEL-family VMs '
-                         '(Rocky/Alma) bring their NIC up and get a lease')
+    #    PER IMAGE, in BOTH directions. Handing this file to every image is what
+    #    took Arch and openSUSE off the network: cloud-init renders version-2
+    #    network config only through Netplan / networkd / NetworkManager, those
+    #    images have none of them, and a config that cannot be rendered also
+    #    SUPPRESSES cloud-init's own DHCP fallback -- which was the thing bringing
+    #    them up. So an existing project is repaired in both directions: the line
+    #    is added where the image needs it and REMOVED where it does not, because
+    #    the projects that are broken right now are the ones that already have it.
+    if 'cloudinit.cfg")' in text:
+        text, changed_add, changed_del = _apply_network_config_per_image(text, variables_text)
+        if changed_add:
+            notes.append('added an explicit DHCP network-config for the RHEL-family '
+                         'VMs (' + ', '.join(changed_add) + ') so they bring their NIC '
+                         'up and get a lease')
+        if changed_del:
+            notes.append('removed the explicit network-config from ' +
+                         ', '.join(changed_del) + ' — cloud-init cannot render it on '
+                         'those images and supplying it suppressed the built-in DHCP '
+                         'they were relying on, so they booted with no address')
     # 6) Pass the host CPU through to the domain. RHEL-family guests (Rocky/Alma 9+)
     #    REQUIRE an x86-64-v2 CPU; on the default emulated QEMU CPU (v1) their glibc
     #    aborts ("CPU does not support x86-64-v2") and init panics at boot — the exact
