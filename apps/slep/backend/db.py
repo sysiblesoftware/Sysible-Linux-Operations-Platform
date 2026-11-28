@@ -122,6 +122,19 @@ def init_db() -> None:
                 created INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS hypervisors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT 'root',
+                port INTEGER NOT NULL DEFAULT 22,
+                uri TEXT NOT NULL,
+                network TEXT NOT NULL DEFAULT 'default',
+                pool TEXT NOT NULL DEFAULT 'default',
+                org_id INTEGER,
+                created INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS inventories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER,
@@ -1275,6 +1288,63 @@ def set_jump_host_prepared(jid: int, ts=None):
 def delete_jump_host(jid: int):
     with _connect() as c:
         c.execute("DELETE FROM jump_hosts WHERE id=?", (jid,))
+
+
+# A hypervisor is a HOST, not a property of one project. It was only ever
+# reachable from inside the Build-infrastructure wizard, two levels down and only
+# on the Remote branch, so an operator looking for "where do I manage my KVM
+# hosts" found nothing -- and every project re-typed the same host, user and URI.
+#
+# NO PASSWORD IS STORED. SLEP's managed key is the way in; a password is typed
+# when it is needed (installing that key the first time, or sudo on the host) and
+# is never written down. Saving one here would create a store of SSH passwords to
+# operator-chosen hosts, which is a bigger thing than saving some typing.
+def list_hypervisors(org_ids=None):
+    frag, params = _org_filter(org_ids)
+    if frag is None:
+        return []
+    with _connect() as c:
+        q = ("SELECT * FROM hypervisors" + (f" WHERE {frag}" if frag else "")
+             + " ORDER BY name")
+        return [dict(r) for r in c.execute(q, params)]
+
+
+def get_hypervisor(hid: int):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM hypervisors WHERE id=?", (hid,)).fetchone()
+    return dict(r) if r else None
+
+
+def create_hypervisor(name, uri, host="", username="root", port=22,
+                      network="default", pool="default", org_id=None):
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO hypervisors(name,host,username,port,uri,network,pool,org_id,created) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (name, host or "", username or "root", int(port or 22), uri,
+             network or "default", pool or "default", org_id, _now()))
+        return cur.lastrowid
+
+
+def update_hypervisor(hid: int, **fields):
+    """Set only the columns given. Unknown keys are ignored rather than
+    interpolated: these names reach SQL."""
+    allowed = ("name", "host", "username", "port", "uri", "network", "pool", "org_id")
+    sets, params = [], []
+    for k in allowed:
+        if k in fields:
+            sets.append(f"{k}=?")
+            params.append(fields[k])
+    if not sets:
+        return
+    params.append(hid)
+    with _connect() as c:
+        c.execute(f"UPDATE hypervisors SET {','.join(sets)} WHERE id=?", params)
+
+
+def delete_hypervisor(hid: int):
+    with _connect() as c:
+        c.execute("DELETE FROM hypervisors WHERE id=?", (hid,))
 
 
 def get_secret_org(sid: int):

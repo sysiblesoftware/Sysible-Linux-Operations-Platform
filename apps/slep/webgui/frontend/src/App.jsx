@@ -9,6 +9,7 @@ import Inventories from './views/Inventories.jsx'
 import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
 import JumpHosts from './views/JumpHosts.jsx'
+import Hypervisors from './views/Hypervisors.jsx'
 import Vault from './views/Vault.jsx'
 import Users from './views/Users.jsx'
 import Infrastructure from './views/Infrastructure.jsx'
@@ -34,6 +35,7 @@ const NAV = [
   { key: 'controllers', label: 'Controllers', icon: 'link', group: 'Reach' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'jumphosts', label: 'Jump Hosts', icon: 'jump' },
+  { key: 'hypervisors', label: 'Hypervisors', icon: 'hypervisor' },
   { key: 'vault', label: 'Variable Vault', icon: 'lock' },
   { key: 'templates', label: 'Job Templates', icon: 'template', group: 'Run' },
   { key: 'runs', label: 'Runs', icon: 'play' },
@@ -106,6 +108,7 @@ const ICONS = {
   bell: <><path d="M18 9a6 6 0 1 0-12 0c0 6-2 7-2 7h16s-2-1-2-7" /><path d="M10.5 20a2 2 0 0 0 3 0" /></>,
   cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
   jump: <><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><path d="M5 16V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v7" /><path d="M12 6V3M9 5l3-2 3 2" /></>,
+  hypervisor: <><rect x="3" y="4" width="18" height="16" rx="2" /><rect x="6.5" y="7.5" width="4.5" height="3.5" rx="1" /><rect x="13" y="7.5" width="4.5" height="3.5" rx="1" /><rect x="6.5" y="13.5" width="4.5" height="3.5" rx="1" /><line x1="13" y1="15.25" x2="17.5" y2="15.25" /></>,
   org: <><rect x="4" y="3" width="7" height="18" rx="1" /><rect x="13" y="8" width="7" height="13" rx="1" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="11" x2="7.01" y2="11" /><line x1="16" y1="12" x2="16.01" y2="12" /></>,
 }
 
@@ -224,6 +227,7 @@ export default function App() {
             : view === 'organizations' ? <Organizations />
             : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
               : view === 'inventories' ? <Inventories />
+                : view === 'hypervisors' ? <Hypervisors />
                 : view === 'infra' ? <Infrastructure onOpenProject={setProject} />
                 : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
                 : view === 'templates' ? <Templates onOpenRun={setRunId} />

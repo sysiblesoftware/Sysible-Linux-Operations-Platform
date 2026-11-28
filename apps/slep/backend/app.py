@@ -1485,6 +1485,118 @@ def jump_hosts_prepare(jid: int, request: Request, body: dict = Body(default={})
     return result
 
 
+# ------------------------------------------------------------------ hypervisors
+# A hypervisor is a HOST. It was only ever configurable from inside the
+# Build-infrastructure wizard -- pick the libvirt provider, then pick "Remote KVM
+# host over SSH", and only then did the buttons that install libvirt, fix the
+# storage permissions and explain a failed boot appear. Nothing in the rail said
+# hypervisors existed, so "I don't see a hypervisor option" is what an operator
+# with four KVM hosts actually reports, and every project re-typed the same host,
+# user and URI by hand.
+def _hv_or_404(request: Request, hid: int, level: str = "operator"):
+    hv = db.get_hypervisor(hid)
+    if not hv:
+        raise HTTPException(status_code=404, detail="Hypervisor not found.")
+    _guard_object_org(request, hv.get("org_id"), level)
+    return hv
+
+
+@app.get("/hypervisors")
+def hypervisors_list(request: Request, user: str = Depends(current_user)):
+    """The KVM hosts this platform knows, scoped to the caller's organizations."""
+    return {"hypervisors": db.list_hypervisors(_visible_org_ids(request))}
+
+
+@app.post("/hypervisors")
+def hypervisors_create(request: Request, body: dict = Body(...),
+                       user: str = Depends(require_operator)):
+    """Save a hypervisor. The URI is validated by the same allow-list that guards
+    every `virsh -c` call, because this one is stored and handed to virsh later --
+    by which time nobody is looking at the form it came from."""
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A name is required.")
+    uri = _validate_libvirt_uri(body.get("uri"))
+    host = str(body.get("host") or "").strip()
+    ssh_user = str(body.get("username") or "root").strip() or "root"
+    port = body.get("port") or 22
+    # host is optional: qemu:///system is the SLEP host itself and has no SSH target.
+    if host and not _valid_host(host):
+        raise HTTPException(status_code=400,
+                            detail="Invalid host — a hostname, IPv4, or [IPv6], no spaces.")
+    if not _valid_user(ssh_user):
+        raise HTTPException(status_code=400,
+                            detail="Invalid username — letters, digits, . _ - (no leading '-').")
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Port must be a number.")
+    if not (0 < port <= 65535):
+        raise HTTPException(status_code=400, detail="Port must be 1–65535.")
+    org_id = _coerce_org_id(body.get("org_id"))
+    _require_org(request, org_id, "operator")
+    hid = db.create_hypervisor(
+        name, uri, host=host, username=ssh_user, port=port,
+        network=infra._one_line(str(body.get("network") or "default")).strip() or "default",
+        pool=infra._one_line(str(body.get("pool") or "default")).strip() or "default",
+        org_id=org_id)
+    db.log_audit("hypervisor_created", user, f"#{hid} {name} {uri}")
+    return db.get_hypervisor(hid)
+
+
+@app.patch("/hypervisors/{hid}")
+def hypervisors_update(hid: int, request: Request, body: dict = Body(...),
+                       user: str = Depends(require_operator)):
+    _hv_or_404(request, hid)
+    fields = {}
+    if "name" in body:
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="A name is required.")
+        fields["name"] = name
+    if "uri" in body:
+        fields["uri"] = _validate_libvirt_uri(body.get("uri"))
+    if "host" in body:
+        host = str(body.get("host") or "").strip()
+        if host and not _valid_host(host):
+            raise HTTPException(status_code=400, detail="Invalid host.")
+        fields["host"] = host
+    if "username" in body:
+        ssh_user = str(body.get("username") or "root").strip() or "root"
+        if not _valid_user(ssh_user):
+            raise HTTPException(status_code=400, detail="Invalid username.")
+        fields["username"] = ssh_user
+    if "port" in body:
+        try:
+            port = int(body.get("port") or 22)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Port must be a number.")
+        if not (0 < port <= 65535):
+            raise HTTPException(status_code=400, detail="Port must be 1–65535.")
+        fields["port"] = port
+    for key in ("network", "pool"):
+        if key in body:
+            fields[key] = infra._one_line(str(body.get(key) or "default")).strip() or "default"
+    if "org_id" in body:
+        org_id = _coerce_org_id(body.get("org_id"))
+        _require_org(request, org_id, "operator")
+        fields["org_id"] = org_id
+    db.update_hypervisor(hid, **fields)
+    db.log_audit("hypervisor_updated", user, f"#{hid} {','.join(sorted(fields))}")
+    return db.get_hypervisor(hid)
+
+
+@app.delete("/hypervisors/{hid}")
+def hypervisors_delete(hid: int, request: Request, user: str = Depends(require_operator)):
+    """Forget a hypervisor. Nothing on the host is touched and no project changes:
+    a project's URI is baked into its own variables.tf, so an apply keeps working
+    against a host that is no longer listed here."""
+    hv = _hv_or_404(request, hid)
+    db.delete_hypervisor(hid)
+    db.log_audit("hypervisor_deleted", user, f"#{hid} {hv.get('name')}")
+    return {"status": "deleted"}
+
+
 # ------------------------------------------------------------------ users (RBAC admin)
 @app.get("/users")
 def users_list(user: str = Depends(require_superuser)):
@@ -4255,6 +4367,24 @@ def _hypervisor_ssh_target(request: Request, body: dict, user: str, audit_tag: s
     and a copy each is how the Vault-reference guard below ends up enforced in
     three places out of four."""
     import re
+    # A SAVED hypervisor may stand in for the four fields. Resolved here, in the
+    # one validator all five action endpoints already go through, so picking a
+    # host from the new Hypervisors page reaches exactly the same checks as typing
+    # it -- including the org guard, which is why it is resolved rather than
+    # trusted: an id from one organization must not act on another's host.
+    hid = body.get("hypervisor_id")
+    if hid not in (None, "", 0, "0"):
+        try:
+            hv = db.get_hypervisor(int(hid))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="That hypervisor id looks invalid.")
+        if not hv:
+            raise HTTPException(status_code=404, detail="Hypervisor not found.")
+        _guard_object_org(request, hv.get("org_id"), "operator")
+        body = dict(body)
+        body.setdefault("host", hv.get("host") or "")
+        body.setdefault("user", hv.get("username") or "root")
+        body.setdefault("port", str(hv.get("port") or 22))
     host = infra._one_line(str(body.get("host") or "")).strip()
     if host and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]+", host):
         raise HTTPException(status_code=400, detail="That host name/IP looks invalid.")
