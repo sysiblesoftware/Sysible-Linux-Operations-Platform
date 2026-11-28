@@ -916,13 +916,31 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
     #    "stuck, no lease, no console" symptom — while Debian/Ubuntu still boot on v1.
     #    Add `cpu { mode = "host-passthrough" }` to every libvirt_domain that lacks a
     #    cpu mode. Anchor on each domain's cloudinit line; idempotent.
-    if 'host-passthrough' not in text and 'cloudinit = libvirt_cloudinit_disk.' in text:
-        new = re.sub(
-            r'(cloudinit = libvirt_cloudinit_disk\.\w+\[count\.index\]\.id)',
-            r'cpu { mode = "host-passthrough" }\n  \1',
-            text)
-        if new != text:
-            text = new
+    #    PER DOMAIN, not per file. This guard used to be `'host-passthrough' not in
+    #    text`, which reads the WHOLE main.tf: the moment one domain had the CPU,
+    #    every other domain was skipped for good. In groups mode -- a resource per
+    #    group, vm_arch, vm_suse, vm_ubuntu -- that strands exactly the guests that
+    #    need it while the ones that boot fine on an emulated v1 CPU look healthy,
+    #    which is indistinguishable from "only some distros fail" and sends the
+    #    search to the network. Reproduced: three domains, one already patched, the
+    #    other two left without a CPU and no note to say so.
+    if 'cloudinit = libvirt_cloudinit_disk.' in text:
+        blocks = re.split(r'(?=resource "libvirt_domain")', text)
+        changed = False
+        for i, blk in enumerate(blocks):
+            if not blk.startswith('resource "libvirt_domain"'):
+                continue
+            if re.search(r'^\s*cpu\s*\{', blk, re.M):
+                continue            # this domain already has one
+            patched_blk = re.sub(
+                r'(cloudinit = libvirt_cloudinit_disk\.\w+\[count\.index\]\.id)',
+                r'cpu { mode = "host-passthrough" }\n  \1',
+                blk, count=1)
+            if patched_blk != blk:
+                blocks[i] = patched_blk
+                changed = True
+        if changed:
+            text = "".join(blocks)
             notes.append('set the VM CPU to host-passthrough so RHEL-family guests '
                          '(Rocky/Alma 9+) get the x86-64-v2 CPU they require and stop '
                          'panicking at boot')
