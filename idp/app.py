@@ -399,10 +399,27 @@ def set_grant(subject_kind: str, subject: str, app: str, role: str,
         if org_id is not None and not c.execute(
                 "SELECT 1 FROM organizations WHERE id=?", (org_id,)).fetchone():
             raise ValueError("no such organization")
+        # DELETE then INSERT, rather than ON CONFLICT ... DO UPDATE.
+        #
+        # SQLite treats NULLs as DISTINCT in a UNIQUE index, so for an org-wide
+        # grant — org_id IS NULL, which is the common case — the conflict never
+        # fired and a SECOND row was inserted beside the first. effective_role
+        # takes the most privileged match, so the old row kept winning: setting
+        # a superuser to auditor left them superuser, the Access page showed two
+        # grants for one subject and app, and nothing reported an error.
+        #
+        # Demonstrated: two inserts with org_id NULL leave rows
+        #   (1, None, 'superuser'), (2, None, 'auditor')
+        # while the same pair with org_id 1 correctly leaves one.
+        #
+        # `IS` is SQLite's NULL-safe comparison, so one statement covers both
+        # the org-wide and the per-organization case. The UNIQUE constraint
+        # stays as a backstop for the non-NULL half.
+        c.execute("DELETE FROM grants WHERE subject_kind=? AND subject=? "
+                  "AND app=? AND org_id IS ?",
+                  (subject_kind, subject, app, org_id))
         c.execute("INSERT INTO grants(subject_kind,subject,org_id,app,role,created_at) "
-                  "VALUES(?,?,?,?,?,?) "
-                  "ON CONFLICT(subject_kind,subject,org_id,app) "
-                  "DO UPDATE SET role=excluded.role",
+                  "VALUES(?,?,?,?,?,?)",
                   (subject_kind, subject, org_id, app, role, int(time.time())))
 
 

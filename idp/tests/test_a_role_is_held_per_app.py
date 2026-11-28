@@ -411,3 +411,106 @@ def test_the_ui_calls_it_admin_while_the_wire_says_superuser(idp):
     r = c.get("/admin/access")
     assert ">Admin<" in r.text or "Admin</option>" in r.text, (
         "the page shows the raw wire value to the operator")
+
+
+# ------------------------------------------------- revocation takes effect now
+
+def test_revoking_a_grant_locks_the_app_immediately(idp):
+    """Not at next sign-in. /auth/verify re-resolves on EVERY request, so the
+    session that was already open stops working the moment the grant goes.
+
+    This is the half of an authorization change that is easy to get wrong and
+    impossible to notice: the person being removed keeps working, and whoever
+    removed them has no reason to check."""
+    c, m = idp
+    _mkuser(m, "dana", role="auditor")
+    m.set_grant("user", "dana", "slep", "operator")
+    m._set_setting("rbac_enforced", "1")
+    _login(c, "dana", "password12345")
+    assert c.get("/auth/verify", headers={"X-Sysible-App": "/slep"}).status_code == 204
+
+    gid = [g["id"] for g in m.list_grants()
+           if g["subject"] == "dana" and g["app"] == "slep"][0]
+    m.revoke_grant(gid)
+
+    assert c.get("/auth/verify", headers={"X-Sysible-App": "/slep"}).status_code == 403, (
+        "a revoked grant left an open session still able to reach the app")
+
+
+def test_removing_someone_from_a_group_locks_them_out_immediately(idp):
+    """Same again through the indirection a group adds, because that is where
+    an implementation is most likely to have cached something."""
+    c, m = idp
+    _mkuser(m, "dana", role="auditor")
+    m.create_group("platform")
+    gid = m.list_groups()[0]["id"]
+    m.add_group_member(gid, "dana")
+    m.set_grant("group", "platform", "slep", "operator")
+    m._set_setting("rbac_enforced", "1")
+    _login(c, "dana", "password12345")
+    assert c.get("/auth/verify", headers={"X-Sysible-App": "/slep"}).status_code == 204
+    m.remove_group_member(gid, "dana")
+    assert c.get("/auth/verify", headers={"X-Sysible-App": "/slep"}).status_code == 403, (
+        "leaving the group left an open session still able to reach the app")
+
+
+def test_a_role_downgrade_is_also_immediate(idp):
+    """The quieter half: not losing access, but losing WRITE access. An operator
+    demoted to auditor must stop being stamped operator on the next request."""
+    c, m = idp
+    _mkuser(m, "dana", role="auditor")
+    m.set_grant("user", "dana", "slep", "superuser")
+    m._set_setting("rbac_enforced", "1")
+    _login(c, "dana", "password12345")
+    r = c.get("/auth/verify", headers={"X-Sysible-App": "/slep"})
+    assert r.headers["X-Sysible-Role"] == "superuser"
+    m.set_grant("user", "dana", "slep", "auditor")        # same row, lower role
+    r = c.get("/auth/verify", headers={"X-Sysible-App": "/slep"})
+    assert r.headers["X-Sysible-Role"] == "auditor", (
+        "a demotion did not reach an already-open session")
+
+
+def test_setting_a_grant_twice_leaves_one_row(idp):
+    """The mechanism behind the demotion bug, pinned directly.
+
+    SQLite treats NULLs as DISTINCT in a UNIQUE index, so `ON CONFLICT
+    (subject_kind, subject, org_id, app) DO UPDATE` never fired for an ORG-WIDE
+    grant — org_id IS NULL, the common case — and quietly inserted a second row
+    beside the first. Since effective_role takes the most privileged match, the
+    old row kept winning and a demotion did nothing at all."""
+    c, m = idp
+    _mkuser(m, "dana")
+    m.set_grant("user", "dana", "slep", "superuser")
+    m.set_grant("user", "dana", "slep", "auditor")
+    rows = [g for g in m.list_grants() if g["subject"] == "dana" and g["app"] == "slep"]
+    assert len(rows) == 1, "a second grant row was inserted instead of replacing: %r" % (
+        [(r["org_id"], r["role"]) for r in rows],)
+    assert rows[0]["role"] == "auditor"
+    assert m.effective_role("dana", "slep") == "auditor"
+
+
+def test_the_same_holds_for_a_grant_scoped_to_an_organization(idp):
+    """The non-NULL half worked all along; it must keep working."""
+    c, m = idp
+    _mkuser(m, "dana")
+    m.create_org("acme")
+    org = m.list_orgs()[0]["id"]
+    m.set_grant("user", "dana", "slep", "superuser", org_id=org)
+    m.set_grant("user", "dana", "slep", "auditor", org_id=org)
+    rows = [g for g in m.list_grants() if g["subject"] == "dana" and g["app"] == "slep"]
+    assert len(rows) == 1 and rows[0]["role"] == "auditor"
+
+
+def test_an_org_grant_and_an_org_wide_grant_are_different_rows(idp):
+    """...and the fix must not collapse them. "operator everywhere" and
+    "superuser in acme" are two separate, legitimate grants."""
+    c, m = idp
+    _mkuser(m, "dana")
+    m.create_org("acme")
+    org = m.list_orgs()[0]["id"]
+    m.set_grant("user", "dana", "slep", "operator")               # org-wide
+    m.set_grant("user", "dana", "slep", "superuser", org_id=org)  # in acme only
+    rows = [g for g in m.list_grants() if g["subject"] == "dana" and g["app"] == "slep"]
+    assert len(rows) == 2, "the two grants were collapsed into one"
+    assert m.effective_role("dana", "slep") == "operator"
+    assert m.effective_role("dana", "slep", org_id=org) == "superuser"
