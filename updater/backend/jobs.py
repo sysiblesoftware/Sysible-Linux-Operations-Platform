@@ -612,10 +612,34 @@ def services(compose: Path) -> list[dict]:
     is on the page-load path, so a slow daemon must degrade to an empty list, not
     hang Administration."""
     import json as _json
+    # ASK ABOUT THE PROFILE-GATED SERVICES TOO. The Controller, SLEP and Connect
+    # are declared `profiles: ["integrated"]`, and compose does not consider a
+    # service whose profile is inactive -- not for `up`, and not for `ps` either.
+    # So this read listed six of nine services and the page reported the three
+    # missing ones as "No container -- docker compose ps does not list the
+    # controller service", which is literally true and completely wrong: the
+    # containers were up and the operator was working in SLEP at the time.
+    #
+    # Demonstrated on compose v5.7.1 with a two-service file, one gated:
+    #   docker compose config --services                     -> always
+    #   COMPOSE_PROFILES=integrated docker compose config -s  -> always, gated
+    #
+    # `ps` has no --profile flag, so this goes through the environment. Merged
+    # with whatever is inherited rather than replacing it, so an operator's own
+    # COMPOSE_PROFILES is not dropped by a status read. The literal profile name
+    # is used rather than the "*" wildcard: the wildcard needs a newer compose,
+    # and on an older one it would silently read as a profile nobody declared --
+    # i.e. exactly the bug this is fixing, back again and harder to see.
+    env = dict(os.environ)
+    have = [x.strip() for x in (env.get("COMPOSE_PROFILES") or "").split(",") if x.strip()]
+    if wiring.INTEGRATED_PROFILE not in have:
+        have.append(wiring.INTEGRATED_PROFILE)
+    env["COMPOSE_PROFILES"] = ",".join(have)
     try:
         p = subprocess.run(_compose_mod.normalize(
                                ["docker", "compose", "ps", "--all", "--format", "json"]),
-                           cwd=str(compose), capture_output=True, text=True, timeout=15)
+                           cwd=str(compose), capture_output=True, text=True, timeout=15,
+                           env=env)
     except Exception:
         return []
     if p.returncode != 0:
