@@ -132,7 +132,13 @@ MIGRATE = (REPO / "tools" / "migrate-to-integrated").read_text(encoding="utf-8")
 
 
 def _bring_up_line():
-    m = re.search(r"^run_sh \"cd '\$HERE'.*?up -d --build.*$", MIGRATE, re.M)
+    # `--build` is no longer literal here: the migration only builds when an app
+    # image is actually missing, so that a repair does not need a registry (the
+    # ISO bakes the images for exactly that reason). Match the bring-up by what
+    # identifies it -- compose `up -d` inside run_sh -- rather than by a flag
+    # whose presence is now conditional, so these two assertions keep testing
+    # what they were written to test.
+    m = re.search(r"^run_sh \"cd '\$HERE'.*? up -d .*$", MIGRATE, re.M)
     assert m, "the migration's bring-up is gone or no longer in the expected shape"
     return m.group(0)
 
