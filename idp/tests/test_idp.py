@@ -86,7 +86,19 @@ def test_auth_me(cl):
     # field is the thing worth catching.
     rev = j.pop("rev", "__missing__")
     assert isinstance(rev, str), f"/auth/me reports the build as {rev!r}"
-    assert j == {"authenticated": True, "user": "admin", "role": "superuser", "must_change": False}
+    import app as idp_app
+    assert j == {
+        "authenticated": True, "user": "admin", "role": "superuser", "must_change": False,
+        # Per-app roles, so the portal can grey out what this account cannot open
+        # rather than showing tiles that 403 when clicked. Enforcement is OFF on a
+        # fresh install, so every app reads at the global role: the endpoint must
+        # not advertise a restriction that is not in force.
+        "apps": {a: "superuser" for a in idp_app.APPS},
+        # The bootstrap superuser is carried into the grant model by migrate_rbac,
+        # which is what keeps the person who has to do the granting able to log in.
+        "platform_admin": True,
+        "rbac_enforced": False,
+    }
 
 
 def test_logout_invalidates_session(cl):

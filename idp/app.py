@@ -87,6 +87,21 @@ _LOGIN_ATTEMPTS_MAX_KEYS = int(os.environ.get("SLOP_LOGIN_MAX_KEYS", "4096"))
 # The three canonical SLOP roles, most→least privileged. Each app maps these onto
 # its own vocabulary (e.g. SLEP: auditor→viewer). Keep this list authoritative.
 ROLES = ("superuser", "operator", "auditor")
+# Least→most privileged, so two grants can be compared.
+_ROLE_RANK = {r: i for i, r in enumerate(reversed(ROLES))}
+
+# The apps a role can be granted in. Kept as a literal rather than derived from
+# _APP_ADMIN (defined further down, with the admin UI) so the storage layer has no
+# forward reference into the presentation layer; a test pins the two together.
+APPS = ("controller", "slep", "connect", "baseline", "flashback", "visualizer")
+ANY_APP = "*"
+SUBJECT_KINDS = ("user", "group")
+
+# What the UI calls `superuser`. The wire value is unchanged on purpose: every app
+# validates X-Sysible-Role against its own tuple and REFUSES a value it does not
+# know, so renaming it here would lock every app out until all of them shipped the
+# new word together.
+ROLE_LABELS = {"superuser": "Admin", "operator": "Operator", "auditor": "Auditor"}
 
 # Accepted username shape at CREATION time (existing/bootstrap accounts are never
 # re-validated). Keep it to a portable identifier set so the same name is valid as
@@ -133,6 +148,281 @@ def _init_db() -> None:
                    expires_at  INTEGER NOT NULL
                )"""
         )
+        # ---- who may do what, and where ---------------------------------
+        # SLOP owns identity. Before this, `users.role` was ONE role for the whole
+        # platform: an operator was an operator of every app, and an organization
+        # was a concept that lived inside SLEP only. These tables move both up here
+        # so a grant can say "operator of the Controller, in this organization" and
+        # nothing else.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS organizations (
+                   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name       TEXT NOT NULL UNIQUE,
+                   created_at INTEGER NOT NULL
+               )"""
+        )
+        # `groups` is a keyword in enough SQL dialects to be worth avoiding.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS user_groups (
+                   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name       TEXT NOT NULL UNIQUE,
+                   created_at INTEGER NOT NULL
+               )"""
+        )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS group_members (
+                   group_id INTEGER NOT NULL,
+                   username TEXT NOT NULL,
+                   PRIMARY KEY (group_id, username)
+               )"""
+        )
+        # One row = one grant. org_id NULL means every organization; app '*' means
+        # every app. A user's effective role is the MOST privileged grant that
+        # matches, whether it reached them directly or through a group.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS grants (
+                   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                   subject_kind TEXT NOT NULL,
+                   subject      TEXT NOT NULL,
+                   org_id       INTEGER,
+                   app          TEXT NOT NULL,
+                   role         TEXT NOT NULL,
+                   created_at   INTEGER NOT NULL,
+                   UNIQUE (subject_kind, subject, org_id, app)
+               )"""
+        )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS platform_settings (
+                   key   TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+               )"""
+        )
+        # Administering SLOP itself (creating organizations, granting roles) is
+        # deliberately NOT the same thing as being an administrator of every app.
+        _add_column(c, "users", "platform_admin", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _add_column(c: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Add a column if it isn't there. sqlite has no ADD COLUMN IF NOT EXISTS, and
+    this is the first schema change the IdP has ever made to an existing table."""
+    have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+    if column not in have:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _setting(key: str, default: str = "") -> str:
+    with _db() as c:
+        r = c.execute("SELECT value FROM platform_settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def _set_setting(key: str, value: str) -> None:
+    with _db() as c:
+        c.execute("INSERT INTO platform_settings(key,value) VALUES(?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
+def rbac_enforced() -> bool:
+    """Whether per-app grants actually decide access yet.
+
+    Off by default, and deliberately. Turning the new model on is a revocation:
+    until this is flipped, /auth/verify keeps stamping the global role exactly as
+    it always has, so an upgrade cannot lock a running platform's operators out of
+    every app before anyone has had the chance to grant them anything."""
+    return _setting("rbac_enforced", "0") == "1"
+
+
+def effective_role(username: str, app: str, org_id: int | None = None) -> str | None:
+    """The role `username` holds in `app`, or None if they hold none.
+
+    The most privileged matching grant wins, and a grant reaches a user either
+    directly or through a group they belong to. A grant for app '*' counts for
+    every app; a grant with org_id NULL counts in every organization. Asking about
+    a specific organization also matches the org-wide grants, because "operator
+    everywhere" must not be narrower than "operator here"."""
+    if app != ANY_APP and app not in APPS:
+        return None
+    with _db() as c:
+        rows = c.execute(
+            """SELECT g.role FROM grants g
+                WHERE g.app IN (?, ?)
+                  AND (g.org_id IS NULL OR g.org_id = ?)
+                  AND ( (g.subject_kind='user'  AND g.subject = ?)
+                     OR (g.subject_kind='group' AND g.subject IN (
+                            SELECT ug.name FROM user_groups ug
+                              JOIN group_members gm ON gm.group_id = ug.id
+                             WHERE gm.username = ?)) )""",
+            (app, ANY_APP, org_id, username, username),
+        ).fetchall()
+    ranked = [r["role"] for r in rows if r["role"] in ROLES]
+    if not ranked:
+        return None
+    return max(ranked, key=lambda r: _ROLE_RANK[r])
+
+
+def migrate_rbac() -> None:
+    """Carry today's administrators into the grant model. Runs once, idempotently.
+
+    Only administrators come across, which is the decision taken deliberately:
+    everyone else is re-granted on purpose rather than inheriting access nobody
+    chose for them. Each existing superuser becomes a platform administrator AND
+    gets a wildcard superuser grant, so the people who have to do the granting can
+    still reach everything to do it.
+
+    Nothing is revoked here. Enforcement is a separate switch (rbac_enforced), so
+    this migration is safe to run on a live platform: it only adds rows."""
+    if _setting("rbac_migrated") == "1":
+        return
+    now = int(time.time())
+    with _db() as c:
+        supers = [r["username"] for r in
+                  c.execute("SELECT username FROM users WHERE role='superuser'").fetchall()]
+        for u in supers:
+            c.execute("UPDATE users SET platform_admin=1 WHERE username=?", (u,))
+            c.execute("INSERT OR IGNORE INTO grants"
+                      "(subject_kind,subject,org_id,app,role,created_at) "
+                      "VALUES('user',?,NULL,?,'superuser',?)", (u, ANY_APP, now))
+    _set_setting("rbac_migrated", "1")
+
+
+def access_report() -> list[dict]:
+    """Who would lose what the moment enforcement is turned on.
+
+    This is the whole point of the switch being separate. Flipping it is a
+    revocation, and an upgrade that silently removes an operator's access to every
+    app -- then shows them a login that works and an app that 403s -- is indefensible.
+    So the report names every account, the apps it would keep, and the apps it
+    would lose, and the UI refuses to be cheerful about it."""
+    with _db() as c:
+        users = c.execute("SELECT username, role, platform_admin FROM users "
+                          "ORDER BY username").fetchall()
+    out = []
+    for u in users:
+        keeps, loses = [], []
+        for app in APPS:
+            (keeps if effective_role(u["username"], app) else loses).append(app)
+        out.append({"username": u["username"], "role": u["role"],
+                    "platform_admin": bool(u["platform_admin"]),
+                    "keeps": keeps, "loses": loses})
+    return out
+
+
+# ---- organizations, groups, grants -------------------------------------
+def list_orgs() -> list[sqlite3.Row]:
+    with _db() as c:
+        return c.execute("SELECT * FROM organizations ORDER BY name").fetchall()
+
+
+def create_org(name: str) -> None:
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO organizations(name,created_at) VALUES(?,?)",
+                  (name, int(time.time())))
+
+
+def delete_org(org_id: int) -> None:
+    """Deleting an organization takes its grants with it. A grant pointing at an
+    organization that no longer exists would be unreachable but still readable, and
+    an org id is reused by AUTOINCREMENT only after a vacuum -- not a risk worth
+    carrying for a row nobody can see."""
+    with _db() as c:
+        c.execute("DELETE FROM grants WHERE org_id=?", (org_id,))
+        c.execute("DELETE FROM organizations WHERE id=?", (org_id,))
+
+
+def list_groups() -> list[sqlite3.Row]:
+    with _db() as c:
+        return c.execute("SELECT * FROM user_groups ORDER BY name").fetchall()
+
+
+def create_group(name: str) -> None:
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO user_groups(name,created_at) VALUES(?,?)",
+                  (name, int(time.time())))
+
+
+def delete_group(group_id: int) -> None:
+    with _db() as c:
+        r = c.execute("SELECT name FROM user_groups WHERE id=?", (group_id,)).fetchone()
+        if r:
+            c.execute("DELETE FROM grants WHERE subject_kind='group' AND subject=?", (r["name"],))
+        c.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+        c.execute("DELETE FROM user_groups WHERE id=?", (group_id,))
+
+
+def group_members(group_id: int) -> list[str]:
+    with _db() as c:
+        return [r["username"] for r in
+                c.execute("SELECT username FROM group_members WHERE group_id=? "
+                          "ORDER BY username", (group_id,)).fetchall()]
+
+
+def add_group_member(group_id: int, username: str) -> None:
+    with _db() as c:
+        if not c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+            raise ValueError("no such user")
+        c.execute("INSERT OR IGNORE INTO group_members(group_id,username) VALUES(?,?)",
+                  (group_id, username))
+
+
+def remove_group_member(group_id: int, username: str) -> None:
+    with _db() as c:
+        c.execute("DELETE FROM group_members WHERE group_id=? AND username=?",
+                  (group_id, username))
+
+
+def list_grants() -> list[sqlite3.Row]:
+    with _db() as c:
+        return c.execute(
+            "SELECT g.*, o.name AS org_name FROM grants g "
+            "LEFT JOIN organizations o ON o.id = g.org_id "
+            "ORDER BY g.subject_kind, g.subject, g.app").fetchall()
+
+
+def set_grant(subject_kind: str, subject: str, app: str, role: str,
+              org_id: int | None = None) -> None:
+    """Create or move one grant. Validated here rather than at the callers, because
+    `app` and `role` reach SQL and X-Sysible-Role respectively, and an app that is
+    handed a role it does not recognise refuses the request outright."""
+    if subject_kind not in SUBJECT_KINDS:
+        raise ValueError("subject must be a user or a group")
+    if role not in ROLES:
+        raise ValueError("role must be one of: " + ", ".join(ROLES))
+    if app != ANY_APP and app not in APPS:
+        raise ValueError("unknown app: " + app)
+    with _db() as c:
+        if subject_kind == "user":
+            if not c.execute("SELECT 1 FROM users WHERE username=?", (subject,)).fetchone():
+                raise ValueError("no such user")
+        else:
+            if not c.execute("SELECT 1 FROM user_groups WHERE name=?", (subject,)).fetchone():
+                raise ValueError("no such group")
+        if org_id is not None and not c.execute(
+                "SELECT 1 FROM organizations WHERE id=?", (org_id,)).fetchone():
+            raise ValueError("no such organization")
+        c.execute("INSERT INTO grants(subject_kind,subject,org_id,app,role,created_at) "
+                  "VALUES(?,?,?,?,?,?) "
+                  "ON CONFLICT(subject_kind,subject,org_id,app) "
+                  "DO UPDATE SET role=excluded.role",
+                  (subject_kind, subject, org_id, app, role, int(time.time())))
+
+
+def revoke_grant(grant_id: int) -> None:
+    with _db() as c:
+        c.execute("DELETE FROM grants WHERE id=?", (grant_id,))
+
+
+def app_from_path(path: str) -> str:
+    """The app a request is for, from its mount prefix. '' means SLOP's own portal.
+
+    The gateway stamps X-Sysible-App with the mount prefix it matched ('/slep'),
+    because a role is granted per app and the IdP cannot answer "may this person
+    in?" without knowing which one. Anything that is not a known app reads as the
+    portal, which is the safe direction: the portal is a launcher and shows people
+    what they can and cannot reach, so it must stay open to someone holding no
+    grants at all -- otherwise the only page that could explain the situation is
+    the one they are locked out of."""
+    first = (path or "").strip().lstrip("/").split("/")[0].split("?")[0].lower()
+    return first if first in APPS else ""
 
 
 def _hash_password(password: str) -> str:
@@ -1123,6 +1413,7 @@ window.pushToast=function(msg,opts){
 # ever showed the whole set and none of them said where you were.
 _ADMIN_SECTIONS = (
     ("accounts", "/admin", "Accounts"),
+    ("access", "/admin/access", "Access"),
     ("apps", "/admin/apps", "Apps"),
     ("settings", "/admin/settings", "Configuration"),
     ("tls", "/admin/tls", "TLS"),
@@ -1328,6 +1619,8 @@ async def _security_headers(request: Request, call_next):
 def _startup() -> None:
     _init_db()
     _bootstrap_admin()
+    # Adds rows only; enforcement is the separate rbac_enforced switch.
+    migrate_rbac()
     _sweep_expired_sessions(force=True)
 
 
@@ -1355,11 +1648,24 @@ def auth_verify(request: Request) -> Response:
     user = _get_user(sess["username"])
     if not user or user["must_change"]:
         return Response(status_code=401, headers={"Cache-Control": "no-store"})
+    # WHICH app, and therefore which grant. Until enforcement is switched on this
+    # is the old behaviour byte for byte -- one global role stamped for every app
+    # -- because turning the per-app model on is a revocation and must be somebody's
+    # decision, not a side effect of installing an update.
+    app = app_from_path(request.headers.get("X-Sysible-App", ""))
+    role = user["role"]
+    if app and rbac_enforced():
+        role = effective_role(user["username"], app)
+        if role is None:
+            # 403, which the gateway turns into a redirect to /login -- and /login
+            # renders the no-access page rather than bouncing straight back here,
+            # or the browser would loop between the two forever.
+            return Response(status_code=403, headers={"Cache-Control": "no-store"})
     return Response(
         status_code=204,
         headers={
             "X-Sysible-User": user["username"],
-            "X-Sysible-Role": user["role"],
+            "X-Sysible-Role": role,
             "Cache-Control": "no-store",
         },
     )
@@ -1371,8 +1677,18 @@ def auth_me(request: Request):
     if not sess:
         return JSONResponse({"authenticated": False}, status_code=401)
     u = _get_user(sess["username"])
+    # Per-app roles, so the portal can show what this account can actually open
+    # instead of nine tiles of which some 403 when clicked. While enforcement is
+    # off every app is open at the global role, and this says so rather than
+    # advertising a restriction that is not in force yet.
+    apps = ({a: effective_role(u["username"], a) for a in APPS}
+            if (u and rbac_enforced()) else
+            {a: (u["role"] if u else None) for a in APPS})
     return {
         "authenticated": True,
+        "apps": {a: r for a, r in apps.items() if r},
+        "platform_admin": bool(u["platform_admin"]) if u else False,
+        "rbac_enforced": rbac_enforced(),
         "user": sess["username"],
         # Report the LIVE role from the user row (like /auth/verify), not the value
         # frozen into the session at login. Role changes drop sessions today, so the
@@ -1411,6 +1727,32 @@ def _login_form(next_url: str, msg: str = "", csrf: str = "") -> str:
     return _page("Sign in · SLOP", body)
 
 
+def _no_access_page(user: sqlite3.Row, want: str, tok: str) -> Response:
+    """"You are signed in, and you may not open this." Said plainly, with what the
+    account CAN open, because the alternative an operator actually meets is a
+    redirect loop or a bare 403 with no clue which of nine apps refused them."""
+    label = _APP_ADMIN.get(want, (want.title(),))[0]
+    mine = [(a, effective_role(user["username"], a)) for a in APPS]
+    mine = [(a, r) for a, r in mine if r]
+    if mine:
+        have = ("<p class=sub>This account can open: "
+                + ", ".join("<b>%s</b> (%s)" % (escape(_APP_ADMIN.get(a, (a.title(),))[0]),
+                                                escape(ROLE_LABELS.get(r, r)))
+                            for a, r in mine) + ".</p>")
+    else:
+        have = ("<p class=sub>This account holds no role in any app yet. That is what a "
+                "new account looks like until an administrator grants it one.</p>")
+    body = ("<h1>No access to %s</h1>"
+            "<p class=sub>You are signed in as <b>%s</b>, but this account has not been "
+            "granted a role in %s.</p>%s"
+            "<p class=sub>A Sysible administrator can grant it under "
+            "Administration &middot; Access. <a href='/'>Back to the portal &rarr;</a></p>"
+            % (escape(label), escape(user["username"]), escape(label), have))
+    resp = HTMLResponse(_page("No access", body), status_code=403)
+    _set_csrf_cookie(resp, tok)
+    return resp
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request, next: str = "/"):
     nxt = _safe_next(next)
@@ -1421,6 +1763,14 @@ def login_get(request: Request, next: str = "/"):
         # /auth/verify keeps 401'ing while must_change is set, so redirecting to it
         # would bounce the browser app -> /login -> app forever.
         u = _get_user(sess["username"])
+        # Signed in, but holding no role in the app they were sent here from. The
+        # gateway answers a 403 from /auth/verify by redirecting HERE, so
+        # redirecting back would loop the browser between the two forever -- the
+        # same trap the must_change case above exists to avoid. Say it instead.
+        want = app_from_path(nxt)
+        if u and not u["must_change"] and want and rbac_enforced() \
+                and effective_role(u["username"], want) is None:
+            return _no_access_page(u, want, tok)
         dest = "/account?first=1" if (u and u["must_change"]) else nxt
         resp: Response = RedirectResponse(dest, status_code=302)
     else:
@@ -2186,6 +2536,309 @@ def _apps_page(sess: sqlite3.Row, app_key: str, tab: str) -> str:
     # and nobody could see the rule.
     return _page("Apps · SLOP",
                  body + _PILL_POLL + f"<script>{_APPFRAME_JS}</script>", xl=True)
+
+
+def _require_platform_admin(request: Request):
+    """Administering SLOP is its own privilege, deliberately separate from being an
+    administrator of every app. Today every superuser is one (migrate_rbac says so),
+    but the two are now distinct columns rather than one word, so a platform
+    administrator can exist who administers nobody's apps and an app administrator
+    can exist who cannot grant themselves more."""
+    sess = _current(request)
+    if not sess:
+        return None, RedirectResponse("/login?" + urlencode({"next": "/admin/access"}),
+                                      status_code=302)
+    u = _get_user(sess["username"])
+    if not u or not (u["platform_admin"] or u["role"] == "superuser"):
+        return None, HTMLResponse(_page("Forbidden", "<h1>Forbidden</h1>"
+                                        "<p class=sub>Platform administrator access required. "
+                                        "<a href='/account'>Your account &rarr;</a></p>"),
+                                  status_code=403)
+    return sess, None
+
+
+def _app_label(key: str) -> str:
+    return _APP_ADMIN.get(key, (key.title(),))[0]
+
+
+def _access_page(sess: sqlite3.Row, msg: str = "", kind: str = "ok", csrf: str = "") -> str:
+    hidden = _hidden_csrf(csrf)
+    enforced = rbac_enforced()
+    orgs = list_orgs()
+    groups = list_groups()
+    grants = list_grants()
+    with _db() as c:
+        users = [r["username"] for r in
+                 c.execute("SELECT username FROM users ORDER BY username").fetchall()]
+
+    def opts(values, selected=None, labels=None):
+        out = []
+        for v in values:
+            lab = (labels or {}).get(v, v)
+            sel = " selected" if v == selected else ""
+            out.append(f"<option value='{escape(str(v))}'{sel}>{escape(str(lab))}</option>")
+        return "".join(out)
+
+    # ---- the switch, and what flipping it would cost ----------------------
+    report = access_report()
+    losing = [r for r in report if r["loses"]]
+    if enforced:
+        state = ("<p class=sub><b>Per-app grants are in force.</b> An account reaches an app "
+                 "only where it has been granted a role.</p>")
+        button = (f"<form method=post action='/admin/access/enforce'>{hidden}"
+                  "<input type=hidden name=on value='0'>"
+                  "<button type=submit>Stop enforcing</button></form>")
+    else:
+        state = ("<p class=sub><b>Not in force yet.</b> Every signed-in account still reaches "
+                 "every app at its single global role, exactly as before. Grants below are "
+                 "recorded and resolved, but nothing is refused until this is switched on.</p>")
+        if losing:
+            rows = "".join(
+                "<tr><td>%s</td><td>%s</td><td>%s</td></tr>"
+                % (escape(r["username"]), escape(ROLE_LABELS.get(r["role"], r["role"])),
+                   escape(", ".join(_app_label(a) for a in r["loses"])))
+                for r in losing)
+            state += ("<p class=sub style='color:var(--err)'><b>Switching on would remove access "
+                      f"for {len(losing)} account(s)</b> &mdash; named here rather than discovered "
+                      "by them at a 403. Grant what they should keep first.</p>"
+                      "<table class=rep><tr><th>Account</th><th>Role today</th>"
+                      "<th>Would lose</th></tr>" + rows + "</table>")
+        else:
+            state += ("<p class=sub style='color:var(--ok)'>Every account already holds a grant "
+                      "for every app it can reach today, so switching on removes nothing.</p>")
+        button = (f"<form method=post action='/admin/access/enforce'>{hidden}"
+                  "<input type=hidden name=on value='1'>"
+                  "<button type=submit class=danger>Switch on per-app grants</button></form>")
+
+    # ---- grants ----------------------------------------------------------
+    grows = ""
+    for g in grants:
+        where = escape(g["org_name"]) if g["org_name"] else "<i>every organization</i>"
+        what = "<i>every app</i>" if g["app"] == ANY_APP else escape(_app_label(g["app"]))
+        grows += ("<tr><td>%s <span class=pill>%s</span></td><td>%s</td><td>%s</td>"
+                  "<td>%s</td><td><form method=post action='/admin/access/grants/%d/revoke'>"
+                  "%s<button type=submit class=danger>Revoke</button></form></td></tr>"
+                  % (escape(g["subject"]), escape(g["subject_kind"]), what, where,
+                     escape(ROLE_LABELS.get(g["role"], g["role"])), g["id"], hidden))
+    if not grows:
+        grows = "<tr><td colspan=5 class=sub>No grants yet.</td></tr>"
+
+    subj_opts = ("<optgroup label='Users'>" + opts(users) + "</optgroup>"
+                 + ("<optgroup label='Groups'>"
+                    + opts(["group:" + g["name"] for g in groups],
+                           labels={"group:" + g["name"]: g["name"] for g in groups})
+                    + "</optgroup>" if groups else ""))
+    org_opts = "<option value=''>every organization</option>" + opts(
+        [str(o["id"]) for o in orgs], labels={str(o["id"]): o["name"] for o in orgs})
+    app_opts = ("<option value='%s'>every app</option>" % ANY_APP) + opts(
+        list(APPS), labels={a: _app_label(a) for a in APPS})
+
+    grant_form = (
+        f"<form method=post action='/admin/access/grants' class=gf>{hidden}"
+        f"<label>Who<select name=subject required>{subj_opts}</select></label>"
+        f"<label>App<select name=app>{app_opts}</select></label>"
+        f"<label>Organization<select name=org_id>{org_opts}</select></label>"
+        f"<label>Role<select name=role>{opts(list(ROLES), labels=ROLE_LABELS)}</select></label>"
+        "<button type=submit>Grant</button></form>")
+
+    # ---- organizations ---------------------------------------------------
+    orows = "".join(
+        "<tr><td>%s</td><td><form method=post action='/admin/access/orgs/%d/delete'>%s"
+        "<button type=submit class=danger>Delete</button></form></td></tr>"
+        % (escape(o["name"]), o["id"], hidden) for o in orgs)
+    if not orows:
+        orows = ("<tr><td colspan=2 class=sub>No organizations yet. Until there is one, a grant "
+                 "applies everywhere.</td></tr>")
+
+    # ---- groups ----------------------------------------------------------
+    rrows = ""
+    for gr in groups:
+        mem = group_members(gr["id"])
+        chips = "".join(
+            "<span class=pill>%s <form method=post style='display:inline' "
+            "action='/admin/access/groups/%d/members/remove'>%s"
+            "<input type=hidden name=username value='%s'>"
+            "<button type=submit class=x title='Remove'>&times;</button></form></span>"
+            % (escape(m), gr["id"], hidden, escape(m)) for m in mem)
+        addable = [u for u in users if u not in mem]
+        add = ("<form method=post action='/admin/access/groups/%d/members' style='display:inline'>"
+               "%s<select name=username>%s</select><button type=submit>Add</button></form>"
+               % (gr["id"], hidden, opts(addable))) if addable else "<span class=sub>everyone</span>"
+        rrows += ("<tr><td>%s</td><td>%s %s</td>"
+                  "<td><form method=post action='/admin/access/groups/%d/delete'>%s"
+                  "<button type=submit class=danger>Delete</button></form></td></tr>"
+                  % (escape(gr["name"]), chips or "<span class=sub>empty</span>", add,
+                     gr["id"], hidden))
+    if not rrows:
+        rrows = "<tr><td colspan=3 class=sub>No groups yet.</td></tr>"
+
+    banner = f"<p class='msg {escape(kind)}'>{escape(msg)}</p>" if msg else ""
+    return _page("Administration · Access",
+        "<div class=top><h1>Administration &middot; Access</h1>"
+        f"<span class=pill>{escape(sess['username'])} &middot; platform admin</span></div>"
+        + _admin_nav("access")
+        + banner
+        + "<section><h2>Per-app access</h2>" + state + button + "</section>"
+        + "<section><h2>Grants</h2>"
+          "<p class=sub>A role in one app, optionally in one organization. The most "
+          "privileged grant that matches wins, whether it reached the account directly "
+          "or through a group.</p>"
+        + grant_form
+        + "<table class=rep><tr><th>Who</th><th>App</th><th>Organization</th><th>Role</th>"
+          "<th></th></tr>" + grows + "</table></section>"
+        + "<section><h2>Organizations</h2>"
+          "<p class=sub>Who the work belongs to. Owned here rather than inside one app, "
+          "which is where it used to live.</p>"
+          f"<form method=post action='/admin/access/orgs' class=gf>{hidden}"
+          "<label>Name<input name=name required maxlength=64></label>"
+          "<button type=submit>Add organization</button></form>"
+        + "<table class=rep><tr><th>Organization</th><th></th></tr>" + orows + "</table></section>"
+        + "<section><h2>Groups</h2>"
+          "<p class=sub>Grant to a group and every member holds it. Removing someone from "
+          "the group removes the access with them.</p>"
+          f"<form method=post action='/admin/access/groups' class=gf>{hidden}"
+          "<label>Name<input name=name required maxlength=64></label>"
+          "<button type=submit>Add group</button></form>"
+        + "<table class=rep><tr><th>Group</th><th>Members</th><th></th></tr>"
+        + rrows + "</table></section>")
+
+
+def _access_guard(request: Request, csrf: str):
+    """Shared: platform admin + origin + CSRF. Returns (sess, tok, error)."""
+    sess, err = _require_platform_admin(request)
+    if err:
+        return None, "", err
+    tok = _csrf_token(request)
+    if not _origin_ok(request):
+        return None, tok, _csrf_html(_access_page(sess, "Request blocked (bad origin).",
+                                                  "err", csrf=tok), tok, 403)
+    if not _csrf_ok(request, csrf):
+        return None, tok, _csrf_html(_access_page(sess, "Request blocked (bad or missing token).",
+                                                  "err", csrf=tok), tok, 403)
+    return sess, tok, None
+
+
+@app.get("/admin/access", response_class=HTMLResponse)
+def admin_access_get(request: Request):
+    sess, err = _require_platform_admin(request)
+    if err:
+        return err
+    tok = _csrf_token(request)
+    return _csrf_html(_access_page(sess, csrf=tok), tok)
+
+
+@app.post("/admin/access/enforce")
+def admin_access_enforce(request: Request, on: str = Form("0"), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    want = on == "1"
+    _set_setting("rbac_enforced", "1" if want else "0")
+    if want:
+        n = len([r for r in access_report() if r["loses"]])
+        note = ("Per-app grants are now in force." if not n else
+                f"Per-app grants are now in force. {n} account(s) lost access to at least "
+                f"one app and will be told so by name when they try to open it.")
+    else:
+        note = "Per-app grants are no longer enforced; every account reaches every app again."
+    return _csrf_html(_access_page(sess, note, "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/grants")
+def admin_access_grant(request: Request, subject: str = Form(...), app: str = Form(ANY_APP),
+                       role: str = Form(...), org_id: str = Form(""), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    kind, name = ("group", subject[6:]) if subject.startswith("group:") else ("user", subject)
+    try:
+        set_grant(kind, name, app, role, int(org_id) if org_id.strip() else None)
+    except (ValueError, TypeError) as e:
+        return _csrf_html(_access_page(sess, str(e), "err", csrf=tok), tok, 400)
+    return _csrf_html(_access_page(
+        sess, f"{name} is now {ROLE_LABELS.get(role, role)} on "
+              f"{'every app' if app == ANY_APP else _app_label(app)}.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/grants/{grant_id}/revoke")
+def admin_access_revoke(request: Request, grant_id: int, csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    revoke_grant(grant_id)
+    return _csrf_html(_access_page(sess, "Grant revoked.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/orgs")
+def admin_access_org_add(request: Request, name: str = Form(...), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    name = name.strip()
+    if not _USERNAME_RE.match(name):
+        return _csrf_html(_access_page(
+            sess, "Organization name must be 1-64 chars: letters, digits, dot, dash or "
+                  "underscore.", "err", csrf=tok), tok, 400)
+    create_org(name)
+    return _csrf_html(_access_page(sess, f"Added '{name}'.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/orgs/{org_id}/delete")
+def admin_access_org_del(request: Request, org_id: int, csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    delete_org(org_id)
+    return _csrf_html(_access_page(
+        sess, "Organization deleted, with the grants that named it.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/groups")
+def admin_access_group_add(request: Request, name: str = Form(...), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    name = name.strip()
+    if not _USERNAME_RE.match(name):
+        return _csrf_html(_access_page(
+            sess, "Group name must be 1-64 chars: letters, digits, dot, dash or underscore.",
+            "err", csrf=tok), tok, 400)
+    create_group(name)
+    return _csrf_html(_access_page(sess, f"Added group '{name}'.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/groups/{group_id}/delete")
+def admin_access_group_del(request: Request, group_id: int, csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    delete_group(group_id)
+    return _csrf_html(_access_page(
+        sess, "Group deleted, with its grants.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/groups/{group_id}/members")
+def admin_access_group_add_member(request: Request, group_id: int,
+                                  username: str = Form(...), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    try:
+        add_group_member(group_id, username.strip())
+    except ValueError as e:
+        return _csrf_html(_access_page(sess, str(e), "err", csrf=tok), tok, 400)
+    return _csrf_html(_access_page(sess, f"Added {username}.", "ok", csrf=tok), tok)
+
+
+@app.post("/admin/access/groups/{group_id}/members/remove")
+def admin_access_group_del_member(request: Request, group_id: int,
+                                  username: str = Form(...), csrf: str = Form("")):
+    sess, tok, err = _access_guard(request, csrf)
+    if err:
+        return err
+    remove_group_member(group_id, username.strip())
+    return _csrf_html(_access_page(
+        sess, f"Removed {username}, and the access the group gave them.", "ok", csrf=tok), tok)
 
 
 @app.get("/admin/apps", response_class=HTMLResponse)

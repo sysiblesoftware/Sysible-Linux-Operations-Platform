@@ -70,6 +70,10 @@
 			request_header -X-Sysible-User
 			request_header -X-Sysible-Role
 			request_header -X-Sysible-Auth
+			# A client must not be able to claim which app it is asking about: the
+			# IdP decides the role per app, so asserting "I am asking about
+			# /visualizer" while fetching /controller would pick the wrong grant.
+			request_header -X-Sysible-App
 
 			# 2) Ask the IdP whether this browser is signed in. On 401/403 bounce to
 			#    the portal login with next= back to where they were headed. {uri}
@@ -79,6 +83,13 @@
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
 				copy_headers X-Sysible-User X-Sysible-Role
+				# WHICH APP is being asked about. A role is granted per app, so the
+				# IdP cannot answer "may this person in?" without it. {args[0]} is the
+				# mount prefix ("/controller") and the IdP strips the leading slash.
+				# Stamped on the auth subrequest explicitly rather than inferred from
+				# X-Forwarded-Uri: that is a forward_auth default, not something this
+				# file states, and the answer decides access.
+				header_up X-Sysible-App {args[0]}
 				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
 				# subrequest, so a websocket upgrade sent `Connection: Upgrade` and
 				# `Upgrade: websocket` to the IdP's plain /auth/verify route. uvicorn
@@ -169,9 +180,20 @@
 			request_header -X-Sysible-User
 			request_header -X-Sysible-Role
 			request_header -X-Sysible-Auth
+			# A client must not be able to claim which app it is asking about: the
+			# IdP decides the role per app, so asserting "I am asking about
+			# /visualizer" while fetching /controller would pick the wrong grant.
+			request_header -X-Sysible-App
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
 				copy_headers X-Sysible-User X-Sysible-Role
+				# WHICH APP is being asked about. A role is granted per app, so the
+				# IdP cannot answer "may this person in?" without it. {args[0]} is the
+				# mount prefix ("/controller") and the IdP strips the leading slash.
+				# Stamped on the auth subrequest explicitly rather than inferred from
+				# X-Forwarded-Uri: that is a forward_auth default, not something this
+				# file states, and the answer decides access.
+				header_up X-Sysible-App {args[0]}
 				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
 				# subrequest, so a websocket upgrade sent `Connection: Upgrade` and
 				# `Upgrade: websocket` to the IdP's plain /auth/verify route. uvicorn
@@ -443,6 +465,10 @@ sysible.slop {
 			request_header -X-Sysible-User
 			request_header -X-Sysible-Role
 			request_header -X-Sysible-Auth
+			# A client must not be able to claim which app it is asking about: the
+			# IdP decides the role per app, so asserting "I am asking about
+			# /visualizer" while fetching /controller would pick the wrong grant.
+			request_header -X-Sysible-App
 			forward_auth {$SLOP_IDP_UPSTREAM:idp:8080} {
 				uri /auth/verify
 				# WEBSOCKETS. forward_auth copies the CLIENT's headers onto the auth
