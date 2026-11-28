@@ -30,6 +30,29 @@
 # builds through sysiblectl, so it inherits it. Left empty by a bare
 # `docker compose up`, and a console with no revision says "version unknown"
 # rather than inventing one.
+# PIN THE PROJECT NAME. Without this compose derives it from the DIRECTORY, while
+# every service below pins `container_name:` -- and a pinned name is global to the
+# daemon, not scoped to a project. Starting the stack from a different directory
+# therefore does not adopt the running one, it FORKS it: compose finds none of its
+# own containers, creates a second set of data volumes, and then collides:
+#
+#     Volume "<dir>_connect-data"  Created        <- a fresh, empty volume
+#     Container sysible-connect  Creating         <- "Creating", not "Recreate"
+#     Error response from daemon: Conflict. The container name "/sysible-connect"
+#     is already in use by container "12c88950b2d6...".
+#
+# Reported from a real host, and the same split is why Administration showed
+# "No container" for three apps that were running, and why a SLEP container could
+# be inspected with an empty /data/projects while Terraform quoted real line
+# numbers out of a project directory. Two stacks; the work in the other one's
+# volumes.
+#
+# The value is the canonical checkout's directory name, so this is a no-op for a
+# host already there and keeps its existing volumes. A host whose directory
+# differs now gets refused by the updater's preflight, which names the other
+# project and its volumes, instead of silently building a second platform.
+name: sysible-linux-operations-platform
+
 services:
   idp:
     build:
