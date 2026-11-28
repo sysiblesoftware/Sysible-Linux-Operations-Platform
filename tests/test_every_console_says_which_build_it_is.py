@@ -152,3 +152,63 @@ def test_the_portal_asks_the_idp_which_build_it_is():
     assert "me.rev" in js, "the portal never reads the revision from /auth/me"
     idp = (REPO / "idp" / "app.py").read_text(encoding="utf-8")
     assert '"rev": _REV' in idp, "/auth/me does not report the build"
+
+
+# ---------------------------------------------------------------------------
+# THE SPAs MUST ACTUALLY ASK, AND ACTUALLY SHOW.
+#
+# Everything above this line checks the build is AVAILABLE: the Dockerfile takes
+# the revision, build_info reports it, the console's ui.py renders a chip. For
+# the three React consoles that covered the Dockerfile and the endpoint and
+# stopped there — so Connect served /version from the day the feature shipped
+# and no screen ever asked for it. SLEP and the Controller both displayed
+# theirs; Connect alone was silent, and every test was green.
+#
+# That is the same gap this codebase keeps hitting: a symbol being present in
+# the source is not the same as it being reached. Found by a QA sweep looking
+# for routes nothing in the UI references.
+_SPA_SRC = {
+    "slep": "apps/slep/webgui/frontend/src",
+    "connect": "apps/connect/webgui/frontend/src",
+    "controller": "apps/controller/webgui/frontend/src",
+}
+
+
+def _spa_text(app):
+    root = REPO / _SPA_SRC[app]
+    return "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                     for p in root.rglob("*.js*"))
+
+
+@pytest.mark.parametrize("app", sorted(_SPA_SRC))
+def test_the_spa_asks_its_backend_which_build_it_is(app):
+    """Serving /version is half a feature. Something has to call it."""
+    text = _spa_text(app)
+    assert re.search(r"""api\(\s*['"]version['"]|/api/version|controllerVersion""", text), (
+        "%s never asks its backend which build it is, so the endpoint it serves "
+        "is answered to nobody" % app)
+
+
+# What "rendered" means for each, because they render it differently: SLEP and
+# Connect put a chip in the chrome, the Controller prints it in Settings. Named
+# per app so the assertion is about JSX that is USED, not a component that merely
+# exists — the first version of this test passed against a BuildChip that had
+# been defined, renamed and never placed, which is the exact mistake it was
+# written to catch.
+_SPA_RENDERS = {
+    "slep": r"<BuildChip\b",
+    "connect": r"<BuildChip\b",
+    # the OUTER guard, not an inner expression: `{ver.version && ...}` survives
+    # inside a block whose own condition has been turned off, so matching it
+    # would pass against a build nothing can display.
+    "controller": r"\{ver && \(",
+}
+
+
+@pytest.mark.parametrize("app", sorted(_SPA_SRC))
+def test_the_spa_renders_what_it_asked_for(app):
+    """...and something has to put the answer on SCREEN. Fetching it into a
+    state variable nothing reads is the same silence with more code."""
+    text = _spa_text(app)
+    assert re.search(_SPA_RENDERS[app], text), (
+        "%s fetches its build but no JSX renders it" % app)

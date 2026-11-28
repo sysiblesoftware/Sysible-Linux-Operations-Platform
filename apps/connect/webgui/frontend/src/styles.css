@@ -340,3 +340,11 @@ a, .link { color: var(--accent2); }
 .file-name { flex: 1; text-align: left; background: transparent; border: 0; color: var(--text);
   cursor: pointer; font: inherit; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-name:hover { color: var(--accent); }
+
+/* Which build this Connect is, under the sidebar brand. Same rule as SLEP's,
+   verbatim: three consoles showing one piece of chrome drift the moment each
+   owns a different copy of it. */
+.build-chip{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+  letter-spacing:.02em;color:var(--faint,#6f7d92);margin:4px 0 2px;cursor:help;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.build-chip.stale{color:var(--warn,#e0a83b)}

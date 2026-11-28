@@ -23,7 +23,39 @@ const newWorkspace = (spec) => {
   return { id: 'ws' + n, name: 'Workspace ' + n, root, active: root ? root.id : null }
 }
 
+
+// WHICH CONNECT THIS IS. The /version endpoint has existed since the consoles
+// were made to say which build they are; nothing in this UI ever asked it, so
+// Connect alone stayed silent while SLEP and the Controller both answered. The
+// test that was supposed to cover this checked the Dockerfile and build_info
+// and never that an SPA RENDERS the result — the same "present in the source is
+// not the same as reached" gap that has bitten this codebase repeatedly.
+function BuildChip({ build }) {
+  if (!build) return null
+  if (build.unreachable) {
+    return <div className="build-chip" title="Could not read this instance's build.">build unknown</div>
+  }
+  const label = build.rev ? `build ${build.rev}`
+    : build.commit_short ? `source ${build.commit_short}${build.dirty ? '+' : ''}`
+    : 'version unknown'
+  const lines = [
+    build.rev ? `Built from ${build.rev}` : null,
+    build.commit_short ? `Checkout ${build.commit_short}${build.branch ? ` on ${build.branch}` : ''}${build.dirty ? ' (uncommitted changes)' : ''}` : null,
+    !build.rev && !build.commit_short ? 'This image was built without a revision, so it cannot say which commit it is running.' : null,
+    build.host ? `Host ${build.host} (pid ${build.pid})` : null,
+    build.restart_needed ? 'The code on disk has moved since this process started — it was pulled here but never restarted.' : null,
+  ].filter(Boolean)
+  return (
+    <div className={'build-chip' + (build.restart_needed ? ' stale' : '')} title={lines.join('\n')}>
+      {build.restart_needed ? '\u25B2 ' : ''}{label}
+    </div>
+  )
+}
+
 export default function Workspace({ me, onLogout }) {
+  const [build, setBuild] = useState(null)
+  useEffect(() => { api('version').then(setBuild).catch(() => setBuild({ unreachable: true })) }, [])
+
   const [spaces, setSpaces] = useState(() => [newWorkspace()])
   const [cur, setCur] = useState(0)
   const [hosts, setHosts] = useState([])
@@ -274,6 +306,7 @@ export default function Workspace({ me, onLogout }) {
     <div className="connect-shell">
       <aside className="side">
         <div className="side-brand"><Logo size={22} /> <span>Sysible <b>Connect</b></span></div>
+        <BuildChip build={build} />
 
         <div className="side-sec">Terminals</div>
         <button className="side-btn" draggable
