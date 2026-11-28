@@ -23,6 +23,7 @@ their data is gone.
 Run: pytest tests/
 """
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -270,3 +271,71 @@ def test_dry_run_changes_nothing_at_all(host):
                 if re.match(r"docker (stop|rm|volume create) ", c)
                 or "tar czf" in c or "cp -a" in c]
     assert not mutating, f"--dry-run issued mutating commands: {mutating}"
+
+
+# --------------------------------------------------------------------------
+# The repair must not need a registry.
+#
+# REPORTED from a fresh install off the new ISO. The platform was half up, the
+# gateway down, and `sysiblectl status all` correctly said why:
+#
+#     ==> Two deployments on one host
+#     ERROR: These are running from their OWN checkouts, not from the
+#            platform: controller
+#     fix: sudo .../tools/migrate-to-integrated --dry-run
+#
+# The fix it names then died on this:
+#
+#     failed to fetch anonymous token: Get "https://auth.docker.io/token?...":
+#     dial tcp: lookup auth.docker.io on 172.16.100.2:53: no such host
+#
+# because the migration passed `up -d --build` unconditionally. The ISO bakes
+# those three images and loads them at boot precisely so an install needs no
+# registry, and the repair threw that away -- leaving the host stranded
+# mid-migration, which is the one state this script exists to avoid.
+def _tool_text():
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / "tools" / "migrate-to-integrated").read_text(encoding="utf-8")
+
+
+def test_the_migration_does_not_force_a_rebuild():
+    """An update pulls new code and must rebuild. A migration moves images that
+    already exist, and forcing a build there asks a registry for base layers in
+    the middle of a repair."""
+    text = _tool_text()
+    assert "up -d --build --remove-orphans" not in text, (
+        "the migration still forces --build, so it cannot run without a registry")
+    assert "$MIG_BUILD" in text, "the build flag is no longer conditional"
+
+
+def test_it_checks_for_all_three_images_before_deciding():
+    text = _tool_text()
+    for img in ("sysible-controller:latest", "sysible-slep:latest", "sysible-connect:latest"):
+        assert img in text, "%s is never checked for" % img
+    assert "docker image inspect" in text
+
+
+def test_it_says_which_way_it_went_and_why():
+    """Silently not building would be its own mystery: an operator expecting new
+    code must be able to see that nothing was rebuilt."""
+    text = _tool_text()
+    assert "without a rebuild" in text
+    assert "needs a registry" in text
+
+
+def test_a_missing_image_still_builds():
+    """The flag is conditional, not removed. A host that genuinely has no image
+    must still be able to build one."""
+    text = _tool_text()
+    i = text.index("MIG_BUILD=\"--build\"")
+    window = text[i:i + 900]
+    assert 'MIG_BUILD=""' in window, "there is no path that keeps the build"
+    assert "MISSING" in window
+
+
+def test_the_tool_is_still_valid_shell():
+    import subprocess
+    p = subprocess.run(["bash", "-n", str(pathlib.Path(__file__).resolve().parents[1]
+                                          / "tools" / "migrate-to-integrated")],
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr

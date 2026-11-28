@@ -291,7 +291,32 @@ MIG_REV="$(git -C "$HERE" rev-parse --short=12 HEAD 2>/dev/null || true)"
 # passed as separate arguments would have run `env` on its own -- and printed
 # just that under --dry-run, which is the half of this script that is supposed
 # to show exactly what the real run does.
-run_sh "cd '$HERE' && SYSIBLE_SLOP_REV='$MIG_REV' ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d --build --remove-orphans" \
+# --build ONLY WHEN SOMETHING IS MISSING. The ISO bakes these three images and
+# loads them at boot precisely so an install needs no registry; forcing a rebuild
+# here threw that away and asked Docker Hub for base layers in the middle of a
+# repair. On a host whose resolver does not answer for it, that is:
+#
+#     failed to fetch anonymous token: Get "https://auth.docker.io/token?...":
+#     dial tcp: lookup auth.docker.io on 172.16.100.2:53: no such host
+#
+# -- reported from a fresh install, where it left the platform half-migrated and
+# the gateway down. A host part-way through a migration is the worst possible
+# moment to discover it cannot reach a registry, which is the same reasoning
+# copier_image() above already follows.
+MIG_BUILD="--build"
+MISSING=""
+for _img in sysible-controller:latest sysible-slep:latest sysible-connect:latest; do
+  docker image inspect "$_img" >/dev/null 2>&1 || MISSING="$MISSING $_img"
+done
+if [ -z "$MISSING" ]; then
+  MIG_BUILD=""
+  ok "all three app images are already here -- starting them without a rebuild"
+  ok "  (no registry is contacted; --build would need one)"
+else
+  warn "not built yet:$MISSING"
+  warn "  these have to be built, which needs a registry for the base layers"
+fi
+run_sh "cd '$HERE' && SYSIBLE_SLOP_REV='$MIG_REV' ${DC[*]} -f docker-compose.yml -f docker-compose.integrated.yml --profile integrated up -d $MIG_BUILD --remove-orphans" \
   || die "compose could not bring the platform up (the error is above).
        Nothing was deleted. '$0 --rollback' puts this host back."
 
